@@ -70,6 +70,7 @@ const ROLE_ORDER: ReadonlyArray<string> = [
   "astra",
   "reviewer",
   "code_reviewer",
+  "plan_reviewer",
   "advisor",
   "memory",
   "judge",
@@ -92,6 +93,7 @@ const FALLBACK_ORDER: ReadonlyArray<string> = [
   "astra",
   "reviewer",
   "code_reviewer",
+  "plan_reviewer",
   "memory",
   "judge",
 ];
