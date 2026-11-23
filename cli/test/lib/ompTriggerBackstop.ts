@@ -279,6 +279,9 @@ const DENSE_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     " a/rm ",
     "a/rm ",
     "./rm ",
+    "'ovnfs'  ",
+    "'ovnfs' rm ",
+    '"ovnfs"  ',
   ],
   "file-removal.md#1": ["-exec a/b ", "-exec ", " -ok x/"],
   "file-removal.md#2": ["find . ", "find . -exec ", "find -x "],
@@ -528,10 +531,23 @@ const HEAD_RUNS_FOUND: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
   ],
 };
 /**
+ * Heads and runs added to the derived pairs of a condition, for a scan shape
+ * that its dense units do not start: the `file-removal.md#0` exception for a
+ * quoted `ovnfs` walks one white-space run after the closing quote
+ * (DocksDocks/docks-kit#212).
+ */
+const HEAD_RUNS_ADDED: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
+  "file-removal.md#0": [
+    { head: "'ovnfs'", run: " " },
+    { head: '"ovnfs"', run: " " },
+  ],
+};
+/**
  * Heads and runs of the head-then-run check, by condition label: the entries
  * of `HEAD_RUNS_FOUND`, and for each other condition, its first
  * `HEAD_RUN_DERIVED_HEADS` dense units with a head word, each with each run
- * of `HEAD_RUN_RUNS`. No audit file gave entries for the other conditions.
+ * of `HEAD_RUN_RUNS`, and its entries of `HEAD_RUNS_ADDED`. No audit file
+ * gave entries for the other conditions.
  */
 const HEAD_RUNS: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
   ...Object.fromEntries(
@@ -539,10 +555,13 @@ const HEAD_RUNS: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
       .filter(([label]) => HEAD_RUNS_FOUND[label] === undefined)
       .map(([label, units]) => [
         label,
-        units
-          .filter((unit) => HEAD_WORD.test(unit))
-          .slice(0, HEAD_RUN_DERIVED_HEADS)
-          .flatMap((head) => HEAD_RUN_RUNS.map((run) => ({ head, run }))),
+        [
+          ...units
+            .filter((unit) => HEAD_WORD.test(unit))
+            .slice(0, HEAD_RUN_DERIVED_HEADS)
+            .flatMap((head) => HEAD_RUN_RUNS.map((run) => ({ head, run }))),
+          ...(HEAD_RUNS_ADDED[label] ?? []),
+        ],
       ]),
   ),
   ...HEAD_RUNS_FOUND,

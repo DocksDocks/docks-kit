@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-23 - docks-kit 0.28.2: ovnfs rm passes the file-removal rule
+
+### Fixed
+
+- The omp `file-removal` trigger rule no longer fires on `ovnfs rm <name>`
+  when `ovnfs` is quoted, as in `'ovnfs' rm <name>` or `"ovnfs" rm <name>`:
+  the rule took the closing quote for the start of a command. A bare
+  `ovnfs rm <name>` was already quiet (DocksDocks/docks-kit#212).
+
+### Added
+
+- The `workspace-hygiene` skill has an ovnfs checkout row: remove a
+  checkout that you opened with `ovnfs rm <name>` when its work is landed,
+  applied, or not needed; keep it while its pull request is open or when
+  `ovnfs rm` refuses; never use `-f` or `--force`.
+
 ## 2026-11-23 - docks-kit 0.28.1: plan-reviewer on GPT-6.2 Sol
 
 ### Changed

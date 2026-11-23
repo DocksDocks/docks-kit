@@ -4,8 +4,8 @@ description: Use when a task creates or ends with worktrees, temporary files or 
 user-invocable: false
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
-  content_hash: "f080d22cbb314f8befe352a4dafc8e2cdfbd1035c16686deec0076b56e720ada"
+  updated: "2026-11-23"
+  content_hash: "901b0ac66db520ee57440f9a4d5d0e10b89849f34bfe702f94fbd5b6bc12a28b"
 ---
 
 # Workspace hygiene
@@ -24,6 +24,7 @@ For each resource, write its path, id, port, or remote name.
 | Class | Create | Remove | Keep when |
 |---|---|---|---|
 | Git worktree | `<data>/agent-worktrees/<repo>/<name>`; reuse a worktree of the same branch | `git worktree remove -- <path>`, then `git worktree prune`; one `--force` only after the commits are on the remote and the changes are generated files | its pull request is open |
+| ovnfs checkout | `ovnfs new --name <name>` in the folder, without `--state` and without `OVNFS_STATE`, with a name that is new and unique to the task, such as the branch name; work in the path that it prints | `ovnfs rm <name>` when its work is landed, applied, or not needed; never `-f` or `--force` | its pull request is open; `ovnfs rm` refuses because the checkout holds commits that nothing else keeps; the name may no longer belong to the checkout that you opened; you opened it with `--state` or `OVNFS_STATE` |
 | Temporary file or directory | a directory from `scratch_new` or `docks-kit scratch new <label>`; each temporary file inside it; never `/tmp` | `scratch_remove`, or `docks-kit scratch remove <path>`; `gio trash` does not work on a `tmpfs` `/tmp` | a later step reads it |
 | Test artifacts (coverage, test results, traces, screenshots, videos) | inside the worktree, git-ignored | removed with the worktree; in the user's checkout, `gio trash -- <path>` | the user asked for them |
 | Server, watcher, test runner, browser | named bash service or async job; single-run tests | `write proc://<id>/kill`; outside omp, `kill <pid>` | the user asked for it |

@@ -75,6 +75,10 @@ const CASES: Record<TriggerRuleName, RuleCases> = {
       "git rm -rq -- old-dir",
       "git -C repo rm -r -- old-dir",
       "git\trm\t-r old-dir",
+      "'ovnfs' rm probe; rm x",
+      "X='ovnfs' rm x",
+      "'ovnfs' unlink x",
+      "'notovnfs' rm x",
     ],
     correct: [
       "gio trash -- build",
@@ -92,6 +96,10 @@ const CASES: Record<TriggerRuleName, RuleCases> = {
       'git rm --cached -q -- "old-dir/*"',
       "git rm -- -r",
       "git rm --cached -- -r",
+      "ovnfs rm probe",
+      "'ovnfs' rm probe",
+      '"ovnfs" rm probe',
+      "cd /x && 'ovnfs' rm probe",
     ],
     wrongCalls: [
       { tool: "bash", command: "rm -rf build", layout: "pretty" },
