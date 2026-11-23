@@ -1575,3 +1575,24 @@ The read-scope check took each `!` exclusion part of a `grep` path, such as `<sn
 - One run per case and 16 dev cases: the interval of the escaped difference comes from 4 differing cases. The run shows a recall gain of Sol on these cases, not a gain on the population (assumption S of Decisions).
 - The dev cases are not held out: earlier plans tuned the reviewer prompts on them.
 - No second judge checked the 42 `match` answers.
+
+### Addendum 2026-11-23: GPT-6.2 Sol at tier `ultrafast`
+
+The owner asked for a mini batch of `openai-codex/gpt-6.2-sol` at effort `high` and tier `ultrafast`, for its speed, tokens, and cost. It ran 8 of the 9 `code` cases of the entry above (all but `code-23-pr26`), one `C1` run each, in one batch of 8, in the same workspace (`case --extend`). The probe showed tier `ultrafast` requested and served. 3 Claude judges answered the 181 new candidate pairs and rated the findings without a match; the earlier answers stayed.
+
+On these 8 cases (Terra has 7 valid runs, because its `code-109-r1-e146` run returned `blocked`):
+
+| Measure | gpt-6.1-terra-high | gpt-6.2-sol-high | gpt-6.2-sol-high-ultrafast |
+|---|---:|---:|---:|
+| Known found | 7 in 7 runs | 13 in 8 runs | 14 in 8 runs |
+| Seconds median | 75.3 | 359.9 | 126.8 |
+| Seconds min, max | 71.3, 109.5 | 259.2, 550.8 | 98.6, 282.8 |
+| Tokens median | 569,578 | 1,342,106 | 1,383,766 |
+| Cost of the valid runs (omp `usage.cost.total`) | $1.05 | $5.04 | $29.65 |
+| Cost median per run | $0.137 | $0.628 | $3.605 |
+
+- `ultrafast` took about one third of the time of tier `default` of the same model, and about 1.7 times the time of Terra.
+- Its cost per run was about 5.7 times that of tier `default` and about 26 times that of Terra, with about the same tokens as tier `default`.
+- The known defects found differ by one between the two Sol tiers (14 and 13). The model and effort are the same, so this is run noise. Per case, `ultrafast` found one more in `code-102-r1` and `code-57-pr58` and one fewer in `code-96-r1`.
+- Wrong findings: 4 in 8 runs for `ultrafast`, 10 in 9 runs for Sol `default` on the 9 `code` cases, and 1 in 8 runs for Terra.
+- Judges: 3 dispatches, $8.50.
