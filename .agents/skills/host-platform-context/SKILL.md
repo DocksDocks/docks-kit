@@ -33,7 +33,7 @@ metadata:
       lines: "1-88"
     - path: cli/src/services.ts
       lines: "1-42"
-  updated: "2026-11-19"
+  updated: "2026-11-23"
 ---
 
 # Host Platform Layer
@@ -97,7 +97,7 @@ Output channels, change detection, the missing-dependency warn shape, and the li
 | Good | Bad | Why |
 |---|---|---|
 | `spawnHost("git", ...)` | `spawnSync("git", ...)` | A pathless name lets Windows search the current directory first; `commands/sync.ts updateNudge` starts `git` through `spawnHost` (verify, prints nothing: `git grep -n 'spawnSync("' cli/src`; verify: `bunx vitest run cli/test/unit/syncUpdateNudge.test.ts -t "runs git through spawnHost"`) |
-| `replaceFile(path, text, { mode: 0o600 })` | `writeFileSync(tmp); renameSync(tmp, path)` | The rename replaces a symlink with a regular file; `ompFastMode.ts toggleDeployedOpenAiFast` calls `replaceFile`, so a symlinked `config.yml` stays a link (verify: `bunx vitest run cli/test/unit/ompFastMode.test.ts -t "keeps a symlinked config.yml a link"`) |
+| `replaceFile(path, text, { mode: 0o600 })` | `writeFileSync(tmp); renameSync(tmp, path)` | The rename replaces a symlink with a regular file; `ompFastMode.ts toggleDeployedOpenAiTier` calls `replaceFile`, so a symlinked `config.yml` stays a link (verify: `bunx vitest run cli/test/unit/ompFastMode.test.ts -t "keeps a symlinked config.yml a link"`) |
 | `removeStaleTemporaries(dir, owns)` with an `owns` that accepts only the targets the caller writes | A sweep of `*.tmp` by age, or of every dead-PID `*.tmp` in the folder | Another tool can use the same folder and a similar name; only the writer of a target knows which temporary names are its own |
 | `p` used inside a function body in `os/windows.ts` | a top-level `p(...)` call in any `os/*.ts` module | `exec.ts` imports `./os`; `os/posix.ts` avoids importing `../exec` for this reason |
 | `stdio: ["ignore","pipe","pipe"]` before `processFailureSummary` | the default stdio | The default discards stderr, so the summary loses git's `fatal:` line |

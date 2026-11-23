@@ -26,7 +26,7 @@ exit 1.
 
 | Variable | Effect |
 |----------|--------|
-| `DOCKS_KIT_SYNC_LOCK_WAIT_MS=<ms>` | Time that `sync` and `omp --fast` wait for another sync to release a sync lock. A non-negative safe integer in milliseconds (at most `9007199254740991`); unset or empty means `120000` (120 s). Any other value prints `DOCKS_KIT_SYNC_LOCK_WAIT_MS must be a non-negative safe integer` and exits 2. |
+| `DOCKS_KIT_SYNC_LOCK_WAIT_MS=<ms>` | Time that `sync`, `omp --fast`, and `omp --ultrafast` wait for another sync to release a sync lock. A non-negative safe integer in milliseconds (at most `9007199254740991`); unset or empty means `120000` (120 s). Any other value prints `DOCKS_KIT_SYNC_LOCK_WAIT_MS must be a non-negative safe integer` and exits 2. |
 
 ## Sync lock
 
@@ -59,10 +59,11 @@ runs never write the same files at once.
 - The locks cover the folder that the kit writes into, not the target of a
   symlinked file. Two homes whose `config.yml` (or another deployed file) links
   to one shared file can still overwrite the merge of each other.
-- `docks-kit omp --fast` checks `config.yml` before it takes a lock. When the
-  file is missing, it exits 2 and creates no omp folder. Otherwise it holds the
-  sync lock and the omp agent folder lock while it rewrites `config.yml`. The
-  wait and the held line are those of a sync.
+- `docks-kit omp --fast` and `docks-kit omp --ultrafast` check `config.yml`
+  before they take a lock. When the file is missing, they exit 2 and create no
+  omp folder. Otherwise they hold the sync lock and the omp agent folder lock
+  while they rewrite `config.yml`. The wait and the held line are those of a
+  sync.
 - A run with `--dry-run`, `-h`, or `--help` takes no lock. A dry run through
   the `DRY_RUN=1` env global of the private `native-raw` engine channel takes
   no lock either.
@@ -77,6 +78,7 @@ runs never write the same files at once.
 | `--model <selector>` | Session model for this run and later runs; rejected unless the live catalog reports zero input and output cost with `pricingStatus` `free` or `unknown`; recorded in `~/.docks-kit/kit.db` (table `omp_session`) |
 | `--pick` | Interactive picker over free catalog models; records the choice the same way |
 | `--fast` | Toggle `tier.openai` between `priority` and `none` in the deployed `~/.omp/agent/config.yml`, print the change, and exit; the same tier omp's `/fast on` selects for OpenAI and Codex models |
+| `--ultrafast` | Toggle `tier.openai` between `ultrafast` and `none` in the deployed `~/.omp/agent/config.yml`, print the change, and exit; the same tier omp's `/fast ultra` selects for OpenAI and Codex models |
 
 The launcher starts omp as
 `omp launch --config <overlay> --model <selector>[:<level>]`, followed by the
@@ -100,13 +102,17 @@ to `PI_CONFIG_FILES`. See
 full policy and the paths that stay outside the launcher.
 
 The launcher changes no deployed file and never invokes `sync`, except for
-`--fast`, which changes only `tier.openai` and launches nothing. `--fast` over
-`ultrafast` selects `priority`.
+`--fast` and `--ultrafast`, which change only `tier.openai` and launch
+nothing. `--fast` over `ultrafast` selects `priority`. `--ultrafast` over
+`priority` selects `ultrafast`. Each of the two flags must be the only
+launcher flag and argument: with `--model`, `--pick`, the other flag, or a
+forwarded argument, the run exits 2 with
+`--<flag> toggles <flag> mode and exits; pass it alone`.
 The boundary opens at the first token that is neither a declared launcher
 flag nor a declared global flag. Declared flags stay with docks-kit and
 never reach omp:
 
-- `--model`, `--pick`, `--fast`
+- `--model`, `--pick`, `--fast`, `--ultrafast`
 - `--help`, `--version`, `--log-level`, `--wizard`, `--completions`
 
 The same names, except `--model`, stay reachable on omp behind an explicit

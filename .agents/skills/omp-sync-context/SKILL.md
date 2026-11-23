@@ -37,7 +37,7 @@ metadata:
       lines: "1-63"
     - path: cli/src/engine-native/ompChild.ts
       lines: "1-26"
-  updated: "2026-11-20"
+  updated: "2026-11-23"
 ---
 
 # omp Sync Context
@@ -206,7 +206,7 @@ the same sync (see `references/yaml-merge.md`).
 Set every backup file to mode `0600`.
 Replace a merged or pruned `config.yml` or `models.yml` through
 `atomicWrite.ts replaceFile` with mode `0600`. The temporary file and rename
-keep a symlinked target as a link. `ompFastMode.ts toggleDeployedOpenAiFast`
+keep a symlinked target as a link. `ompFastMode.ts toggleDeployedOpenAiTier`
 writes `config.yml` the same way.
 
 Verify the symlink rule:
@@ -244,6 +244,7 @@ resolved intercom directory, and the `ompPaths` `dataRoot`.
 - `commands/omp.ts toggleFastUnderLocks` checks `<agentDir>/config.yml` before
   any lock (`ompFastMode.ts requireDeployedConfig`). A missing file exits 2,
   and the run creates no omp folder. Otherwise it runs `docks-kit omp --fast`
+  or `--ultrafast`
   under the home sync lock and always the `agentDir` lock
   (`syncDispatch.ts withHomeAndFolderLocks`), with the wait and the held line
   of a sync.

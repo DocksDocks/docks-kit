@@ -57,6 +57,7 @@ docks-kit sync [--dry-run]                      deploy the omp SoT to this machi
 docks-kit update [--no-sync]                    self-update the kit (autodetects checkout vs global install), then sync
 docks-kit omp [--model <m>|--pick] [args...]    one omp session on a free model, nothing deployed changes
 docks-kit omp --fast                            toggle omp fast mode for OpenAI/Codex models, then exit
+docks-kit omp --ultrafast                       toggle omp ultrafast mode for OpenAI/Codex models, then exit
 docks-kit toolchain [check|ensure <tool>|outdated]  verified-version floors for external tools
 docks-kit scratch new|remove                    agent temporary files and directories
 docks-kit tidy [--apply] [--report]             remove safe agent leftovers
