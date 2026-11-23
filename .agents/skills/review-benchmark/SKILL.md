@@ -4,7 +4,7 @@ description: "Use when measuring a change to the kit reviewers in this repositor
 user-invocable: true
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
+  updated: "2026-11-23"
 ---
 
 # Review benchmark
@@ -301,6 +301,8 @@ Every other target is outside: `case.json` (it can hold the known defects of a d
 
 Before these checks, `transcripts` normalizes each local target: in the part before its first glob segment, it removes each `.` segment, each doubled `/`, and each `..` segment with the folder before it. So a read through `..`, for example `<run>/round-1/../round-2/full.diff`, counts as a read of the path that it reaches. After a glob segment, a `..` can leave the folder of the glob, so it stays outside.
 
+A `grep` path list part that starts with `!` and names no existing path is an exclusion glob: omp drops its matches below the other parts, and the part reads nothing (omp://tools/grep.md). So `transcripts` takes no target from it. A `grep` of exclusions only searches the working folder, so it gives `grep without a path`. `glob` and `ast_grep` take no exclusion part, so their parts that start with `!` stay targets.
+
 A read of a path that does not exist shows no file, so it cannot show a fix. `transcripts` marks each tool call whose tool result is an error result (`isError: true`). When each target of such a call that is not allowed is a local path that does not exist (for a glob, the folder before its first glob segment), the target goes to `readScope.missing` and not to `outside`, and it does not make the run invalid. The check reads the files when `transcripts` runs. A read without an error result, a URI, and a path that exists stay outside. The decision table counts these reads per column in `Reads of missing paths` (plan #133 lost 40 of 220 held-out code runs to such reads).
 
 A `skill://` URI of the `code-reviewer` or `plan-reviewer` skill, with or without a path after the skill name, and a file of these skills in an installed plugin copy are outside for every reviewer, and so are the `skill://` URI and the installed copy of every other skill that a measured plugin copy holds. They resolve to the installed kit release, which can be another version than the arm: a baseline reviewer then reads the instructions of another release. The own reviewer skill of a reviewer is the skill folder under its plugin root, which stays allowed. A `skill://` URI that leaves the folder of one skill with a `..` segment counts as a read of the skill that it reaches.
@@ -535,6 +537,51 @@ bun "$skill/scripts/prepare.mjs" agents --baseline-ref "$ref" --model <model> --
 5. After the last dispatch, run `bun "$skill/scripts/score.mjs" transcripts "$ws" --omp-sessions <session folder>`. Give the session folder itself: omp can write the transcripts of a nested dispatch to a subfolder (`<session>/<parent>/<parent>.<name>.jsonl`), and `transcripts` searches the session folder and all its subfolders. `transcripts` stops before it writes when a transcript fails the shape check (see omp compatibility). Run `bun "$skill/scripts/score.mjs" sample "$ws"`, and give `second-sample.json` to a second judge, which writes `judgments-second.json` (see Decisions). Then run `bun "$skill/scripts/score.mjs" report "$ws" "${keys[@]}" --configs <name,...> --reference <production configuration> --margin <m>`, with the configuration names in the column order.
 6. Do steps 3 to 5 for the dev split, then once for the held-out split. Apply the decision rule that the plan of the run fixes before any run (see Decisions) to the table `### Decision: heldout` of the held-out `report.md`. A choice of model, effort, or tier compares each configuration with the production setting: give that setting as `--reference`, and read the equivalence row.
 7. Append a new entry to `results.md` with the setup, the tables, and the decision. A check run that must not change the repository skips this entry. Then remove the generated agents and the tier overrides with `bun "$skill/scripts/prepare.mjs" clean --project "$project"`, and delete the workspaces and the `baseline-plugin`, `variant-*-plugin`, and `selfreview-*-plugin` folders next to them.
+
+## Quick comparison
+
+This section compares two code-reviewer configurations (for example two models) on three measures only: the review seconds, the known defects found, and the wrong findings. It costs 32 reviewer dispatches, two probe dispatches, and about 5 judge dispatches on another model family. It decides nothing: 16 cases with one run each are far below the sample of Decisions, so the result is information for an owner decision, not a ship decision. Use the full procedure for a reviewer prompt change.
+
+The recipe turns off the costly parts of the grid:
+
+- Cases: the dev `code` cases with known defects, then the dev `code-delta` cases with the most known defects (ties by case id), 16 cases in all. The held-out set stays unspent.
+- Arms: `C1` (one full review) on a `code` case and `Cd` on a `code-delta` case, without `--loop`. So a run has one reviewer and no fixer.
+- One run per configuration and case.
+- No manager stage, no second judge, and no `--margin`. Of the probe, dispatch only the reviewer prompts.
+
+```bash
+repo="$(git rev-parse --show-toplevel)"
+skill="$repo/.agents/skills/review-benchmark"
+bench="$(git rev-parse --path-format=absolute --git-path docks-review)/bench-<label>"; ws="$bench/dev"
+ref="$(git describe --tags --match 'cli-v*' --abbrev=0 origin/main)"
+bun "$skill/scripts/prepare.mjs" agents --baseline-ref "$ref" --model <production model>,<candidate model> \
+  --efforts <effort> --tiers default --out "$ws"
+bun "$skill/scripts/prepare.mjs" probe --out "$bench/probe"
+cd "$skill/cases/dev"
+for f in *.json; do
+  [[ $f == *.key.json ]] && continue
+  echo "$(jq -r .kind "$f") $(jq '(.known // []) | length' "$f") ${f%.json}"
+done | awk '$2 > 0 && ($1 == "code" || $1 == "code-delta")' | sort -k1,1 -k2,2nr -k3,3 |
+  awk '$1 == "code" { print; n++; next } n < 16 { print; n++ }' |
+  while read -r kind known id; do
+    arm=C1; [[ $kind == code-delta ]] && arm=Cd
+    bun "$skill/scripts/prepare.mjs" case --case "$skill/cases/dev/$id.json" --arms "$arm" --runs 1 --out "$ws"
+  done
+bun "$skill/scripts/score.mjs" names "$ws"
+```
+
+1. Dispatch the two reviewer prompts of the probe, run `transcripts` on the probe, and check the efforts, the tiers, and the model of each configuration as step 2 of Run the grid for a new model tells.
+2. Dispatch all 32 reviewer prompts in one batch of background tasks, so that both configurations run at the same load. A wait of the operator that a user message interrupts can cancel the tasks that it waits on; background tasks keep running. Save each reply as the block of its prompt (`prompts/<reviewer>.txt` gives `blocks/<reviewer>.md`).
+3. When a dispatch is cancelled, move its transcript out of the session folder before you dispatch the prompt again, because `transcripts` searches every subfolder of the session folder.
+4. Run `findings` and `pairs`. Split the cases into about 5 groups of similar size (findings plus half the candidate pairs), and dispatch one judge per group in parallel, as step 4 of Procedure tells. Tell each judge its case ids and the output file `<ws>/judgments-part-<n>.json`. Then merge the parts and run `transcripts`:
+
+   ```bash
+   jq -s '{matches: (map(.matches // []) | add), reargued: (map(.reargued // []) | add), adjudications: (map(.adjudications // []) | add)}' \
+     "$ws"/judgments-part-*.json > "$ws/judgments.json"
+   ```
+
+5. Run `bun "$skill/scripts/score.mjs" report "$ws" --configs <production>,<candidate> --reference <production>`. Read the table `### Single reviews: dev`: the seconds median, minimum, and maximum, the known defects found per run, the wrong findings per run, and the tokens. For the cost, add `usage.cost.total` of the assistant messages of the configuration model in each reviewer transcript: omp records the list-price cost of each request.
+6. Append a `results.md` entry with the table, and run step 9 of Procedure.
 
 ## Decisions
 
