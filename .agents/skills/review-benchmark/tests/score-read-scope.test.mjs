@@ -257,6 +257,27 @@ test('readScope lists each target outside the inputs of the run once, in call or
   });
   assert.deepEqual(score.readScope(reads(ownSkill), { ...scope, pluginRoots: [] }), { outside: [ownSkill] });
 });
+test('readScope ignores the exclusion parts of a grep path, which read nothing', () => {
+  const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
+  const allowed = [
+    { name: 'grep', path: `${SCOPE_CASE}/snapshot;!**/AGENTS.md;!**/CLAUDE.md` },
+    { name: 'grep', path: `${SCOPE_CASE}/snapshot/;!${SCOPE_CASE}/snapshot/docs/**` },
+    { name: 'grep', path: `${SCOPE_CASE}/snapshot/scripts; !${LIVE}/src/**` },
+  ];
+  assert.deepEqual(score.readScope(allowed, scope), { outside: [] });
+  // A grep of exclusions only searches the working directory, the live checkout. glob takes no exclusion part, so a
+  // part that starts with `!` stays a target.
+  const calls = [
+    { name: 'grep', path: '!**/AGENTS.md;!**/bun.lock' },
+    { name: 'glob', path: `${SCOPE_CASE}/snapshot/**;!**/AGENTS.md` },
+  ];
+  assert.deepEqual(score.readScope(calls, scope), { outside: ['grep without a path', '!**/AGENTS.md'] });
+  // A part that names an existing path is a search root, as omp reads it, also when it starts with `!`.
+  const live = scratch();
+  fs.writeFileSync(path.join(live, '!notes.md'), 'x\n');
+  const rooted = [{ name: 'grep', path: `${SCOPE_CASE}/snapshot;!notes.md` }];
+  assert.deepEqual(score.readScope(rooted, { ...scope, cwd: live }), { outside: ['!notes.md'] });
+});
 test('readScope refuses every skill:// read of the benchmark skill and every read inside the live benchmark folder', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN], heldSkills: [] };
   const installed = '/home/u/.omp/plugins/node_modules/docks-kit-omp/skills';

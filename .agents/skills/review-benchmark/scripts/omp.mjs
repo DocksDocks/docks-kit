@@ -67,6 +67,11 @@ export const WEB_SEARCH_TOOL = 'web_search';
 export const SEARCH_TOOLS = new Set(['grep', 'glob', 'find', 'ast_grep']);
 // The `path` of these tools takes a `;`-separated list of paths.
 export const PATH_LIST_TOOLS = new Set(['grep', 'glob', 'ast_grep']);
+// A `path` list part of these tools that starts with EXCLUSION_PREFIX, and that names no existing path, is an exclusion
+// glob: it drops matches below the other parts and reads nothing; a list of exclusions only searches the working
+// directory (omp://tools/grep.md, Modes, multiple explicit paths).
+export const EXCLUSION_TOOLS = new Set(['grep']);
+export const EXCLUSION_PREFIX = '!';
 
 // The reply rule: a task agent replies with the text of its last assistant message. An agent that has the tool
 // REPLY_TOOL (an agent with an output schema, or `task.structured: true`) replies with the arguments of its last call

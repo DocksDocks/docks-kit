@@ -1525,3 +1525,53 @@ Code-review round 1 of plan #146 found defects in the draw rules of `escapes.mjs
 - Seeded share of the held-out `code-reviewer` cases with known defects: 22 of 48 (0.46), the 8 earlier seeded cases and the 14 of this plan. The `plan-reviewer` share is unchanged: no plan case is seeded, and the report gives `-` while the 44 earlier plan cases do not carry `seeded`.
 - The C9 limit extends to this draw: the candidates of the first and second draws were read before the rule fixes of round 1, so this draw also does not keep the full rule that no candidate is read before the draw is fixed. No reviewer ran on a candidate, and no unit was chosen by its outcome.
 - Acceptance A4 now extracts the scripts of the draw script commit of the manifest with `git archive` and runs them with `--commit`, so it reproduces the frozen part with the code that drew it. On the third draw it printed the frozen part byte for byte, and the frozen record hash matched the manifest.
+
+## Run 2026-11-23: quick comparison of GPT-6.2 Sol and GPT-6.1 Terra (plan #156)
+
+The owner asked for a small comparison of the code reviewer on time, known defects found, and wrong findings, as a base for a possible move of the `reviewer` role from `openai-codex/gpt-6.1-terra:high` to `openai-codex/gpt-6.2-sol:high`. This run is the first use of the Quick comparison section of `SKILL.md`. It decides nothing (see that section).
+
+### Setup
+
+- Configurations: `openai-codex/gpt-6.1-terra` and `openai-codex/gpt-6.2-sol`, effort `high`, tier `default`. Baseline ref `cli-v0.27.1`; the candidate code-reviewer agent of the working tree for both. omp 19.1.1, newer than the verified 19.0.0, so the probe ran: both configurations served `high` and `default` on the configured model.
+- Cases: 16 dev cases, 48 known defects: the 9 `code` cases with known defects (arm `C1`, one full review) and the 7 `code-delta` cases with the most known defects (arm `Cd`). One run per configuration, no loop, no manager, no second judge.
+- Dispatch: two waves of 8, then a wave of 8 that a user message interrupted (4 Terra reviews finished, 4 Sol reviews were cancelled after 4 m 26 s), then one batch of the last 12. The load was not the same for every run, so the seconds are rough. The transcripts of the cancelled dispatches went out of the session folder before the new dispatches.
+- Judges: 5 Claude task agents on disjoint case groups, merged into one `judgments.json` (281 candidate pairs, 143 ratings). Two judges ran a listing command against the rule of `references/judge.md`; one listing showed the arm folder names of its cases. The finding ids stayed opaque.
+
+### Defect that the run found
+
+The read-scope check took each `!` exclusion part of a `grep` path, such as `<snapshot>;!**/AGENTS.md`, as a read outside the inputs. omp reads such a part as an exclusion glob, which reads nothing (omp://tools/grep.md). The check made 5 of 16 Sol runs invalid. plan #135 and the 2026-11-05 run lost runs to the same cause. `score.mjs` now takes no target from an exclusion part (`isExclusion`, with the omp fact `EXCLUSION_TOOLS` in `omp.mjs`). A grep of exclusions only still counts as `grep without a path`. A unit test in `score-read-scope.test.mjs` covers both rules and a `!` part that names an existing path. The tables below come from the fixed scorer.
+
+### Results (`report --configs gpt-6.1-terra-high,gpt-6.2-sol-high --reference gpt-6.1-terra-high`)
+
+| Measure | gpt-6.1-terra-high | gpt-6.2-sol-high |
+|---|---:|---:|
+| Valid runs | 15 | 15 |
+| Known found per run | 1.07 | 1.40 |
+| Escaped per 50 known | 32.61 | 27.17 |
+| Escaped per 50 known difference, 90% interval | - | [-10.23, -2.56] |
+| Cases with an escaped difference | - | 4 (all in favor of Sol) |
+| Valid extras per run | 1.53 | 6.67 |
+| Wrong findings / runs | 2 / 15 | 12 / 15 |
+| Wrong findings more than Terra, one-sided exact Poisson p | - | 0.0065 |
+| Unknown ratings / runs | 0 / 15 | 3 / 15 |
+| Seconds median | 71.3 | 340.1 |
+| Seconds min, max | 30.0, 109.5 | 148.0, 550.8 |
+| Tokens median | 381,129 | 1,107,989 |
+| Cost per valid run (omp `usage.cost.total`) | $0.111 | $0.528 |
+
+- Invalid runs: `code-109-r1-e146` of Terra returned `Code-review: blocked`; `code-109-r3-d115` of Sol ran a grep without a path.
+- Sol found more known defects in 4 of the 14 shared cases with known defects (`code-100-r3-d115`, `code-102-r1`, `code-89`, `code-96-r1`) and fewer in none. On the 16 cases, Terra found 16 known defects and Sol 21 in their valid runs.
+- Sol took about 4.8 times the median seconds, 2.9 times the median tokens, and 4.8 times the cost of Terra. It gave 6 times the wrong findings per run.
+- Terra returned `pass` on 13 of its 15 valid runs, also on cases where it listed MEDIUM findings. Sol returned `fixes-required` on 8 of 15.
+
+### Cost
+
+- Reviewer dispatches: 32, plus 2 probe dispatches and 8 cancelled dispatches ($1.95). Reviewer cost: Terra $1.78 and Sol $8.38 for 16 runs each, at omp list prices.
+- Judges: 5 dispatches, $13.74, on the Anthropic subscription.
+- Wall time: about 45 minutes from the probe to the report, including the two interrupts. The judges took 9 minutes of it.
+
+### Limits
+
+- One run per case and 16 dev cases: the interval of the escaped difference comes from 4 differing cases. The run shows a recall gain of Sol on these cases, not a gain on the population (assumption S of Decisions).
+- The dev cases are not held out: earlier plans tuned the reviewer prompts on them.
+- No second judge checked the 42 `match` answers.

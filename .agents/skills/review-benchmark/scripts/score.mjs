@@ -18,6 +18,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parsePlan } from '../../../../cli/src/plan/records.ts';
 import { parseReviewComment } from '../../../../cli/src/plan/reviews.ts';
 import {
+  EXCLUSION_PREFIX,
+  EXCLUSION_TOOLS,
   INSTALLED_SKILL_ROOTS,
   PATH_LIST_TOOLS,
   READ_TOOL,
@@ -3396,9 +3398,26 @@ const withoutSelector = (target) => {
 };
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
-// (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector.
-function pathTargets(name, value) {
-  return (PATH_LIST_TOOLS.has(name) ? value.split(';') : [value]).map((part) => part.trim()).filter(Boolean);
+// (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector. An exclusion
+// part (see isExclusion) reads nothing, so it gives no target. A list of exclusions only searches the working
+// directory (see readScope).
+function pathTargets(name, value, cwd) {
+  if (!PATH_LIST_TOOLS.has(name)) return [value.trim()].filter(Boolean);
+  return value
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part && !isExclusion(name, part, cwd));
+}
+
+// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX and names no existing path is an
+// exclusion glob, as omp reads it. Without a working directory, a relative part cannot be checked, so it stays a target.
+function isExclusion(name, part, cwd) {
+  return (
+    EXCLUSION_TOOLS.has(name) &&
+    part.startsWith(EXCLUSION_PREFIX) &&
+    typeof ompFile(part, cwd) === 'string' &&
+    !ompPathExists(part, cwd)
+  );
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -3523,7 +3542,7 @@ function readLists({ calls, results }, cwd) {
     const value = call.arguments?.path;
     if (typeof value !== 'string') continue;
     const recorded = call.name === READ_TOOL ? recordedParts(results.get(call.id)?.details) : null;
-    for (const target of pathTargets(call.name, value)) {
+    for (const target of pathTargets(call.name, value, cwd)) {
       const parts = recorded ?? delimitedParts(target, cwd);
       if (parts !== null) lists.set(target, distinct([...(lists.get(target) ?? []), ...parts.map(withoutSelector)]));
     }
@@ -3793,14 +3812,15 @@ export function readScope(
       for (const url of cited) if (!webPageAllowed(url)) outside.add(`${WEB_SEARCH_TOOL} result: ${url}`);
       continue;
     }
-    if (typeof value !== 'string' || !value.trim()) {
+    const targets = typeof value === 'string' ? pathTargets(name, value, cwd) : [];
+    if (!targets.length) {
       if (SEARCH_TOOLS.has(name)) outside.add(`${name} without a path`);
       continue;
     }
     const refuse = (target, refused) =>
       (error && refused.every((part) => pathMissing(part, cwd)) ? missing : outside).add(target);
     const searches = SEARCH_TOOLS.has(name);
-    for (const target of pathTargets(name, value)) {
+    for (const target of targets) {
       const parts = lists.get(target);
       if (parts !== undefined) {
         const refused = parts.filter((part) => !targetAllowed(part, cwd, rules, searches));
