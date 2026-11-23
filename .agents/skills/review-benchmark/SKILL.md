@@ -540,19 +540,26 @@ bun "$skill/scripts/prepare.mjs" agents --baseline-ref "$ref" --model <model> --
 
 ## Quick comparison
 
-This section compares two code-reviewer configurations (for example two models) on three measures only: the review seconds, the known defects found, and the wrong findings. It costs 32 reviewer dispatches, two probe dispatches, and about 5 judge dispatches on another model family. It decides nothing: 16 cases with one run each are far below the sample of Decisions, so the result is information for an owner decision, not a ship decision. Use the full procedure for a reviewer prompt change.
+This section compares two configurations of one reviewer (for example two models of `code-reviewer` or of `plan-reviewer`) on three measures only: the review seconds, the known defects found, and the wrong findings. It costs 32 reviewer dispatches, two probe dispatches, and about 5 judge dispatches on another model family. It decides nothing: 16 cases with one run each are far below the sample of Decisions, so the result is information for an owner decision, not a ship decision. Use the full procedure for a reviewer prompt change.
 
 The recipe turns off the costly parts of the grid:
 
-- Cases: the dev `code` cases with known defects, then the dev `code-delta` cases with the most known defects (ties by case id), 16 cases in all. The held-out set stays unspent.
-- Arms: `C1` (one full review) on a `code` case and `Cd` on a `code-delta` case, without `--loop`. So a run has one reviewer and no fixer.
+- Cases: the dev full-review cases with known defects, then the dev delta cases with the most known defects (ties by case id), 16 cases in all. The held-out set stays unspent.
+- Arms, without `--loop`, so a run has one reviewer and no fixer:
+
+  | Reviewer | Full-review kind and arm | Delta kind and arm |
+  |---|---|---|
+  | `code-reviewer` | `code`, `C1` (one full review) | `code-delta`, `Cd` |
+  | `plan-reviewer` | `plan`, `P1` | `plan-delta`, `Pd` |
+
 - One run per configuration and case.
 - No manager stage, no second judge, and no `--margin`. Of the probe, dispatch only the reviewer prompts.
 
 ```bash
 repo="$(git rev-parse --show-toplevel)"
 skill="$repo/.agents/skills/review-benchmark"
-bench="$(git rev-parse --path-format=absolute --git-path docks-review)/bench-<label>"; ws="$bench/dev"
+bench="$(git rev-parse --path-format=absolute --git-path docks-review)/bench-<label>"; ws="$bench/<code or plan>"
+full=code; delta=code-delta; full_arm=C1; delta_arm=Cd   # plan-reviewer: full=plan; delta=plan-delta; full_arm=P1; delta_arm=Pd
 ref="$(git describe --tags --match 'cli-v*' --abbrev=0 origin/main)"
 bun "$skill/scripts/prepare.mjs" agents --baseline-ref "$ref" --model <production model>,<candidate model> \
   --efforts <effort> --tiers default --out "$ws"
@@ -561,16 +568,16 @@ cd "$skill/cases/dev"
 for f in *.json; do
   [[ $f == *.key.json ]] && continue
   echo "$(jq -r .kind "$f") $(jq '(.known // []) | length' "$f") ${f%.json}"
-done | awk '$2 > 0 && ($1 == "code" || $1 == "code-delta")' | sort -k1,1 -k2,2nr -k3,3 |
-  awk '$1 == "code" { print; n++; next } n < 16 { print; n++ }' |
+done | awk -v full="$full" -v delta="$delta" '$2 > 0 && ($1 == full || $1 == delta)' | sort -k1,1 -k2,2nr -k3,3 |
+  awk -v full="$full" '$1 == full { print; n++; next } n < 16 { print; n++ }' |
   while read -r kind known id; do
-    arm=C1; [[ $kind == code-delta ]] && arm=Cd
+    arm=$full_arm; [[ $kind == "$delta" ]] && arm=$delta_arm
     bun "$skill/scripts/prepare.mjs" case --case "$skill/cases/dev/$id.json" --arms "$arm" --runs 1 --out "$ws"
   done
 bun "$skill/scripts/score.mjs" names "$ws"
 ```
 
-1. Dispatch the two reviewer prompts of the probe, run `transcripts` on the probe, and check the efforts, the tiers, and the model of each configuration as step 2 of Run the grid for a new model tells.
+1. Dispatch the reviewer prompts of the probe, run `transcripts` on the probe, and check the efforts, the tiers, and the model of each configuration as step 2 of Run the grid for a new model tells. The probe uses the code agents; a plan agent of the same configuration has the same model, effort, and tier.
 2. Dispatch all 32 reviewer prompts in one batch of background tasks, so that both configurations run at the same load. A wait of the operator that a user message interrupts can cancel the tasks that it waits on; background tasks keep running. Save each reply as the block of its prompt (`prompts/<reviewer>.txt` gives `blocks/<reviewer>.md`).
 3. When a dispatch is cancelled, move its transcript out of the session folder before you dispatch the prompt again, because `transcripts` searches every subfolder of the session folder.
 4. Run `findings` and `pairs`. Split the cases into about 5 groups of similar size (findings plus half the candidate pairs), and dispatch one judge per group in parallel, as step 4 of Procedure tells. Tell each judge its case ids and the output file `<ws>/judgments-part-<n>.json`. Then merge the parts and run `transcripts`:
@@ -580,7 +587,7 @@ bun "$skill/scripts/score.mjs" names "$ws"
      "$ws"/judgments-part-*.json > "$ws/judgments.json"
    ```
 
-5. Run `bun "$skill/scripts/score.mjs" report "$ws" --configs <production>,<candidate> --reference <production>`. Read the table `### Single reviews: dev`: the seconds median, minimum, and maximum, the known defects found per run, the wrong findings per run, and the tokens. For the cost, add `usage.cost.total` of the assistant messages of the configuration model in each reviewer transcript: omp records the list-price cost of each request.
+5. Run `bun "$skill/scripts/score.mjs" report "$ws" --configs <production>,<candidate> --reference <production>`. Read the table `### Single reviews: <split>`: the seconds median, minimum, and maximum, the known defects found per run, the wrong findings per run, and the tokens. For the cost, add `usage.cost.total` of the assistant messages of the configuration model in each reviewer transcript: omp records the list-price cost of each request.
 6. Append a `results.md` entry with the table, and run step 9 of Procedure.
 
 ## Decisions
