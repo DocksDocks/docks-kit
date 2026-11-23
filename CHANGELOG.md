@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-23 - docks-kit 0.27.2: code-reviewer on GPT-6.2 Sol
+
+### Changed
+
+- The omp `code-reviewer` agent runs `openai-codex/gpt-6.2-sol:high` through a
+  new hidden `code_reviewer` role, with the fallback
+  `anthropic/claude-opus-5-5:high`. It keeps the `inherit` service tier, so
+  the OpenAI fast toggle of the session reaches it. In the quick comparison of
+  2026-11-23 on 16 dev cases, Sol found 21 known defects against 16 for
+  GPT-6.1 Terra, at about 4.8 times the review time and cost per review on
+  tier `default`. A fast tier shortens a Sol review and costs more: about 2
+  times on `priority` and 5.7 times on `ultrafast`. The `reviewer`,
+  `security-reviewer`, and `plan-reviewer` agents stay on Terra. A
+  `docks-kit omp` free session also replaces the new role with its free model
+  (DocksDocks/docks-kit#156).
+
 ## 2026-11-21 - docks-kit 0.27.1: Bun detection and update fixes
 
 ### Fixed

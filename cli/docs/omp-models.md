@@ -20,6 +20,7 @@ against.
 | `switch_fable` | `anthropic/claude-fable-5-2` | medium | 56 (v5.0.1) | $3.80 (v5.0.1) | 11.23 s (v5.0.1) |
 | `astra` | `openai-codex/gpt-6.2-astra` | xhigh | 62 (v5.0.1) | $2.52 (v5.0.1) | 52.89 s (v5.0.1) |
 | `reviewer` | `openai-codex/gpt-6.1-terra` | high | 42 (v5.0.1) | $0.26 (v5.0.1) | 10.91 s (v5.0.1) |
+| `code_reviewer` | `openai-codex/gpt-6.2-sol` | high | 55 (v5.0.1) | $0.56 (v5.0.1) | 9.63 s (v5.0.1) |
 | `web` | `web/firecrawl` | n/a | n/a | n/a | n/a |
 
 The table reports the measured Artificial Analysis figures for each assigned
@@ -118,21 +119,30 @@ What omp's settings catalog establishes about these roles:
 - `tiny` overrides the model for lightweight background tasks: titles, memory,
   auto-thinking, and unexpected-stop detection.
 - `modelTags` carries role metadata and can introduce roles; `hidden: true`
-  keeps `switch_fable` and `reviewer` out of the switcher list.
+  keeps `switch_fable`, `reviewer`, and `code_reviewer` out of the switcher list.
 
-`modelRoles.reviewer` is a kit-defined role, not an omp built-in. It runs
-`openai-codex/gpt-6.1-terra:high`. omp resolves `@<name>` for any key in
-`modelRoles` (`getModelRoleAlias` in omp's `model-resolver.ts`, omp 18.8.5).
-`task.agentModelOverrides` maps `reviewer`, `security-reviewer`,
-`code-reviewer`, and `plan-reviewer` to `@reviewer`, so one key sets the
-model for every reviewer. `task.agentServiceTierOverrides` sets the same four
-agents to `inherit`, so they take the live tier of the main session for each
-provider. "OpenAI fast mode" below describes how that tier changes. The bundled
+`modelRoles.reviewer` and `modelRoles.code_reviewer` are kit-defined roles, not
+omp built-ins. `reviewer` runs `openai-codex/gpt-6.1-terra:high`, and
+`code_reviewer` runs `openai-codex/gpt-6.2-sol:high`. omp resolves `@<name>`
+for any key in `modelRoles` (`getModelRoleAlias` in omp's `model-resolver.ts`,
+omp 18.8.5). `task.agentModelOverrides` maps `code-reviewer` to
+`@code_reviewer`, and `reviewer`, `security-reviewer`, and `plan-reviewer` to
+`@reviewer`. omp recommends aliases in `task.agentModelOverrides` and concrete
+selectors only in `modelRoles` (omp://task-agent-discovery.md). The owner
+moved `code-reviewer` to GPT-6.2 Sol after the quick comparison of
+2026-11-23 (`.agents/skills/review-benchmark/results.md`): on 16 dev cases,
+Sol found 21 known defects against 16 for Terra, at about 4.8 times the
+review time and cost. The other reviewers stay on Terra until a benchmark
+measures them. `task.agentServiceTierOverrides` sets all four reviewer agents
+to `inherit`, so they take the live tier of the main session for each
+provider. "OpenAI fast mode" below describes how that tier changes. On the
+same 7 code cases, a Sol review took a median of 342 s and $0.62 on `default`,
+239 s and $1.21 on `priority`, and 125 s and $3.57 on `ultrafast`. The bundled
 `reviewer` and `security-reviewer` agents ship with omp, and the kit plugin
 `docks-kit-omp` ships `code-reviewer` and `plan-reviewer`.
-`retry.fallbackChains.reviewer` holds `anthropic/claude-opus-5-5:high`, and
-`retry.fallbackChains.task` holds `openai-codex/gpt-6.2-sol:high`; both are
-cross-vendor fallbacks.
+`retry.fallbackChains.reviewer` and `retry.fallbackChains.code_reviewer` hold
+`anthropic/claude-opus-5-5:high`, and `retry.fallbackChains.task` holds
+`openai-codex/gpt-6.2-sol:high`; all are cross-vendor fallbacks.
 
 The review benchmark of DocksDocks/public#130 ran on 2026-11-05. It used 24
 held-out cases of the `review-benchmark` skill, 2 runs each. The cases came
@@ -523,9 +533,10 @@ At `high`, Sol produces about 19% more tokens per second than Terra. At
 `xhigh`, the gain is about 24%. Sol also has the lower TTFT and end-to-end
 time at both levels.
 
-The `reviewer` role stays on GPT-6.1 Terra `high`. The DocksDocks/public#130 benchmark chose
-Terra by escaped defects, not by speed. omp 18.22.2 lists no GPT-6.2 Terra. A
-move of the reviewer to GPT-6.2 Sol needs a new benchmark.
+The `reviewer` role stays on GPT-6.1 Terra `high`. The DocksDocks/public#130
+benchmark chose Terra by escaped defects, not by speed. omp 18.22.2 lists no
+GPT-6.2 Terra. `code-reviewer` moved to GPT-6.2 Sol through the
+`code_reviewer` role after the quick comparison of 2026-11-23.
 
 ### GPT-6 Luna (OpenAI) - `openai-codex/gpt-6-luna`
 
@@ -666,11 +677,13 @@ keeps a block that the user edited.
 - Since 0.24.0 the kit sets no `task.maxEffort`, so the cap is omp's default
   `max`. With `task.enableEffort` off, the cap applies only to a per-call
   `model` with a `:level` suffix.
-- In the deployed config, `scout` and `sonic` run GPT-6 Luna `medium`. The
-  four reviewer agents resolve `@reviewer` and run GPT-6.1 Terra `high` on the
-  live tier of the main session. A `docks-kit omp` free session replaces
-  both roles with its free model (see Free session launcher). A retry can
-  fall back to the role's fallback chain, for the reviewers Opus 5.5 `high`.
+- In the deployed config, `scout` and `sonic` run GPT-6 Luna `medium`.
+  `code-reviewer` resolves `@code_reviewer` and runs GPT-6.2 Sol `high`. The
+  other three reviewer agents resolve `@reviewer` and run GPT-6.1 Terra `high`.
+  All four run on the live tier of the main session. A `docks-kit omp`
+  free session replaces these roles with its free model (see Free session
+  launcher). A retry can fall back to the role's fallback chain, for the
+  reviewers Opus 5.5 `high`.
 
 The runtime per-agent measurement from fresh `omp -p` runs on 2026-09-09
 predates this change. It applies to the retired Astra-low `task` configuration,
