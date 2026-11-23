@@ -719,7 +719,7 @@ session. The name sanitizes the selector for the file system and appends a
 digest of the rendered overlay. The digest covers the selector and the
 level, so two selectors that differ only in separator characters stay
 apart. A session launch never reads or writes `~/.omp/agent/config.yml` or
-`models.yml`; only `--fast`, below, edits `config.yml`. It
+`models.yml`; only `--fast` and `--ultrafast`, below, edit `config.yml`. It
 never touches the SoT. The next plain `omp` run uses the paid configuration
 again.
 
@@ -860,35 +860,49 @@ from the catalog row of the chosen model, and under `--pick` the user chooses
 it from the ladder that same row publishes. Refresh the recorded default
 and the ladder counts in these docs in the same commit.
 
-## OpenAI fast mode (`docks-kit omp --fast`)
+## OpenAI fast mode (`docks-kit omp --fast` and `--ultrafast`)
 
 `docks-kit omp --fast` toggles `tier.openai` in the deployed
 `~/.omp/agent/config.yml` between `priority` and `none`, prints the old and new
 values, and exits without starting a session. `priority` is the tier omp's
 `/fast on` selects for OpenAI and OpenAI-Codex models. `--fast` over
-`ultrafast` selects `priority`. The kit ships no Ultrafast toggle: omp honors
-`ultrafast` for a Codex model only when its catalog `serviceTiers` lists it.
-The omp 18.4.9 catalog listed none for GPT-6.1 Sol, Astra, or Luna. On
-2026-11-18, `omp models openai-codex --json` on omp 18.22.2 listed no
-`serviceTiers` for any `gpt-6` id, `gpt-6.2-sol` and `gpt-6.2-astra`
-included. The SoT does not declare `tier.openai`, so the additive sync merge
-keeps the toggled value. New sessions read it; a running session changes
-through `/fast`.
+`ultrafast` selects `priority`.
+
+`docks-kit omp --ultrafast` toggles `tier.openai` between `ultrafast` and
+`none` in the same way. `ultrafast` is the tier omp's `/fast ultra` selects.
+`--ultrafast` over `priority` selects `ultrafast`. omp 19.1.1 sends
+`ultrafast` to the OpenAI API. For a Codex model, it sends `ultrafast` only
+when the discovered `service_tiers` of the model lists it; otherwise it does
+not send the tier. The omp 18.4.9 catalog listed no
+`serviceTiers` for GPT-6.1 Sol, Astra, or Luna. On 2026-11-23,
+`omp models openai-codex --json` on omp 19.1.1 listed no `serviceTiers` for
+any `gpt-6` id, `gpt-6.2-sol` and `gpt-6.2-astra` included. Even so, the
+review benchmark of 2026-11-23 on omp 19.1.1 dispatched
+`openai-codex/gpt-6.2-sol` with the tier override `ultrafast`, and each
+assistant message of its transcripts recorded the served tier `ultrafast`
+(`.agents/skills/review-benchmark/results.md`). A review there took about one
+third of the time of tier `default`, at about 5.7 times the cost.
+
+Each flag runs alone and exits 2 with `--model`, `--pick`, the other flag, or
+a forwarded argument. The SoT does not declare `tier.openai`, so the additive
+sync merge keeps the toggled value. New sessions read it; a running session
+changes through `/fast`.
 
 The four review agents inherit the live tier of the main session
 (`task.agentServiceTierOverrides: inherit`). In a new session after
-`docks-kit omp --fast`, they run on `priority` when `tier.openai` is `priority`,
-and on standard processing when it is `none`. A running session keeps the tier
-it started with, so its reviewers do not follow a later toggle.
+`docks-kit omp --fast` or `--ultrafast`, they run on the tier in
+`tier.openai`, and on standard processing when it is `none`. A running
+session keeps the tier it started with, so its reviewers do not follow a
+later toggle.
 
-`--fast` never changes the Anthropic tier. The SoT leaves `tier.anthropic` at
-omp's default `none`, so each session starts with it. In omp
-18.16.0, `/fast on` in a session whose current
-model is Anthropic sets `anthropic: priority` for that session. The reviewers
-then inherit it, so their Opus 5.5 fallback also runs fast. omp has no
-override value that inherits only the OpenAI tier. To keep Anthropic models
-on normal processing, use `docks-kit omp --fast` and a new session, not
-`/fast` in an Opus session.
+`--fast` and `--ultrafast` never change the Anthropic tier. The SoT leaves
+`tier.anthropic` at omp's default `none`, so each session starts with it. In
+omp 18.16.0, `/fast on` in a session whose current model is Anthropic sets
+`anthropic: priority` for that session. The reviewers then inherit it, so
+their Opus 5.5 fallback also runs fast. omp has no override value that
+inherits only the OpenAI tier. To keep Anthropic models on normal processing,
+use `docks-kit omp --fast` or `--ultrafast` and a new session, not `/fast` in
+an Opus session.
 
 ## Maintenance
 

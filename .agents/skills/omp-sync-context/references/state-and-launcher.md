@@ -26,8 +26,8 @@ store as no stored session model.
 
 Every `docks-kit omp` launch writes a run overlay under `kitCacheDir`;
 only `--model` or `--pick` writes the `omp_session` table.
-`docks-kit omp --fast` writes only `tier.openai` in the deployed
-`config.yml`, through `ompFastMode.ts toggleDeployedOpenAiFast`.
+`docks-kit omp --fast` and `--ultrafast` write only `tier.openai` in the
+deployed `config.yml`, through `ompFastMode.ts toggleDeployedOpenAiTier`.
 The session model entry stores a required free model selector and an optional session thinking level.
 Every overlay role, `advisor` included, runs that one level.
 Compute the level once at set time from the catalog row of the chosen model.

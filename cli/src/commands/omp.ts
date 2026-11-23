@@ -24,8 +24,10 @@ import {
 import {
   FAST_ON_TIER,
   requireDeployedConfig,
-  toggleDeployedOpenAiFast,
+  toggleDeployedOpenAiTier,
+  ULTRAFAST_ON_TIER,
   type FastToggle,
+  type OpenAiOnTier,
 } from "../engine-native/ompFastMode";
 import { ompPaths } from "../engine-native/ompPaths";
 import { ExitError } from "../engine-native/parseArgs";
@@ -45,6 +47,21 @@ const fast = Flag.Boolean("fast").pipe(
   ),
   Flag.withDefault(false),
 );
+const ultrafast = Flag.Boolean("ultrafast").pipe(
+  Flag.withDescription(
+    "Toggle ultrafast mode (tier.openai ultrafast/none) for OpenAI and Codex models in the deployed omp config, then exit",
+  ),
+  Flag.withDefault(false),
+);
+
+/** The flag name and the omp slash command of each tier that a toggle turns on. */
+const TIER_MODES: Readonly<
+  Record<OpenAiOnTier, { readonly name: string; readonly slash: string }>
+> = {
+  [FAST_ON_TIER]: { name: "fast", slash: "/fast on|off" },
+  [ULTRAFAST_ON_TIER]: { name: "ultrafast", slash: "/fast ultra|off" },
+};
+
 const args: Argument.Argument<ReadonlyArray<string>> = Argument.String("args").pipe(
   Argument.withDescription("Arguments forwarded verbatim to omp"),
   Argument.variadic(),
@@ -225,12 +242,16 @@ const pickLevel = (catalogModel: CatalogModel) =>
   });
 
 /**
- * Toggle fast mode under the sync lock of `home` and the folder lock of the
- * omp agent folder, with the wait and the held line of a sync. A sync also
- * merges `config.yml` there. Return 0 after the toggle, 1 for a held lock,
- * and 2 for a failed toggle or an invalid wait bound.
+ * Toggle `tier.openai` to or from `onTier` under the sync lock of `home` and
+ * the folder lock of the omp agent folder, with the wait and the held line of
+ * a sync. A sync also merges `config.yml` there. Return 0 after the toggle, 1
+ * for a held lock, and 2 for a failed toggle or an invalid wait bound.
  */
-async function toggleFastUnderLocks(home: string, agentDir: string): Promise<number> {
+async function toggleTierUnderLocks(
+  home: string,
+  agentDir: string,
+  onTier: OpenAiOnTier,
+): Promise<number> {
   const configPath = p(agentDir, "config.yml");
   const err = (line: string) => console.error(line);
   // Check config.yml before any lock. A missing file ends the run before the
@@ -246,17 +267,18 @@ async function toggleFastUnderLocks(home: string, agentDir: string): Promise<num
     return await withHomeAndFolderLocks(home, [agentDir], err, async () => {
       let toggle: FastToggle;
       try {
-        toggle = toggleDeployedOpenAiFast(configPath);
+        toggle = toggleDeployedOpenAiTier(configPath, onTier);
       } catch (error) {
         err(error instanceof Error ? error.message : String(error));
         return 2;
       }
-      const state = toggle.next === FAST_ON_TIER ? "ON" : "OFF";
+      const mode = TIER_MODES[onTier];
+      const state = toggle.next === onTier ? "ON" : "OFF";
       console.log(
-        `omp fast mode ${state} for OpenAI/Codex models: tier.openai ${toggle.previous} -> ${toggle.next} in ${configPath}`,
+        `omp ${mode.name} mode ${state} for OpenAI/Codex models: tier.openai ${toggle.previous} -> ${toggle.next} in ${configPath}`,
       );
       console.log(
-        "New omp sessions use it; in a running session, use /fast on|off or restart omp.",
+        `New omp sessions use it; in a running session, use ${mode.slash} or restart omp.`,
       );
       return 0;
     });
@@ -267,7 +289,7 @@ async function toggleFastUnderLocks(home: string, agentDir: string): Promise<num
   }
 }
 
-export const ompCommand = Command.make("omp", { model, pick, fast, args }, (config) =>
+export const ompCommand = Command.make("omp", { model, pick, fast, ultrafast, args }, (config) =>
   Effect.gen(function* () {
     // Check the forwarded arguments before omp, the catalog, or kit.db, so a
     // rejected launch starts no process and writes nothing.
@@ -278,14 +300,21 @@ export const ompCommand = Command.make("omp", { model, pick, fast, args }, (conf
       return yield* bail("Pass either --model <selector> or --pick, not both");
     }
 
-    if (config.fast) {
-      if (Option.isSome(config.model) || config.pick || config.args.length > 0) {
-        return yield* bail("--fast toggles fast mode and exits; pass it alone");
+    if (config.fast || config.ultrafast) {
+      const onTier = config.ultrafast ? ULTRAFAST_ON_TIER : FAST_ON_TIER;
+      const name = TIER_MODES[onTier].name;
+      const others =
+        Option.isSome(config.model) ||
+        config.pick ||
+        config.args.length > 0 ||
+        (config.fast && config.ultrafast);
+      if (others) {
+        return yield* bail(`--${name} toggles ${name} mode and exits; pass it alone`);
       }
       const home = engineHome(process.env);
       const agentDir = ompPaths({ home, env: process.env, platform: process.platform }).agentDir;
       const code = yield* Effect.tryPromise({
-        try: () => toggleFastUnderLocks(home, agentDir),
+        try: () => toggleTierUnderLocks(home, agentDir, onTier),
         catch: (error) => (error instanceof Error ? error.message : String(error)),
       }).pipe(Effect.catch((message) => bail(message)));
       if (code !== 0) return yield* Effect.sync(() => process.exit(code));
@@ -421,6 +450,6 @@ export const ompCommand = Command.make("omp", { model, pick, fast, args }, (conf
   }),
 ).pipe(
   Command.withDescription(
-    "Start omp with every chat-model role set to the remembered free model for this run only. The launcher starts 'omp launch' with an explicit --model, so omp reads a forwarded subcommand name as message text and a resumed session keeps the free model. It rejects forwarded flags that can select another model (--config, --model, --smol, --slow, --plan, --models, --provider, --prewalk-into, --plan-yolo-into); run omp directly for a paid model or a subcommand. The web-search role keeps the deployed provider order, which can include a paid model. No deployed configuration changes; --model or --pick remembers a new free default. Every launch checks the model against the live free catalog of each candidate profile. --fast instead toggles OpenAI/Codex fast mode in the deployed omp config and exits.",
+    "Start omp with every chat-model role set to the remembered free model for this run only. The launcher starts 'omp launch' with an explicit --model, so omp reads a forwarded subcommand name as message text and a resumed session keeps the free model. It rejects forwarded flags that can select another model (--config, --model, --smol, --slow, --plan, --models, --provider, --prewalk-into, --plan-yolo-into); run omp directly for a paid model or a subcommand. The web-search role keeps the deployed provider order, which can include a paid model. No deployed configuration changes; --model or --pick remembers a new free default. Every launch checks the model against the live free catalog of each candidate profile. --fast instead toggles OpenAI/Codex fast mode in the deployed omp config and exits; --ultrafast does the same for ultrafast mode.",
   ),
 );

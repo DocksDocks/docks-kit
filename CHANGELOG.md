@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-23 - docks-kit 0.28.0: docks-kit omp --ultrafast
+
+### Added
+
+- `docks-kit omp --ultrafast` toggles `tier.openai` in the deployed
+  `~/.omp/agent/config.yml` between `ultrafast` and `none`, prints the change,
+  and exits. `ultrafast` is the tier that omp's `/fast ultra` selects. Any
+  other value, `priority` included, switches to `ultrafast`. The flag uses the
+  same locks, YAML checks, and atomic 0600 write as `--fast`, and it keeps a
+  symlinked `config.yml` a link. It changes no other key, `tier.anthropic`
+  included. Pass it alone: with `--fast`, `--model`, `--pick`, or a forwarded
+  argument, the run exits 2. `--fast` still toggles between `priority` and
+  `none`, and `--fast` over `ultrafast` still selects `priority`. omp 19.1.1
+  sends `ultrafast` to a Codex model only when the discovered `service_tiers`
+  of the model lists it.
+
 ## 2026-11-21 - docks-kit 0.27.1: Bun detection and update fixes
 
 ### Fixed

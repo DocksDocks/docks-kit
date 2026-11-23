@@ -1,7 +1,8 @@
 /**
- * `docks-kit omp --fast` toggles omp's OpenAI service tier in the deployed
- * config.yml. `tier.openai: priority` is what omp's `/fast on` selects for
- * OpenAI and OpenAI-Codex models; `none` omits `service_tier`. The SoT does not
+ * `docks-kit omp --fast` and `docks-kit omp --ultrafast` toggle omp's OpenAI
+ * service tier in the deployed config.yml. `tier.openai: priority` is what
+ * omp's `/fast on` selects for OpenAI and OpenAI-Codex models, `ultrafast` is
+ * what `/fast ultra` selects, and `none` omits `service_tier`. The SoT does not
  * declare `tier.openai`, so the additive sync merge keeps the toggled value.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -10,20 +11,24 @@ import { isMap, parseDocument } from "yaml";
 import { replaceFile } from "./atomicWrite";
 
 export const FAST_ON_TIER = "priority";
+export const ULTRAFAST_ON_TIER = "ultrafast";
 export const FAST_OFF_TIER = "none";
+
+/** A `tier.openai` value that a toggle turns on. */
+export type OpenAiOnTier = typeof FAST_ON_TIER | typeof ULTRAFAST_ON_TIER;
 
 export interface FastToggle {
   /** The deployed `tier.openai` value before the toggle; omp's default `none` when unset. */
   readonly previous: string;
-  readonly next: typeof FAST_ON_TIER | typeof FAST_OFF_TIER;
+  readonly next: OpenAiOnTier | typeof FAST_OFF_TIER;
   readonly text: string;
 }
 
 /**
- * Pure toggle over config.yml text; edits only `tier.openai`. Only `priority`
- * counts as on, so any other tier, `ultrafast` included, switches to plain fast.
+ * Pure toggle over config.yml text; edits only `tier.openai`. Only `onTier`
+ * counts as on, so any other tier switches to `onTier`.
  */
-export function toggleOpenAiFast(configText: string): FastToggle {
+export function toggleOpenAiTier(configText: string, onTier: OpenAiOnTier): FastToggle {
   const doc = parseDocument(configText);
   const parseError = doc.errors[0];
   if (parseError !== undefined) {
@@ -39,7 +44,7 @@ export function toggleOpenAiFast(configText: string): FastToggle {
 
   const current = doc.getIn(["tier", "openai"]);
   const previous = typeof current === "string" && current !== "" ? current : FAST_OFF_TIER;
-  const next = previous === FAST_ON_TIER ? FAST_OFF_TIER : FAST_ON_TIER;
+  const next = previous === onTier ? FAST_OFF_TIER : onTier;
   doc.setIn(["tier", "openai"], next);
   return { previous, next, text: doc.toString() };
 }
@@ -52,12 +57,13 @@ export function requireDeployedConfig(configPath: string): void {
 }
 
 /**
- * Toggle `tier.openai` in the deployed config.yml with an atomic 0600 write.
- * replaceFile writes through a symlinked config.yml, so the link stays.
+ * Toggle `tier.openai` to or from `onTier` in the deployed config.yml with an
+ * atomic 0600 write. replaceFile writes through a symlinked config.yml, so the
+ * link stays.
  */
-export function toggleDeployedOpenAiFast(configPath: string): FastToggle {
+export function toggleDeployedOpenAiTier(configPath: string, onTier: OpenAiOnTier): FastToggle {
   requireDeployedConfig(configPath);
-  const toggle = toggleOpenAiFast(readFileSync(configPath, "utf8"));
+  const toggle = toggleOpenAiTier(readFileSync(configPath, "utf8"), onTier);
   replaceFile(configPath, toggle.text, { mode: 0o600 });
   return toggle;
 }

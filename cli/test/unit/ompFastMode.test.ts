@@ -20,7 +20,11 @@ import { parse } from "yaml";
 
 import { ompCommand } from "../../src/commands/omp";
 import { acquireKitLock, releaseKitLock, type KitLock } from "../../src/engine-native/kitLock";
-import { toggleDeployedOpenAiFast, toggleOpenAiFast } from "../../src/engine-native/ompFastMode";
+import {
+  FAST_ON_TIER,
+  toggleDeployedOpenAiTier,
+  toggleOpenAiTier,
+} from "../../src/engine-native/ompFastMode";
 import { mergeOmpConfig } from "../../src/engine-native/ompYaml";
 import { syncLockPath } from "../../src/engine-native/scratch";
 import { payloadText } from "../../src/payload";
@@ -42,26 +46,29 @@ advisor:
   enabled: true
 `;
 
-describe("toggleOpenAiFast", () => {
+/** The toggle of `docks-kit omp --fast`. */
+const toggleFast = (text: string) => toggleOpenAiTier(text, FAST_ON_TIER);
+
+describe("toggleOpenAiTier with priority (--fast)", () => {
   it("turns fast on and changes only tier.openai", () => {
-    const toggle = toggleOpenAiFast(CONFIG);
+    const toggle = toggleFast(CONFIG);
     expect(toggle).toMatchObject({ previous: "none", next: "priority" });
     expect(toggle.text).toBe(CONFIG.replace("openai: none", "openai: priority"));
   });
 
   it("turns fast off when tier.openai is priority", () => {
-    const toggle = toggleOpenAiFast(toggleOpenAiFast(CONFIG).text);
+    const toggle = toggleFast(toggleFast(CONFIG).text);
     expect(toggle).toMatchObject({ previous: "priority", next: "none" });
     expect(toggle.text).toBe(CONFIG);
   });
 
   it("replaces ultrafast with plain fast instead of turning off", () => {
-    const toggle = toggleOpenAiFast(CONFIG.replace("openai: none", "openai: ultrafast"));
+    const toggle = toggleFast(CONFIG.replace("openai: none", "openai: ultrafast"));
     expect(toggle).toMatchObject({ previous: "ultrafast", next: "priority" });
   });
 
   it("treats a missing tier block as off and creates it", () => {
-    const toggle = toggleOpenAiFast("advisor:\n  enabled: true\n");
+    const toggle = toggleFast("advisor:\n  enabled: true\n");
     expect(toggle).toMatchObject({ previous: "none", next: "priority" });
     expect(parse(toggle.text)).toEqual({
       advisor: { enabled: true },
@@ -70,19 +77,52 @@ describe("toggleOpenAiFast", () => {
   });
 
   it("rejects a tier key that is not a mapping", () => {
-    expect(() => toggleOpenAiFast("tier: fast\n")).toThrow(
-      "omp config.yml key 'tier' must be a mapping",
-    );
+    expect(() => toggleFast("tier: fast\n")).toThrow("omp config.yml key 'tier' must be a mapping");
   });
 
   it("survives a sync merge with the shipped SoT config", () => {
-    const deployed = toggleOpenAiFast(CONFIG).text;
+    const deployed = toggleFast(CONFIG).text;
     const merged = parse(mergeOmpConfig(payloadText("SoT/.omp/config.yml"), deployed));
     expect(merged.tier.openai).toBe("priority");
   });
 });
 
-describe("toggleDeployedOpenAiFast", () => {
+describe("toggleOpenAiTier with ultrafast", () => {
+  it("turns ultrafast on from none and changes only tier.openai", () => {
+    const toggle = toggleOpenAiTier(CONFIG, "ultrafast");
+    expect(toggle).toMatchObject({ previous: "none", next: "ultrafast" });
+    expect(toggle.text).toBe(CONFIG.replace("openai: none", "openai: ultrafast"));
+  });
+
+  it("turns ultrafast off when tier.openai is ultrafast", () => {
+    const toggle = toggleOpenAiTier(toggleOpenAiTier(CONFIG, "ultrafast").text, "ultrafast");
+    expect(toggle).toMatchObject({ previous: "ultrafast", next: "none" });
+    expect(toggle.text).toBe(CONFIG);
+  });
+
+  it("replaces priority with ultrafast instead of turning off", () => {
+    const toggle = toggleOpenAiTier(
+      CONFIG.replace("openai: none", "openai: priority"),
+      "ultrafast",
+    );
+    expect(toggle).toMatchObject({ previous: "priority", next: "ultrafast" });
+    expect(toggle.text).toBe(CONFIG.replace("openai: none", "openai: ultrafast"));
+  });
+
+  it("treats an unset tier.openai as off and keeps tier.anthropic", () => {
+    const toggle = toggleOpenAiTier("tier:\n  anthropic: priority\n", "ultrafast");
+    expect(toggle).toMatchObject({ previous: "none", next: "ultrafast" });
+    expect(parse(toggle.text)).toEqual({ tier: { anthropic: "priority", openai: "ultrafast" } });
+  });
+
+  it("lets --fast replace ultrafast with priority", () => {
+    const toggle = toggleFast(toggleOpenAiTier(CONFIG, "ultrafast").text);
+    expect(toggle).toMatchObject({ previous: "ultrafast", next: "priority" });
+    expect(toggle.text).toBe(CONFIG.replace("openai: none", "openai: priority"));
+  });
+});
+
+describe("toggleDeployedOpenAiTier", () => {
   it("keeps a symlinked config.yml a link", () => {
     const root = mkdtempSync(join(tmpdir(), "omp-fast-link-"));
     roots.push(root);
@@ -93,7 +133,7 @@ describe("toggleDeployedOpenAiFast", () => {
     const configPath = join(root, "config.yml");
     symlinkSync(linkTarget, configPath);
 
-    const toggle = toggleDeployedOpenAiFast(configPath);
+    const toggle = toggleDeployedOpenAiTier(configPath, "priority");
 
     expect(toggle).toMatchObject({ previous: "none", next: "priority" });
     expect(lstatSync(configPath).isSymbolicLink()).toBe(true);
@@ -105,11 +145,13 @@ describe("toggleDeployedOpenAiFast", () => {
 const FOLDER_LOCK = ".docks-kit-sync-lock.db";
 
 /**
- * Run `docks-kit omp --fast` in this process. Record what it prints and its
+ * Run `docks-kit omp <argv>` in this process. Record what it prints and its
  * exit code: the code of a `process.exit` call, else 1 for a failure and 0
  * for a success, as `BunRuntime.runMain` does.
  */
-async function runFast(): Promise<{ readonly exitCode: number; readonly output: string }> {
+async function runOmp(
+  argv: ReadonlyArray<string>,
+): Promise<{ readonly exitCode: number; readonly output: string }> {
   const lines: Array<string> = [];
   const record = (...values: Array<unknown>) => void lines.push(values.map(String).join(" "));
   vi.spyOn(console, "log").mockImplementation(record);
@@ -123,9 +165,7 @@ async function runFast(): Promise<{ readonly exitCode: number; readonly output: 
   });
 
   const exit = await Effect.runPromiseExit(
-    Command.runWith(ompCommand, { version: "x" })(["--fast"]).pipe(
-      Effect.provide(BunServices.layer),
-    ),
+    Command.runWith(ompCommand, { version: "x" })(argv).pipe(Effect.provide(BunServices.layer)),
   );
   vi.restoreAllMocks();
 
@@ -133,7 +173,7 @@ async function runFast(): Promise<{ readonly exitCode: number; readonly output: 
   return { exitCode, output: lines.join("\n") };
 }
 
-/** A temporary HOME for `omp --fast`, set in-process, with the lock wait bound `waitMs`. */
+/** A temporary HOME for `omp --fast` and `omp --ultrafast`, set in-process, with the lock wait bound `waitMs`. */
 function fastHome(waitMs: string): { readonly home: string; readonly agentDir: string } {
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "omp-fast-lock-")));
   roots.push(home);
@@ -169,7 +209,7 @@ describe("omp --fast under the folder lock", () => {
     const held = await takeLock(lock, false);
 
     try {
-      const run = await runFast();
+      const run = await runOmp(["--fast"]);
 
       expect(run.exitCode).toBe(1);
       expect(run.output).toContain(heldLine(lock));
@@ -188,7 +228,7 @@ describe("omp --fast under the folder lock", () => {
     const held = await takeLock(lock, true);
 
     try {
-      const run = await runFast();
+      const run = await runOmp(["--fast"]);
 
       expect(run.exitCode).toBe(1);
       expect(run.output).toContain(heldLine(lock));
@@ -206,7 +246,7 @@ describe("omp --fast under the folder lock", () => {
     let folderLock: KitLock | undefined;
 
     try {
-      const pending = runFast();
+      const pending = runOmp(["--fast"]);
       // The check before the locks ends the run at once; a run that waits is still pending.
       await Promise.race([pending, sleepMs(3000)]);
       expect(existsSync(join(home, ".omp"))).toBe(false);
@@ -241,7 +281,7 @@ describe("omp --fast under the folder lock", () => {
     let folderLock: KitLock | undefined;
 
     try {
-      const pending = runFast();
+      const pending = runOmp(["--fast"]);
       await sleepMs(200);
       folderLock = await takeLock(lock, false);
       releaseKitLock(homeLock);
@@ -254,5 +294,56 @@ describe("omp --fast under the folder lock", () => {
       if (folderLock !== undefined) releaseKitLock(folderLock);
       else releaseKitLock(homeLock);
     }
+  });
+});
+
+describe("omp --ultrafast", () => {
+  it("toggles tier.openai to ultrafast and back to none, and keeps tier.anthropic", async () => {
+    const { agentDir } = fastHome("100");
+    mkdirSync(agentDir, { recursive: true });
+    const configPath = join(agentDir, "config.yml");
+    writeFileSync(configPath, CONFIG.replace("anthropic: none", "anthropic: priority"));
+    const shownPath = configPath.replaceAll("\\", "/");
+
+    const on = await runOmp(["--ultrafast"]);
+    expect(on.exitCode).toBe(0);
+    expect(on.output.replaceAll("\\", "/")).toContain(
+      `omp ultrafast mode ON for OpenAI/Codex models: tier.openai none -> ultrafast in ${shownPath}`,
+    );
+    expect(on.output).toContain(
+      "New omp sessions use it; in a running session, use /fast ultra|off or restart omp.",
+    );
+    expect(parse(readFileSync(configPath, "utf8")).tier).toEqual({
+      openai: "ultrafast",
+      anthropic: "priority",
+    });
+
+    const off = await runOmp(["--ultrafast"]);
+    expect(off.exitCode).toBe(0);
+    expect(off.output.replaceAll("\\", "/")).toContain(
+      `omp ultrafast mode OFF for OpenAI/Codex models: tier.openai ultrafast -> none in ${shownPath}`,
+    );
+    expect(parse(readFileSync(configPath, "utf8")).tier).toEqual({
+      openai: "none",
+      anthropic: "priority",
+    });
+  });
+
+  it.each([
+    [["--ultrafast", "--fast"]],
+    [["--ultrafast", "--model", "free/model"]],
+    [["--ultrafast", "--pick"]],
+    [["--ultrafast", "hello"]],
+  ])("refuses %j and leaves config.yml unchanged", async (argv) => {
+    const { agentDir } = fastHome("100");
+    mkdirSync(agentDir, { recursive: true });
+    const configPath = join(agentDir, "config.yml");
+    writeFileSync(configPath, CONFIG);
+
+    const run = await runOmp(argv);
+
+    expect(run.exitCode).not.toBe(0);
+    expect(run.output).toContain("--ultrafast toggles ultrafast mode and exits; pass it alone");
+    expect(readFileSync(configPath, "utf8")).toBe(CONFIG);
   });
 });
