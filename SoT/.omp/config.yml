@@ -16,7 +16,7 @@ task:
     reviewer: "@reviewer"
     security-reviewer: "@reviewer"
     code-reviewer: "@code_reviewer"
-    plan-reviewer: "@reviewer"
+    plan-reviewer: "@plan_reviewer"
   agentServiceTierOverrides:
     reviewer: inherit
     security-reviewer: inherit
@@ -38,6 +38,7 @@ modelRoles:
   astra: openai-codex/gpt-6.2-astra:xhigh
   reviewer: openai-codex/gpt-6.1-terra:high
   code_reviewer: openai-codex/gpt-6.2-sol:high
+  plan_reviewer: openai-codex/gpt-6.2-sol:high
   web: web/firecrawl
 
 modelTags:
@@ -53,6 +54,9 @@ modelTags:
     hidden: true
   code_reviewer:
     name: Code reviewer
+    hidden: true
+  plan_reviewer:
+    name: Plan reviewer
     hidden: true
 
 display:
@@ -80,6 +84,8 @@ retry:
     reviewer:
       - anthropic/claude-opus-5-5:high
     code_reviewer:
+      - anthropic/claude-opus-5-5:high
+    plan_reviewer:
       - anthropic/claude-opus-5-5:high
     web:
       - web/exa

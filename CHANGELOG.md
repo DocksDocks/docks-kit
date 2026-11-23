@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-23 - docks-kit 0.28.1: plan-reviewer on GPT-6.2 Sol
+
+### Changed
+
+- The omp `plan-reviewer` agent runs `openai-codex/gpt-6.2-sol:high` through a
+  new hidden `plan_reviewer` role, with the fallback
+  `anthropic/claude-opus-5-5:high` and the `inherit` service tier. In the
+  quick comparison of 2026-11-23 on 16 dev plan cases, Sol found 36 of 45
+  known defects against 17 for GPT-6.1 Terra, at about 4.7 times the median
+  review time and 6 times the cost on tier `default`, with about 3.7 times the
+  wrong findings. The bundled `reviewer` and `security-reviewer` agents stay
+  on Terra. A `docks-kit omp` free session also replaces the new role with its
+  free model (DocksDocks/docks-kit#156).
+
 ## 2026-11-23 - docks-kit 0.28.0: docks-kit omp --ultrafast
 
 ### Added
