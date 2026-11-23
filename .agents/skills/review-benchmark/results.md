@@ -1596,3 +1596,59 @@ On these 8 cases (Terra has 7 valid runs, because its `code-109-r1-e146` run ret
 - The known defects found differ by one between the two Sol tiers (14 and 13). The model and effort are the same, so this is run noise. Per case, `ultrafast` found one more in `code-102-r1` and `code-57-pr58` and one fewer in `code-96-r1`.
 - Wrong findings: 4 in 8 runs for `ultrafast`, 10 in 9 runs for Sol `default` on the 9 `code` cases, and 1 in 8 runs for Terra.
 - Judges: 3 dispatches, $8.50.
+
+### Addendum 2026-11-23: GPT-6.2 Sol at tier `priority`
+
+The owner asked to test the `priority` tier (omp fast mode) as well, because `ultrafast` costs too much. It ran the same 8 `code` cases, one `C1` run each, in one batch of 8. The probe showed tier `priority` requested and served. 3 Claude judges answered the new candidate pairs and rated the findings without a match.
+
+- 7 of 8 runs are valid. `code-89-r1` returned `Code-review: blocked`: the reviewer took a complete hunk of `full.diff` (8 old and 8 new lines) as cut off. That run also listed its case folder, which holds `case.json`, so it read outside its inputs.
+
+On the 7 cases with a valid `priority` run (Terra has 6 valid runs there, because its `code-109-r1-e146` run returned `blocked`):
+
+| Measure | gpt-6.1-terra-high | gpt-6.2-sol-high | gpt-6.2-sol-high-fast | gpt-6.2-sol-high-ultrafast |
+|---|---:|---:|---:|---:|
+| Known found | 7 in 6 runs | 13 in 7 runs | 13 in 7 runs | 14 in 7 runs |
+| Seconds median | 75 | 342 | 239 | 125 |
+| Cost median per run (omp `usage.cost.total`) | $0.133 | $0.620 | $1.208 | $3.570 |
+| Cost of the runs | $0.82 | $4.23 | $8.69 | $26.01 |
+
+- `priority` took about 70% of the time of tier `default`, at about twice the cost per run.
+- Recall does not depend on the tier: the model and the effort are the same, and the three Sol tiers found 13, 13, and 14 known defects.
+- The owner chose `inherit` for `code-reviewer`, so the session tier decides (DocksDocks/docks-kit#207).
+
+## Run 2026-11-23: quick comparison of `plan-reviewer`, GPT-6.2 Sol and GPT-6.1 Terra (plan #156)
+
+The owner asked for the same quick comparison of `plan-reviewer`. This run is the first use of the `plan-reviewer` row of the Quick comparison section of `SKILL.md`. It decides nothing.
+
+### Setup
+
+- Configurations: `openai-codex/gpt-6.1-terra` and `openai-codex/gpt-6.2-sol`, effort `high`, tier `default`, the candidate plan-reviewer agent of the working tree, baseline ref `cli-v0.27.1`, omp 19.1.1. The code probe of the entries above covers the model, effort, and tier.
+- Cases: 16 dev cases, 45 known defects: the 13 `plan` cases with known defects (arm `P1`) and the 3 `plan-delta` cases with the most known defects by case id (arm `Pd`). One run per configuration. All 32 prompts ran in one batch.
+- Judges: 5 Claude task agents for the match and adjudication passes, and 3 more for the decision pass: the 6 `ud-*` cases carry protected decisions, which gave 394 protected pairs. Three judges ran one no-op command or one listing against the rule of `references/judge.md`. One judge read the copy of `results.md` inside a case snapshot, which the operator allowed; that copy predates this run.
+
+### Results (`report --configs gpt-6.1-terra-high,gpt-6.2-sol-high --reference gpt-6.1-terra-high`)
+
+| Measure | gpt-6.1-terra-high | gpt-6.2-sol-high |
+|---|---:|---:|
+| Valid runs | 16 | 16 |
+| Known found | 17 of 45 | 36 of 45 |
+| Escaped per 50 known | 31.11 | 10.00 |
+| Escaped per 50 known difference, 90% interval | - | [-27.00, -13.95] |
+| Cases with an escaped difference | - | 9 (all in favor of Sol) |
+| Valid extras per run | 1.25 | 5.63 |
+| Wrong findings / runs | 6 / 16 | 22 / 16 |
+| Wrong findings more than Terra, one-sided exact Poisson p | - | 0.0019 |
+| Re-argued protected decisions | 0 | 2 (`UD111-4`, `UD98-3`) |
+| Seconds median | 63.7 | 300.3 |
+| Seconds min, max | 33.1, 97.0 | 76.4, 405.0 |
+| Tokens median | 265,230 | 1,067,758 |
+| Cost median per run (omp `usage.cost.total`) | $0.082 | $0.498 |
+| Cost of the 16 runs | $1.26 | $7.77 |
+
+- Sol found at least as many known defects as Terra in every case, and more in 9 of 16. The gap is larger than for `code-reviewer`: Sol let 10 known defects per 50 escape, Terra 31.
+- Sol took about 4.7 times the median time and 6 times the median cost, and it gave about 3.7 times the wrong findings per run.
+- Both models returned `Plan-review: repair` on every run.
+
+### Limits
+
+- One run per case, 16 dev cases, and no second judge. Earlier plans tuned the plan-reviewer prompts on these dev cases.
