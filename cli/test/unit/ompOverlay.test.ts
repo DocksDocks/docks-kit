@@ -38,6 +38,7 @@ const ROLE_KEYS = [
   "switch_fable",
   "astra",
   "reviewer",
+  "code_reviewer",
   "advisor",
   "memory",
   "judge",
@@ -54,6 +55,7 @@ const FALLBACK_KEYS = [
   "fable",
   "astra",
   "reviewer",
+  "code_reviewer",
   "memory",
   "judge",
 ];
