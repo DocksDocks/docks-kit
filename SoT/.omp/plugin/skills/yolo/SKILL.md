@@ -5,8 +5,8 @@ user-invocable: true
 disable-model-invocation: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "dfb708c9766b5e4629b7490b182e88e7950a76a570c392fcb8897df1a3b48d53"
+  updated: "2026-11-24"
+  content_hash: "1f5115a03e22aa9c93e8fb34fa4a587640d4766eb6c4b37a2322b974b4f570c7"
 ---
 
 # Yolo
@@ -98,7 +98,8 @@ Before Draft, run `list` and `gh pr list --repo <owner/repo> --state open`.
 
 To adopt a plan:
 
-1. Run `show <n>`. Adopt only an open plan. When the helper reports that
+1. Run `show <n>`, and confirm the plan target as the contract's Plan target
+   says. Adopt only an open plan. When the helper reports that
    another login owns the plan, stop and report. When the plan is a parent
    (the contract's Record and mode), adopt it with steps 2 to 4 and skip
    step 5. Then get a plan pass that covers the current parent body: when
@@ -125,9 +126,9 @@ To adopt a plan:
    `Asked:` part quotes the old line, and publish the change with `edit`. After
    `plan=pass`, this change needs a plan-review round, as the contract's Phases
    and review comments says.
-5. Reuse the branch that `gh issue develop <n> --list` shows, or the head branch
-   of the open pull request. When neither exists, use the contract's Linked
-   branch steps.
+5. Reuse the plan's branch, as the contract's Linked branch defines it, after
+   its Branch check passes. When neither source names a branch, use the
+   contract's Linked branch steps.
 6. Continue at the first Run order phase whose Done when is not met.
 
 ## Draft
@@ -231,15 +232,16 @@ without a merge. The contract's Round ceiling also says this.
 2. Fetch the default branch. If it is not an ancestor of `HEAD`, merge
    `origin/<default>` into the linked branch. Do not rebase. Rerun acceptance,
    and run a code-review round on the result. Commit each repair.
-3. Push the linked branch with a normal push. When a repository hook fails,
-   follow the contract's Repository hooks. Never skip the hook.
+3. Run the Branch check of the contract's Linked branch, then push the linked
+   branch with the push command of that section. When a repository hook
+   fails, follow the contract's Repository hooks. Never skip the hook.
 4. Write the run summary from `../plan-manager/references/run-summary.md`, as
    the practices Run summary says.
-5. When `gh pr list --repo <owner/repo> --head <branch> --state open` shows a
-   pull request, update its body with `gh pr edit <pr> --repo <owner/repo>
-   --body-file <file>`. Otherwise open the pull request with `gh pr create
+5. When the contract's Linked branch finds the plan's pull request, update its
+   body with `gh pr edit <url> --body-file <file>`, using the URL that the
+   lookup verified. Otherwise open the pull request with `gh pr create
    --repo <owner/repo> --base <default> --head <branch> --title <title>
-   --body-file <file>`.
+   --body-file <file>`, and carry the URL that it prints.
 6. Wait for checks as the contract says. If a check fails, fix it, rerun
    acceptance, review again, and push. Right after the push, build the
    Checklist again from the evidence for the new head, and update the body
@@ -247,11 +249,11 @@ without a merge. The contract's Round ceiling also says this.
    again. When the same check still fails after the third fix attempt, stop
    fixing it. That is a stall: apply the Stall rule of the contract's Delegated
    decisions, then the contract's Round ceiling, as its Checks and merge says.
-7. Confirm that `gh pr view <pr> --repo <owner/repo> --json headRefOid` shows
-   the reviewed head. Write the pull request URL and the check result into the
-   summary file, as the practices Run summary says. Run the landing self-check
-   in the contract's Checks and merge: untick each item without evidence, add
-   its reason, and update the body again.
+7. Confirm that `gh pr view <url> --json headRefOid,baseRefName` shows the
+   reviewed head and the default branch. Write the pull request URL and the
+   check result into the summary file, as the practices Run summary says. Run
+   the landing self-check in the contract's Checks and merge: untick each item
+   without evidence, add its reason, and update the body again.
 8. Print the run summary. In the same response, state
    `<k> of <n> checklist items ticked` and `<d> delegated decisions`, point to
    Delegated decisions in the run summary, list each unticked item with its

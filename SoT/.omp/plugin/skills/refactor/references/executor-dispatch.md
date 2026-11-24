@@ -48,8 +48,9 @@ Check all before dispatching:
   Read `skills/plan-manager/references/plan-contract.md` inside the installed docks-kit kit plugin.
 - `plan-manager` owns the plan issue and its declared scope, which is the union
   of the Steps `Files` cells.
-- Immediately before dispatch, `plan-manager` re-reads the issue with
-  `docks-kit plan show <issue> --body` and confirms its Steps `Files` union still
+- Immediately before dispatch, `plan-manager` confirms the plan target as the
+  plan contract's Plan target says, re-reads the issue with
+  `docks-kit plan show <n> --body`, and confirms its Steps `Files` union still
   matches the assigned work. A change requires re-planning.
 - Immediately before dispatch, record `<base>` = `git rev-parse HEAD`.
 
@@ -62,9 +63,12 @@ executor (for example, a cheaper one), they set that key before the dispatch.
 The subagent gets no conversation history and no `AGENTS.md`, so the item must
 contain:
 
-1. The canonical plan issue number, the union of its Steps `Files` cells, and
-   the Steps `Id` values the executor must complete. The executor reads the
-   record with `docks-kit plan show <issue> --body`; do not inline a second copy.
+1. The canonical plan issue reference (`<owner>/<repo>#<n>`), the union of its Steps
+   `Files` cells, and the Steps `Id` values the executor must complete. The
+   executor first runs `docks-kit plan show <n>` and checks that the issue URL
+   at the end of its first output line names `<owner>/<repo>`, and stops
+   otherwise. Then it reads the record with `docks-kit plan show <n> --body`;
+   do not inline a second copy.
 2. An executor preamble: *before the first edit, read the root `AGENTS.md` and
    every `AGENTS.md` in a directory on the path to each file in the Steps
    `Files` union; follow the plan step by step; run every verification command
@@ -72,7 +76,7 @@ contain:
    the Steps `Files` cells; do not edit the plan issue; if a STOP condition
    fires, stop and report; do not improvise around obstacles; do not commit,
    push, or merge; audit every claim against an actual tool result.*
-3. A fixed report format: plan issue number plus Steps `Id` values attempted ·
+3. A fixed report format: plan issue reference plus Steps `Id` values attempted ·
    `STATUS: COMPLETE | STOPPED` · per-step done/skipped and verification result ·
    `STOPPED BECAUSE` (if stopped) · `FILES CHANGED` · `NOTES` (deviations,
    judgment calls). omp captures the changes of the run as a patch, or as the
@@ -89,7 +93,7 @@ result instead of the recorded HEAD.
 Review like a tech lead reviewing a PR against the plan. Fixable gaps go to a
 fresh executor run (see REVISE); the reviewed result returns to `plan-manager`.
 
-1. **Plan-identity check:** the report must name the same plan issue number and
+1. **Plan-identity check:** the report must name the same plan issue reference and
    Steps `Id` values that were dispatched, and the patch must stay within the
    union of that plan's Steps `Files` cells.
 2. **Re-run every done criterion** in a review checkout - do not trust the
@@ -112,7 +116,7 @@ A *documented* deviation is judged on merit, not reflex-blocked; an
 
 | Verdict | When | Action |
 |---|---|---|
-| **APPROVE** | plan identity matches, criteria pass, scope is clean, and quality holds | Return the reviewed patch and executor result to main-context `plan-manager`. It applies the reviewed patch, reruns verification, records `## Verification Results`, dispatches the single post-implementation code review, and follows the manager's full Landing flow. It archives only after an approved merge lands the closing pull request. |
+| **APPROVE** | plan identity matches, criteria pass, scope is clean, and quality holds | Return the reviewed patch and executor result to main-context `plan-manager`. It applies the reviewed patch, reruns verification, records `## Verification Results`, runs its bounded code-review loop (phase 6) until a pass, and follows the manager's full Landing flow. It archives only after an approved merge lands the closing pull request. |
 | **REVISE** | fixable gaps | Dispatch a fresh isolated `task` item with the original item content plus specific, actionable feedback and the previous report; do not rely on resuming an isolated run. The fresh run starts again from the unchanged main tree, so its result has its own `<patch>` (or branch and `branchBaseSha`); review it in full. Allow at most two revision rounds, then return a failure result to `plan-manager`. |
 | **BLOCK** | STOP hit, scope violated unrecoverably, or revisions exhausted | Return the evidence to `plan-manager`; it sets the plan `blocked` with a reason and does not re-run the plan review. |
 

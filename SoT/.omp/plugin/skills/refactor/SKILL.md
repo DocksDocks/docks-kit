@@ -4,8 +4,8 @@ description: "Use when auditing a codebase for structural issues — dead code, 
 user-invocable: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "33eb43193eecd13eb63a00eb08338bbebc1c290ec33522e5e21c6f839bab79be"
+  updated: "2026-11-24"
+  content_hash: "5ffdbafae8adc45d10d982d55ffb2ab8830a15f0ae40214e4ffe6381d06970a8"
 ---
 
 # Refactor (sequential pipeline)
@@ -74,11 +74,11 @@ Phase 3 uses Phase 2a's SAFE tier to skip files about to be deleted. Phase 4 mer
 ## The plan record (IPC + deliverable)
 
 ```text
-GitHub issue #<n> labeled plan, created with plan:drafting;
+GitHub issue <owner>/<repo>#<n> labeled plan, created with plan:drafting;
 plan-manager owns every later phase transition.
 ```
 
-Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. Downstream phases and a resumed run read the issue with `docks-kit plan show <issue> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
+Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. Downstream phases and a resumed run first confirm the plan target as the plan contract's Plan target says, then read the issue with `docks-kit plan show <n> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
 
 ## Review handoff (replaces Plan Mode)
 
@@ -89,7 +89,7 @@ After Phase 5, write `### Phase 6: Plan Presentation` under `## Research` in the
 3. Skipped findings (including over-engineering and unreproducible drops).
 4. Any MUST FIX from the pre-verifier requiring plan adjustment first.
 
-For an assessment-only or plan-only request, report the reviewed plan issue and summary, then stop. For an implementation request, hand the complete report to the unified `plan-manager`; it files the report in the plan issue, performs the single pre-implementation plan review, and sets the plan `ongoing`, then this orchestration continues directly into Phases 7–8 without a manual lifecycle prompt. Ask only when the manager identifies a genuine unresolved decision.
+For an assessment-only or plan-only request, report the reviewed plan issue and summary, then stop. For an implementation request, hand the complete report to the unified `plan-manager`; it files the report in the plan issue, runs its bounded plan-review loop until a pass, and sets the plan `ongoing`, then this orchestration continues directly into Phases 7–8 without a manual lifecycle prompt. Ask only when the manager identifies a genuine unresolved decision.
 
 After the plan reaches `status: ongoing`, implement via **Phases 7–8 in-context (the default)** — or, on omp with `task.isolation.enabled` true, `task.isolation.apply` false, and plan mode off, opt into the **dispatched-executor mode** (`references/executor-dispatch.md`): one isolated `task` subagent, with its model from `task.agentModelOverrides.task`, runs the plan in its own checkout, and you review its patch like a tech lead. Same plan, same issue verdict; just who does the edits.
 

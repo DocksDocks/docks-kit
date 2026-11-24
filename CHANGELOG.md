@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.2: plan runs keep their repository, branch, and work
+
+### Fixed
+
+- The plan contract gains Plan target. A run names the plan by its issue
+  reference (`<owner>/<repo>#<n>`). A resumed run checks the issue URL that
+  `show <n>` prints before its first write.
+- The linked branch must differ from the default branch. The run checks this
+  again right before each push.
+- The plan contract gains Work preservation. When implementation changed
+  files, the run commits the plan's own changes and pushes them to the linked
+  branch before a block, a stall exit, or an ended grant. This also covers a
+  block at the Effect gate.
+- A run posts a review round, a `Self-review`, or a merge record only while the
+  acting login is the sole assignee of the issue.
+- The plan-reviewer finding bar admits the recorded-decision effects that its
+  own decision rule calls findings.
+- The refactor route and its executor mode name the bounded plan-review and
+  code-review loops instead of a single review (DocksDocks/docks-kit#214).
+
 ## 2026-11-24 - docks-kit 0.29.1: plan commands check more before they write
 
 ### Fixed

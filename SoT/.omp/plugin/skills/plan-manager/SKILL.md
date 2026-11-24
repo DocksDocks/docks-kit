@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "805de8b18a06fb0a357ea4adaaf396aee0dbae402abdb0830a41091077ec1eb1"
+  content_hash: "29c91d7b337d4330332939b12bfccaa89e32076258d4fb3e2ff69579ce2b56f6"
 ---
 
 # Plan Manager
@@ -112,10 +112,12 @@ Done when: `show <n>` reports `plan=pass`.
 
 ### 5. Implement
 
-Move the plan to ongoing. Set up the linked branch with the contract's Linked
-branch steps before you change code. Set each step in-flight, implement or
-delegate it, run its proof, then mark it done. Honor the Effect confirmation
-gate. Follow the practices Engineering standards, Red baseline, Commits,
+Confirm the plan target as the contract's Plan target says, then move the plan
+to ongoing. Set up the linked branch with the contract's Linked branch steps
+before you change code. Set each step in-flight, implement or delegate it, run
+its proof, then mark it done. Honor the Effect confirmation gate; before any
+block after implementation changed files, run the contract's
+Work preservation. Follow the practices Engineering standards, Red baseline, Commits,
 Checks that fail outside the goal, and Delegated work. Before you mark
 acceptance, run each Acceptance row that runs a driven surface end to end.
 Run it through a flow of the project `verify` skill
@@ -237,13 +239,10 @@ repair of an earlier finding.
 
 When a code reviewer returns `blocked` because it left hunks unread, dispatch it
 again as the contract's Code-review rounds says. Resolve unreadable input before
-you request a verdict. If you block after implementation, commit and push
-current work to the linked branch before you record the blocker, so repairs are
-not stranded. When a pull request is open, update its body right after the push,
-as the contract's Checklist says. Post the pending manager response first, as
-the contract's review loop says. A hook that refuses that commit or push follows
-the contract's Repository hooks. Then run the contract's Teardown for an exit
-without a merge.
+you request a verdict. If you block after implementation, run the contract's
+Work preservation before you record the blocker, so repairs are not stranded.
+Post the pending manager response first, as the contract's review loop says.
+Then run the contract's Teardown for an exit without a merge.
 
 Done when: `show <n>` reports `code=pass`.
 

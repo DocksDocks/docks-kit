@@ -129,8 +129,9 @@ a reviewer prompt alone has no driven surface.
 Every non-local step requires an in-session `ask` immediately before it runs.
 A yolo run uses the effect table in Yolo runs instead.
 Persisted Effect values record intent, not permission. If `ask` is unavailable,
-block the step and plan with a reason. Unknown tokens produce advice; they do
-not authorize an effect. Finish dependencies before starting dependent work.
+block the step, run Work preservation (Landing and archive proof), then block
+the plan with a reason. Unknown tokens produce advice; they do not authorize an
+effect. Finish dependencies before starting dependent work.
 
 A non-production target is one that repository configuration or documentation
 names local, development, dev, test, homolog, homologation, staging, or
@@ -203,7 +204,8 @@ Run this review loop for plan review and for code review:
 2. Post the blocks that the round returned unchanged in one issue comment. Put
    the lens blocks of a panel round in the lens order of Code-review rounds.
    From round 2, put the manager response to the previous round after the
-   blocks. Never store a review in the body.
+   blocks. Never store a review in the body. Run the comment check below
+   right before the post.
 3. Run `show <n>` and read the verdict. Stop on pass.
 4. Otherwise reproduce each finding. Fix confirmed defects as Repairs says, and
    reject the others with evidence. Write the manager response to round k.
@@ -240,6 +242,24 @@ Write no bracketed severity in the response. When a run stops between rounds,
 at a block or before the question of item 5 or of the Round ceiling, first post
 the pending response as its own comment. A v4 plan can keep the separate
 repair and rejection comments of contract v4.
+
+Comment check: the helper counts a review or another record only when its
+author is the sole assignee of the issue. So right before each issue comment
+that the run posts with `gh`, such as a round comment, a pending response, a
+`Self-review` comment, or a merge record, compare `gh api user --jq .login`
+with every assigned actor, users and bots, of the issue:
+
+```bash
+gh api graphql -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){assignedActors(first:100){nodes{... on Actor{login}}}}}}' \
+  -f owner=<owner> -f name=<repo> -F n=<n> --jq '[.data.repository.issue.assignedActors.nodes[].login]'
+```
+
+`-f` passes the owner and the repository as strings, also a name such as `123`
+or `true`; `-F` passes the issue number as a number.
+Post only when that list holds exactly the acting login. Otherwise, or when
+the read fails, post nothing and write nothing else to the issue. Run Work
+preservation when implementation changed files, and stop as the refusal
+`plan #<n> is owned by <login>` does.
 
 Reviewers never fetch the issue. Save the review blocks of each round comment,
 without the manager response, as `<phase>-<n>-round-<k>.md` in the review
@@ -605,6 +625,19 @@ failure:
 
 ## Landing and archive proof
 
+### Plan target
+
+The helper reads the repository of the current checkout, so an issue number
+alone can name another issue in another checkout. Name the plan by its issue
+reference (`<owner>/<repo>#<n>`) in every handoff and run summary. Before the
+first write of a run that resumes a plan, also a run in another checkout, run
+`show <n>` without `--body`, whose first output line ends with the issue URL
+`https://github.com/<owner>/<repo>/issues/<n>` (`--body` writes that line to
+stderr). Continue only when that URL names the repository of the plan: the
+one that the publication preflight resolved, or the one that the handoff
+names. Use that repository in every `--repo`. Otherwise write nothing and
+stop, and report both repositories.
+
 ### Linked branch
 
 Set up the linked branch after the plan is ongoing and before any code change.
@@ -617,11 +650,74 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
    approval, set it up with Linked branch timing items 1 to 5, and skip items
    3 to 5 here. Otherwise block the plan. Report the dirty paths as Worktree
    hooks says.
-3. Run `gh issue develop <n> --list --repo <owner/repo>`. Reuse a listed branch.
-4. If no branch is listed, run
+3. Find the plan's branch from both sources that the next paragraph names.
+   Reuse it.
+4. Only when neither source names a branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default> --checkout`.
-5. If a call fails, list again. Continue only when the list shows the branch.
-   Otherwise block the plan. Never work on an unlinked branch.
+5. If a call fails, find the plan's branch again. Continue only when the
+   Branch check passes. Otherwise block the plan. Never work on an unlinked
+   branch or on the default branch.
+
+The plan's branch is a branch of `<owner/repo>` that one of two sources names:
+the branch that `gh issue develop <n> --list --repo <owner/repo>` lists, whose
+URL must start with `https://github.com/<owner/repo>/tree/`; or, after the pull
+request opens and GitHub drops that link, the head of the plan's pull request.
+When the issue lists more than one such branch, use the branch that this run
+already verified; without one, stop and report the branches.
+The plan's pull request is the open pull request whose URL, from
+`gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences --jq '.closedByPullRequestsReferences[].url'`,
+starts with `https://github.com/<owner/repo>/pull/`. Read it with
+`gh pr view <url> --json state,baseRefName,headRepositoryOwner,headRepository,headRefName`.
+Its base must be the default branch, and its head repository must be
+`<owner/repo>`. When the issue still lists a branch, the head must be that
+branch. When more than one open pull request qualifies, stop and report them.
+When a linked open pull request of `<owner/repo>` has another base, stop and
+report its branch and base; never create a branch then. Carry that pull
+request URL, not a bare number, through recovery and landing. A branch or a
+pull request of another repository is not the plan's.
+
+Branch check: read the default branch with
+`gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
+When a lookup fails, stop. The check passes when all of these hold:
+
+- The branch is the plan's branch.
+- The branch differs from the default branch.
+- Each URL that `git remote get-url --push --all origin` prints names
+  `<owner/repo>`, because a push goes to every push URL of the remote.
+- `env -u GIT_CONFIG git config --get-all remotes.origin` exits 1 with no
+  output, because a remote group named `origin` takes precedence over the
+  remote in a push. `GIT_CONFIG` changes only what `git config` reads, so
+  unset it to read the configuration that the push uses. Another exit code is
+  a failed lookup.
+
+Run it for every branch that a run selects: here, in Linked branch timing,
+when a run adopts a plan and reuses its branch, and right before each push,
+for the current branch. When it fails, push nothing, keep the commits local,
+and change no status yet. Report the failure, and list the branch under Kept
+resources as `not pushed`. Then return the failure to the calling rule. That
+rule records its step state, then blocks the plan with that reason, or keeps
+the status (a stall question or an ended grant).
+
+Push only with
+`git push -u origin HEAD --no-follow-tags --recurse-submodules=check` from the
+checked branch. The explicit `HEAD` refspec sends the current branch to the
+branch of the same name on `origin`, so `remote.origin.push` and `push.default`
+cannot choose another destination. `--no-follow-tags` keeps `push.followTags`
+from sending a tag, which can start a release workflow, and
+`--recurse-submodules=check` keeps `push.recurseSubmodules` from pushing a
+submodule to another repository or skipping the branch.
+
+### Work preservation
+
+Run this before each block, stall exit, or ended grant after implementation
+changed files. First run the Branch check of Linked branch on the current
+branch; when it fails, commit nothing and return as that check says. Commit
+the plan's own changes, the paths of the Steps Files cells, never ambient
+work, and push them as Linked branch says. When the pull request is open,
+update its body as Checklist says. A hook that refuses the commit or the push
+follows the Work preservation paragraph of Repository hooks. Then continue
+with the rule that called this one: it records its step state, then blocks,
+asks, or keeps the status.
 
 ### Repository hooks
 
@@ -636,19 +732,37 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    says. Never delete, stash, or move those files. Do not run the command from
    another worktree to avoid them. A new worktree can run other hooks than the
    checkout (Worktree hooks).
-3. Otherwise, run `git fetch origin <default>`. Then run the hook's check on
-   `origin/<default>` in a clean worktree. When it fails the same way there, it
-   is a baseline failure. Record the hook, the check, and both results in
-   Verification Results. Block the plan with that reason. Then ask the user how
-   to continue. A yolo run uses the hook row in Yolo runs instead of the
-   question.
-4. When the check passes on `origin/<default>`, this plan causes the failure.
-   Fix it as item 1 says.
+3. Otherwise, read the commit of the default branch of the plan repository:
 
-A block or a stall needs a commit and a push of current work (Round ceiling,
-and `plan-manager` phase 6). When a hook refuses that commit or push, keep the
-work where it is. List the branch under Kept resources as `not pushed`. Then
-continue with the block or the stall question.
+   ```bash
+   gh api graphql -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid}}}}' \
+     -f owner=<owner> -f name=<repo> --jq .data.repository.defaultBranchRef.target.oid
+   ```
+
+   Run `git fetch origin <sha>`, then run the hook's check on `<sha>` in a
+   clean worktree. Set `GIT_NO_REPLACE_OBJECTS=1` for the worktree creation
+   and for the check, so a local `refs/replace/` entry cannot change the tree.
+   The hash names the commit of the plan repository, so a branch name, a
+   mirror, a tag, or another fetch cannot change what the check runs on. When
+   it fails the same way there, it is a baseline failure. When
+   the read prints no hash, or the read or the fetch fails, the baseline is
+   unknown; record that, and continue as for a baseline failure. Record the
+   hook, the check, and both results in Verification Results. Block the plan
+   with that reason. Then ask the user how to continue. A yolo run uses the
+   hook row in Yolo runs instead of the question.
+4. When the check passes on `<sha>`, this plan causes the failure. Fix it as
+   item 1 says.
+
+Work preservation (above) needs a commit and a push of the plan's own changes
+before a block, a stall exit, or an ended grant. The run is already leaving,
+so when a hook refuses that commit or push, do not diagnose it with items 2
+to 4, and write nothing to the issue for it. Fix a failure that this plan
+clearly causes, as item 1 says. Otherwise keep the work where it is. Put the
+hook, the command, and its output in the report to the user, and list the
+branch under Kept resources as `not pushed`. Outside a yolo run, when `ask`
+is available, ask the user how to continue before you return. Then return to
+the rule that called Work preservation; it continues as it says, and its
+report names the hook.
 
 A step after the landing merge, such as a release, can also meet a failing
 hook. Then leave that step `planned`, and keep the plan status. Record the
@@ -820,9 +934,9 @@ lists those rows. When a named row ran without the `verify` skill, keep a
 template item that names that skill unticked. Give it the reason
 `<ids> ran without the verify skill`, where `<ids>` lists those rows.
 A template item without proof gets the reason `not checked by the plan`.
-After each push to the linked branch while the pull request is open, also a
-push of current work before a block or a stall, build every tick again from
-the evidence for the new head. Evidence for an older head ticks nothing: the
+After each push to the linked branch while the pull request is open, also the
+push of Work preservation, build every tick again from the evidence for the
+new head. Evidence for an older head ticks nothing: the
 item stays unticked, with the reason `not checked on <short-sha>`, until it
 passes on the new head. Update the body right after the push, before any wait
 for checks, with `gh pr edit <pr> --repo <owner/repo> --body-file <file>`.
@@ -841,10 +955,9 @@ fixing it. That is a stall. In a yolo run, follow Round ceiling. Otherwise,
 under a grant, apply the Stall rule of Delegated decisions first. Without a
 grant, or when the Stall rule asks, ask with the options `Continue fixing` and
 `Leave plan blocked`. `Continue fixing` gives the check three more fix
-attempts. On `Leave plan blocked`, or without an answer, commit and push
-current work to the linked branch, update the body as Checklist says, set the
-status to `blocked` with the check name as the reason, run Teardown's exit
-without a merge, and report.
+attempts. On `Leave plan blocked`, or without an answer, run
+Work preservation, set the status to `blocked` with the check name as the
+reason, run Teardown's exit without a merge, and report.
 
 Before the merge question, run the landing self-check. Read the pushed body
 with `gh pr view <pr> --repo <owner/repo> --json body --jq .body`. For each
@@ -863,7 +976,14 @@ and stacks to stop, the worktree to remove, the local branch to delete with
 `git branch -d <branch>`, and each remote non-production resource to clean up.
 A `Merge now` answer confirms that teardown, including the branch delete.
 Without `Merge now`, leave the issue and the pull request open, and run
-Teardown's exit without a merge. Merge with
+Teardown's exit without a merge. Right before the merge, read the default
+branch again as the Branch check does, and confirm with
+`gh pr view <url> --json headRefOid,baseRefName` that the head is the reviewed
+head and the base is that default branch, the one that the merge question
+named. When the default branch or the base changed, do not merge: the answer
+no longer holds, and the checks do not prove the new base. Leave the issue
+and the pull request open, report the change, and run Teardown's exit without
+a merge. Merge with
 `gh pr merge <pr> --repo <owner/repo> --match-head-commit <reviewed-head-sha>`
 and the merge-method flag that the repository allows. A prior plan approval
 never authorizes a merge.
@@ -1308,7 +1428,7 @@ line.
 |---|---|
 | `local` | Run |
 | `probe` | Run against a non-production target or a public read-only source |
-| `push` | Run only to the plan's linked branch |
+| `push` | Run only to the plan's linked branch, after the Branch check of Linked branch |
 | `deploy` | Run only to a non-production environment |
 | `production_access`, `publish`, `release` | Do not run before the landing merge |
 
@@ -1325,9 +1445,11 @@ the run starts it, before its research. The status stays
 items 3 to 5. When it is dirty, do not ask. Run the checkout check of Worktree
 hooks. When it passes, use these commands instead:
 
-1. If `gh issue develop <n> --list --repo <owner/repo>` lists no branch, run
+1. Find the plan's branch, as Linked branch defines it. Only when neither
+   source names a branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default>`.
-2. List again and read the branch name.
+2. Find the plan's branch again and read its name. Run the Branch check of
+   Linked branch for it.
 3. Run `git fetch origin <branch>`.
 4. Run `git worktree add <worktree> <branch>`, where `<worktree>` is
    `${XDG_DATA_HOME:-$HOME/.local/share}/agent-worktrees/<repository-name>/issue-<n>`.
@@ -1367,22 +1489,19 @@ code-review pass that still lists MEDIUM or LOW findings, land, and list those
 findings in the run summary.
 
 On a stall, apply the Stall rule of Delegated decisions first. When it asks,
-commit and push current work to the linked branch first, when code exists.
-When the pull request is open, update its body as Checklist says. A hook that
-refuses them follows Repository hooks. Then ask once, with the options
-`Continue yolo` and `Leave plan blocked`. Keep the status unchanged while you
-ask, because the helper does not move a blocked plan back to `drafting` or
-`planned`. `Continue yolo` extends the ceiling of the phase, or gives a failing
-check three more fix attempts. On `Leave plan blocked`, or without an answer,
-set the status to `blocked` with the stall reason, run Teardown's exit without
-a merge, and report.
+run Work preservation first, when implementation changed files. Then ask once,
+with the options `Continue yolo` and `Leave plan blocked`. Keep the status
+unchanged while you ask, because the helper does not move a blocked plan back
+to `drafting` or `planned`. `Continue yolo` extends the ceiling of the phase,
+or gives a failing check three more fix attempts. On `Leave plan blocked`, or
+without an answer, set the status to `blocked` with the stall reason, run
+Teardown's exit without a merge, and report.
 
 ### Ended grant
 
 When the Grant check of Delegated decisions finds that the grant has ended,
-the yolo run stops at once and decides nothing more. Commit and push current
-work to the linked branch first, when code exists, and when the pull request
-is open, update its body as Checklist says, as a stall does. Post one issue
+the yolo run stops at once and decides nothing more. Run Work preservation
+first, when implementation changed files, as a stall does. Post one issue
 comment that names the ending event, keep the plan status unchanged, and
 report. Do not ask the merge question.
 

@@ -402,12 +402,14 @@ URL and the check result into the file, and update the body with
 
 ## Recover after compaction
 
-The issue is the run record. Run `show <n>` for the status and verdicts. Run
-`gh issue develop <n> --list --repo <owner/repo>` for the branch. After the pull
-request exists, GitHub lists no branch there. Then read the pull request number
-from `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`,
-and read the branch from `gh pr view <pr> --repo <owner/repo> --json headRefName`.
-Run `git worktree list` for a worktree. Count review rounds from round
+The issue is the run record. Name it by its issue reference (`<owner>/<repo>#<n>`),
+not by its number alone. Run `show <n>` for the status and verdicts, and
+confirm the plan target as the contract's Plan target says before any write.
+Find the branch as the contract's Linked branch defines the plan's branch: the
+issue link with its repository URL, or, after the pull request exists and
+GitHub lists no branch there, the head of the open pull request whose head
+repository is the plan repository. Only then run `git worktree list`, and use
+a worktree only when it holds that branch. Count review rounds from round
 comments: a comment whose first line names the review kind. One round comment
 can hold several lens blocks and the manager response to the previous round.
 A `Self-review` comment, an authority event (`Delegation grant:` or

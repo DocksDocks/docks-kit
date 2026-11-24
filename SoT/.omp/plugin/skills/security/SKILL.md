@@ -4,8 +4,8 @@ description: "Use when running a security audit on a codebase — OWASP Top 10, 
 user-invocable: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "6836d41e81fd3f3f208243cdf93c8ad3266a68d975130e72008c2c38b3a839d0"
+  updated: "2026-11-24"
+  content_hash: "c835ceb9deb842efc198815234f65f2d817ad1cf48efdb750864ecdda43a033c"
 ---
 
 # Security Audit (sequential pipeline)
@@ -75,11 +75,11 @@ Phases 2a–2c are independent lenses over the same Phase 1 map; run them sequen
 The plan issue holds the whole run. It doubles as inter-phase memory and the final artifact.
 
 ```text
-GitHub issue #<n> labeled plan, created with plan:drafting;
+GitHub issue <owner>/<repo>#<n> labeled plan, created with plan:drafting;
 plan-manager owns every later phase transition.
 ```
 
-Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. The subheadings above are the contract; downstream phases and a resumed run read the issue with `docks-kit plan show <issue> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
+Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. The subheadings above are the contract; downstream phases and a resumed run first confirm the plan target as the plan contract's Plan target says, then read the issue with `docks-kit plan show <n> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
 
 ## Finding quality (applies to every phase)
 
