@@ -1,5 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { which } from "../engine-native/exec";
 import config from "./config.json" with { type: "json" };
 import {
   extractFrontmatter,
@@ -13,6 +16,7 @@ import {
   skillCandidateDirs,
   skillsDir,
 } from "./frontmatter";
+import { countHeadings } from "./markdownHeadings";
 import { bodyAfterFrontmatter, scoreSkill, splitLines } from "./rubric";
 
 /**
@@ -199,126 +203,95 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
 }
 
 /**
- * An ATX heading without its indentation: one to six `#`, then a space, a tab,
- * or the end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
+ * The count of real headings with the text `title` in each of `texts`, from
+ * Bun's Markdown parser (`markdownHeadings.ts`). Under Node, as in the vitest
+ * unit run, the count runs in a Bun child process; a failed child throws.
  */
-const ATX_HEADING = /^#{1,6}(?=[ \t]|$)(.*)$/;
-/** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
-const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
-/**
- * A fence delimiter line: up to three spaces, then three or more backticks or
- * tildes; after backticks, the line has no other backtick (CommonMark 0.31.2, 4.5).
- */
-const FENCE_LINE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
-
-/**
- * The offset of each line that is an ATX heading with the text `title`, at any
- * level and any indentation. Lines end at `\n` or `\r\n`.
- */
-function headingOffsets(content: string, title: string): Array<number> {
-  const offsets: Array<number> = [];
-  let offset = 0;
-  for (const raw of content.split("\n")) {
-    if (ATX_HEADING.exec(raw.trim())?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
-      offsets.push(offset);
-    }
-    offset += raw.length + 1;
+function headingCounts(texts: ReadonlyArray<string>, title: string): Array<number> {
+  if (process.versions["bun"] !== undefined) return countHeadings(texts, title);
+  const bun = which("bun");
+  if (bun === "") throw new Error("the bun executable is not on PATH");
+  const script = fileURLToPath(new URL("./markdownHeadings.ts", import.meta.url));
+  const child = spawnSync(bun, [script], {
+    input: JSON.stringify({ texts, title }),
+    encoding: "utf8",
+  });
+  if (child.error !== undefined) throw child.error;
+  if (child.status !== 0) {
+    throw new Error(
+      `${bun} ${script} ended with ${String(child.status ?? child.signal)}: ${child.stderr.trim()}`,
+    );
   }
-  return offsets;
-}
-
-/** An HTML comment block start: the line starts with `<!--` after its leading spaces (CommonMark 0.31.2, 4.6). */
-const COMMENT_START = /^[ \t]*<!--/;
-
-/**
- * The problem that the lines of `text` leave open at its end, in one ordered
- * scan, or null. A fence line opens a code fence; while it is open, only a fence
- * line of the same character, at least as long, with nothing but spaces or tabs
- * after it, closes it, and nothing else counts. Outside a fence, a line that
- * starts with `<!--` opens an HTML comment, and the first `-->` after it closes
- * it; a `<!--` inside a line does not count, and nothing inside the comment
- * opens a fence. A fence or comment opened with k leading spaces, as in a list
- * item, must close before any non-blank line with fewer than k leading spaces.
- */
-function blockProblem(text: string): string | null {
-  let fence: { readonly marker: string; readonly indent: number } | null = null;
-  let commentIndent: number | null = null;
-  for (const raw of text.split("\n")) {
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    const marker = FENCE_LINE.exec(line)?.[1];
-    const indent = line.length - line.replace(/^ +/, "").length;
-    const blank = line.trim() === "";
-    if (commentIndent !== null) {
-      if (!blank && indent < commentIndent) {
-        return "an indented HTML comment before the Report section ends without --> at its indentation";
-      }
-      if (line.includes("-->")) commentIndent = null;
-    } else if (fence !== null) {
-      if (!blank && indent < fence.indent) {
-        return "an indented code fence before the Report section ends without a closer at its indentation";
-      }
-      if (
-        marker?.[0] === fence.marker[0] &&
-        marker.length >= fence.marker.length &&
-        line.trim() === marker
-      ) {
-        fence = null;
-      }
-    } else if (marker !== undefined) {
-      fence = { marker, indent };
-    } else if (COMMENT_START.test(line)) {
-      const closed = line.slice(line.indexOf("<!--") + "<!--".length).includes("-->");
-      if (!closed) commentIndent = indent;
-    }
+  const counts: unknown = JSON.parse(child.stdout);
+  if (!Array.isArray(counts) || counts.length !== texts.length || !counts.every(Number.isInteger)) {
+    throw new Error(`${bun} ${script} did not write one count per text: ${child.stdout}`);
   }
-  if (fence !== null) return "an unclosed code fence comes before the Report section";
-  return commentIndent !== null ? "an unclosed HTML comment comes before the Report section" : null;
+  return counts;
 }
 
 /**
- * Each skill ends with the canonical report section, byte for byte; the
- * `reportSection` text of config.json is the one source of that section. The
- * files are read as latin1 (one character per byte), so line endings and the
- * final newline count. Every line that is the Report heading in ATX form, at
- * any indentation, counts, also inside fenced code, an HTML comment, or an
- * indented code block, and the file must have exactly one; so an indented code
- * block that quotes the heading fails closed. Before it, the lines must leave
- * no code fence or HTML comment open (see `blockProblem`). The check does no
- * Markdown block parsing beyond that scan, and it does not model container
- * blocks such as list items: a fence or comment that a container ends early
- * stays open in the scan, so the check fails closed. A skill that quotes the
- * heading quotes it in another form, such as inline code.
+ * Each skill ends with the canonical report section, byte for byte, and that
+ * section is the only Report section; the `reportSection` text of config.json is
+ * the one source of the section. The bytes are compared as read, so line endings
+ * and the final newline count. A CommonMark parser (Bun's `Bun.markdown`) finds
+ * the real Report headings, so a heading line in a code block, an HTML block, or
+ * a paragraph does not count, and one in a list item or a block quote does. The
+ * whole file must have exactly one real Report heading, and the text before the
+ * canonical section must have none. When the file ends with the canonical bytes
+ * but has no real Report heading, a block before the section hides it.
  */
 export function checkReportSection(
   repoRoot: string,
   section: string = config.reportSection,
 ): Array<string> {
-  const canonical = Buffer.from(section, "utf8").toString("latin1");
-  const heading = canonical.split("\n", 1)[0] ?? "";
+  const canonical = Buffer.from(section, "utf8");
+  const heading = section.split("\n", 1)[0] ?? "";
   if (!heading.startsWith("## ")) {
     return ["config.json reportSection: the first line must be the `## ` heading of the section"];
   }
   const failures: Array<string> = [];
+  const ended: Array<{ readonly file: string; readonly text: string; readonly before: string }> =
+    [];
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
-    const content = readFileSync(file, "latin1");
-    const starts = headingOffsets(content, heading.slice("## ".length));
-    const problem = blockProblem(content.slice(0, starts[0]));
-    if (starts.length === 0) {
+    const bytes = readFileSync(file);
+    const start = bytes.length - canonical.length;
+    if (start >= 0 && bytes.subarray(start).equals(canonical)) {
+      ended.push({
+        file,
+        text: bytes.toString("utf8"),
+        before: bytes.subarray(0, start).toString("utf8"),
+      });
+    } else {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
       );
-    } else if (starts.length > 1) {
-      failures.push(
-        `${shown(repoRoot, file)}: has ${starts.length} Report sections; keep one, at the end of the file`,
-      );
-    } else if (problem !== null) {
-      failures.push(`${shown(repoRoot, file)}: ${problem}`);
-    } else if (content.slice(starts[0]) !== canonical) {
-      failures.push(
-        `${shown(repoRoot, file)}: the Report section differs from the reportSection text of config.json; copy that text over it`,
-      );
     }
   }
+  let counts: Array<number>;
+  try {
+    counts = headingCounts(
+      ended.flatMap(({ text, before }) => [text, before]),
+      heading.slice("## ".length),
+    );
+  } catch (error) {
+    return [
+      ...failures,
+      `cannot count the Report headings with Bun's Markdown parser: ${String(error)}`,
+    ];
+  }
+  ended.forEach(({ file }, index) => {
+    const whole = counts[2 * index] ?? 0;
+    const before = counts[2 * index + 1] ?? 0;
+    if (before > 0 || whole > 1) {
+      failures.push(
+        `${shown(repoRoot, file)}: has ${Math.max(whole, before + 1)} Report sections; keep one, at the end of the file`,
+      );
+    } else if (whole === 0) {
+      failures.push(
+        `${shown(repoRoot, file)}: the Report section at the end is not a heading: a block before it hides it`,
+      );
+    }
+  });
   return failures;
 }
 

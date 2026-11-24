@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import config from "../../../src/skills/config.json" with { type: "json" };
 import { skillCandidateDirs } from "../../../src/skills/frontmatter.ts";
 import { checkDurableAnchors, checkReferences } from "../../../scripts/pluginContent/references.ts";
@@ -61,6 +61,8 @@ function plant(root: string, relative: string, text: string): void {
 }
 
 const skillFile = (name: string): string => `${SKILLS}/${name}/SKILL.md`;
+/** The failure for a canonical suffix that a block before it keeps from being a heading. */
+const HIDDEN = "the Report section at the end is not a heading: a block before it hides it";
 
 /** Expect a failure that names `file` and contains `detail`. */
 function expectFailure(failures: ReadonlyArray<string>, file: string, detail: string): void {
@@ -209,7 +211,7 @@ describe("kit plugin skills: report section and shared copies", () => {
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace("Leave out secrets", "Leave out passwords"),
     );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "Report section differs");
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
   });
 
   it("fails a skill without the report section", () => {
@@ -235,6 +237,8 @@ describe("kit plugin skills: report section and shared copies", () => {
     { shape: "an indented", stale: "   ## Report a problem with this skill" },
     { shape: "a closed", stale: "## Report a problem with this skill ##" },
     { shape: "a CRLF", stale: "## Report a problem with this skill\r" },
+    { shape: "a blockquote", stale: "> ## Report a problem with this skill" },
+    { shape: "a list item", stale: "- ## Report a problem with this skill" },
   ]) {
     it(`fails ${shape} stale report heading before the canonical one`, () => {
       const root = copyFixture();
@@ -248,13 +252,19 @@ describe("kit plugin skills: report section and shared copies", () => {
     });
   }
 
-  for (const { place, before, after } of [
-    { place: "inside an unclosed code fence", before: "```text\n", after: "" },
-    { place: "inside an unclosed HTML comment", before: "<!-- draft\n\n", after: "" },
+  for (const { place, before, after, detail } of [
+    { place: "inside an unclosed code fence", before: "```text\n", after: "", detail: HIDDEN },
+    {
+      place: "inside an unclosed HTML comment",
+      before: "<!-- draft\n\n",
+      after: "",
+      detail: HIDDEN,
+    },
     {
       place: "after an unclosed fence in a list item",
       before: "- item\n\n  ```text\n\n",
       after: "```text\nx\n```\n\n",
+      detail: "has 2 Report sections",
     },
   ]) {
     it(`fails a stale report section ${place} before the canonical one`, () => {
@@ -265,11 +275,11 @@ describe("kit plugin skills: report section and shared copies", () => {
         (text) =>
           `${text.replace("## Report a problem with this skill", `${before}## Report a problem with this skill`)}${after}${config.reportSection}`,
       );
-      expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), detail);
     });
   }
 
-  it("fails a report heading quoted inside a closed fence", () => {
+  it("passes a report heading quoted inside a closed fence", () => {
     const root = copyFixture();
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace(
@@ -277,7 +287,7 @@ describe("kit plugin skills: report section and shared copies", () => {
         "```markdown\n## Report a problem with this skill\n```\n\n## Report a problem with this skill",
       ),
     );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+    expect(checkReportSection(root)).toEqual([]);
   });
 
   for (const { shape, block, opener } of [
@@ -307,11 +317,7 @@ describe("kit plugin skills: report section and shared copies", () => {
           `${opener}## Report a problem with this skill`,
         ),
       );
-      expectFailure(
-        checkReportSection(root),
-        skillFile("zoom-out"),
-        `an unclosed ${block} comes before the Report section`,
-      );
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), HIDDEN);
     });
   }
 
@@ -323,11 +329,7 @@ describe("kit plugin skills: report section and shared copies", () => {
         "- item\n\n  ```text\n  code\n```\n\n## Report a problem with this skill",
       ),
     );
-    expectFailure(
-      checkReportSection(root),
-      skillFile("zoom-out"),
-      "an indented code fence before the Report section ends without a closer at its indentation",
-    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), HIDDEN);
   });
 
   it("fails a list item comment that the list end leaves open, before a fence and the only report section", () => {
@@ -338,11 +340,7 @@ describe("kit plugin skills: report section and shared copies", () => {
         "- item\n\n  <!-- draft\n\nText.\n\n```html\n<!-- example -->\n\n## Report a problem with this skill",
       ),
     );
-    expectFailure(
-      checkReportSection(root),
-      skillFile("zoom-out"),
-      "an indented HTML comment before the Report section ends without --> at its indentation",
-    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), HIDDEN);
   });
 
   it("fails a stale report section indented under a numbered list item before the canonical one", () => {
@@ -361,6 +359,25 @@ describe("kit plugin skills: report section and shared copies", () => {
     expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
   });
 
+  for (const { shape, opener } of [
+    {
+      shape: "a tab-indented list comment, then an unclosed fence that holds a comment",
+      opener: "10. Draft instructions\n\n\t<!-- draft\n\n```html\n<!-- example -->\n\n",
+    },
+    { shape: "an unclosed <pre> block", opener: "<pre>\n\n" },
+  ]) {
+    it(`fails the only report section hidden by ${shape}`, () => {
+      const root = copyFixture();
+      edit(root, skillFile("zoom-out"), (text) =>
+        text.replace(
+          "## Report a problem with this skill",
+          `${opener}## Report a problem with this skill`,
+        ),
+      );
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), HIDDEN);
+    });
+  }
+
   it("passes a `<!--` in inline code before the only report section", () => {
     const root = copyFixture();
     edit(root, skillFile("zoom-out"), (text) =>
@@ -371,6 +388,21 @@ describe("kit plugin skills: report section and shared copies", () => {
     );
     expect(checkReportSection(root)).toEqual([]);
   });
+
+  // Under Node, the Markdown count runs in a Bun child; without bun on PATH the check fails, never passes.
+  it.skipIf(process.versions["bun"] !== undefined)(
+    "fails closed when the Bun Markdown child cannot run",
+    () => {
+      vi.stubEnv("PATH", "");
+      try {
+        expect(checkReportSection(REPO_ROOT)).toContainEqual(
+          expect.stringContaining("cannot count the Report headings with Bun's Markdown parser"),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it("checks a skill whose SKILL.md is a symbolic link", () => {
     const root = copyFixture();
