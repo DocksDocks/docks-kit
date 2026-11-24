@@ -627,8 +627,9 @@ failure:
 The helper reads the repository of the current checkout, so an issue number
 alone can name another issue in another checkout. Name the plan by its issue
 URL (`<owner>/<repo>#<n>`) in every handoff and run summary. Before the first
-write of a run that resumes a plan, also from another checkout, run `show <n>`.
-Its first line ends with the issue URL. Continue only when that URL names the
+write of a run that resumes a plan, also from another checkout, run
+`show <n>` without `--body`, whose first output line ends with the issue URL
+(`--body` writes that line to stderr). Continue only when that URL names the
 repository of the plan: the one that the publication preflight resolved, or the
 one that the handoff names. Use that repository in every `--repo`. Otherwise
 write nothing and stop, and report both repositories.
@@ -645,7 +646,8 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
    approval, set it up with Linked branch timing items 1 to 5, and skip items
    3 to 5 here. Otherwise block the plan. Report the dirty paths as Worktree
    hooks says.
-3. Find the plan's branch, as Branch check below defines it. Reuse it.
+3. Find the plan's branch from both sources that the next paragraph names.
+   Reuse it.
 4. Only when neither source names a branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default> --checkout`.
 5. If a call fails, find the plan's branch again. Continue only when the
