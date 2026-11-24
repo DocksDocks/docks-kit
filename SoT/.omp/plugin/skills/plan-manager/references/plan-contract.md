@@ -129,8 +129,8 @@ a reviewer prompt alone has no driven surface.
 Every non-local step requires an in-session `ask` immediately before it runs.
 A yolo run uses the effect table in Yolo runs instead.
 Persisted Effect values record intent, not permission. If `ask` is unavailable,
-run Work preservation (Landing and archive proof), then block the step and
-plan with a reason. Unknown tokens produce advice; they do not authorize an
+block the step, run Work preservation (Landing and archive proof), then block
+the plan with a reason. Unknown tokens produce advice; they do not authorize an
 effect. Finish dependencies before starting dependent work.
 
 A non-production target is one that repository configuration or documentation
@@ -665,9 +665,11 @@ The plan's pull request is the open pull request whose URL, from
 `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences --jq '.closedByPullRequestsReferences[].url'`,
 starts with `https://github.com/<owner/repo>/pull/`. Read its head with
 `gh pr view <url> --json state,headRepositoryOwner,headRepository,headRefName`,
-whose head repository must be `<owner/repo>`. Carry that pull request URL,
-not a bare number, through recovery and landing. A branch or a pull request
-of another repository is not the plan's.
+whose head repository must be `<owner/repo>`. When the issue still lists a
+branch, the head must be that branch. When more than one open pull request
+qualifies, stop and report them. Carry that pull request URL, not a bare
+number, through recovery and landing. A branch or a pull request of another
+repository is not the plan's.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
@@ -677,14 +679,16 @@ When a lookup fails, stop. The check passes when all of these hold:
 - The branch differs from the default branch.
 - Each URL that `git remote get-url --push --all origin` prints names
   `<owner/repo>`, because a push goes to every push URL of the remote.
-- `git config --get remotes.origin` prints nothing, because a remote group
-  named `origin` takes precedence over the remote in a push.
+- `git config --get-all remotes.origin` exits 1 with no output, because a
+  remote group named `origin` takes precedence over the remote in a push.
+  Another exit code is a failed lookup.
 
 Run it for every branch that a run selects: here, in Linked branch timing,
 when a run adopts a plan and reuses its branch, and right before each push,
-for the current branch. When it fails, push nothing and keep the commits
-local. Then block the plan with that reason, unless the calling rule keeps the
-status (a stall question or an ended grant); then report the failure and list
+for the current branch. When it fails, push nothing, keep the commits local,
+and change no status yet. Return the failure to the calling rule. That rule
+records its step state, then blocks the plan with that reason, or keeps the
+status (a stall question or an ended grant), reports the failure, and lists
 the branch under Kept resources as `not pushed`.
 
 Push only with
@@ -700,12 +704,13 @@ submodule to another repository or skipping the branch.
 
 Run this before each block, stall exit, or ended grant after implementation
 changed files. First run the Branch check of Linked branch on the current
-branch; when it fails, commit nothing and follow that check. Commit the plan's
-own changes, the paths of the Steps Files cells, never ambient work, and push
-them as Linked branch says. When the pull request is open, update its body as
-Checklist says. A hook that refuses the commit or the push follows Repository
-hooks. Then continue with the rule that called this one: it blocks, asks, or
-keeps the status.
+branch; when it fails, commit nothing and return as that check says. Commit
+the plan's own changes, the paths of the Steps Files cells, never ambient
+work, and push them as Linked branch says. When the pull request is open,
+update its body as Checklist says. A hook that refuses the commit or the push
+follows the Work preservation paragraph of Repository hooks. Then continue
+with the rule that called this one: it records its step state, then blocks,
+asks, or keeps the status.
 
 ### Repository hooks
 
@@ -731,7 +736,9 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
 
 Work preservation (above) needs a commit and a push of the plan's own changes
 before a block, a stall exit, or an ended grant. When a hook refuses that
-commit or push, keep the work where it is. List the branch under Kept
+commit or push, fix a failure that this plan causes as item 1 says.
+Otherwise, instead of items 2 and 3, keep the work where it is, change no
+status, record the hook and the failure, and list the branch under Kept
 resources as `not pushed`. Then continue with the rule that called Work
 preservation.
 

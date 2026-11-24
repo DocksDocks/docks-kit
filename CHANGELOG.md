@@ -9,9 +9,10 @@
   `show <n>` prints before its first write.
 - The linked branch must differ from the default branch. The run checks this
   again right before each push.
-- The plan contract gains Work preservation. Before a block, a stall exit, or
-  an ended grant, the run commits the plan's own changes and pushes them to
-  the linked branch. This also covers a block at the Effect gate.
+- The plan contract gains Work preservation. When implementation changed
+  files, the run commits the plan's own changes and pushes them to the linked
+  branch before a block, a stall exit, or an ended grant. This also covers a
+  block at the Effect gate.
 - A run posts a review round, a `Self-review`, or a merge record only while the
   acting login is the sole assignee of the issue.
 - The plan-reviewer finding bar admits the recorded-decision effects that its
