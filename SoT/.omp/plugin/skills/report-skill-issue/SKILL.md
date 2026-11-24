@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "4b6150826cd1459b88caa5c282d0b41842b1469f350254e26eef6ffca9a32f25"
+  content_hash: "2bf204728b6e6c883924e9f9f6b3c1f1550c437f4400f8ad4618628d45575cb9"
 ---
 
 # Report a Skill Issue
@@ -13,7 +13,7 @@ metadata:
 The docks-kit kit plugin (`docks-kit-omp`) comes from the public GitHub repository DocksDocks/docks-kit. It holds the docks and plan-lifecycle skills, the reviewer agents, and the omp extensions. When one of its skills, reviewer agents, omp extensions, or scripts gives a wrong, outdated, or unsafe instruction, or a shipped script fails, this skill turns what you saw into one issue there. A useful report lets a maintainer reproduce the problem without access to the user's project. It identifies the exact skill text, quotes the instruction, and shows what happened. It contains nothing private, because anyone can read it.
 
 <constraint>
-DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. In a run where you cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user), print the draft and the link from "Without gh, or without a way to ask" as your final message and stop. The URL files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing in that run.
+DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. In a run where you cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user), print the draft-only result from "Without gh, or without a way to ask" as your final message and stop. That result files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing in that run.
 </constraint>
 
 <constraint>
@@ -118,7 +118,7 @@ Show the user, as the final message of your turn:
 
 - the target: a new issue in DocksDocks/docks-kit, or a comment on issue #n there;
 - the exact title and body;
-- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it). Without gh, give the link or the text from "Without gh, or without a way to ask" instead.
+- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it). On the draft-only route (see "Without gh, or without a way to ask"), give no command and no account: give the link, or the title and the body as text when no script can run.
 
 Ask the user to approve or change the text, then end your turn. A security problem stops before this step: give the private draft instead (see "Security problems").
 
@@ -142,11 +142,11 @@ If a filed issue or comment names a private repository or holds other private da
 
 ### Without gh, or without a way to ask
 
-Give a prefilled link when gh is missing or not logged in to `github.com`, or when the run cannot ask the user. Do not install gh, and do not ask for a token. The link opens the new-issue form with the text filled in:
+Use the draft-only route when gh is missing, gh is not logged in to `github.com`, the runtime cannot run gh, or the run cannot ask the user. On this route you file nothing; the user files the text. Do not install gh, and do not ask for a token. Give the draft with a prefilled link, which opens the new-issue form with the text filled in:
 
 `https://github.com/DocksDocks/docks-kit/issues/new?title=<url-encoded title>&body=<url-encoded body>`
 
-Build the link with a script, not by hand, so that it holds the exact title and body that you show. Write the title and the body to two temporary files as in stage 6, run one of these commands, and then remove both files. Each command strips one trailing newline from the title. If the runtime cannot run a script, do not build the link: give the title and the body as text, as in the paragraph after the commands.
+Build the link with a script, not by hand, so that it holds the exact title and body that you show. Write the title and the body to two temporary files as in stage 6, run one of these commands, and then remove both files. Each command strips one trailing newline from the title. If no script can run, give no link: give the title and the body as text, as in the paragraph after the commands.
 
 ```bash
 # Node
@@ -257,7 +257,7 @@ Check the draft before you show it, and again before you file it:
 - "What the skill says" quotes the instruction exactly, with its heading.
 - The quote comes from the copy that the runtime loaded, and it shows the problem.
 - You searched for an existing report (stage 3), or your message says that the search did not run and gives the search URL. A draft that adds to an existing issue is a comment on that issue.
-- Your message names the target, the command that you will run, and the GitHub account (stage 5). Without gh, or in a run where you cannot ask, it names the target and gives the link from "Without gh, or without a way to ask" instead. When no script can run, the title and the body as text replace the link; the message then needs no command, no account, and no link.
+- Your message names the target. Off the draft-only route, it also names the command that you will run and the GitHub account (stage 5). On the draft-only route (see "Without gh, or without a way to ask"), it gives the link, or the title and the body as text when no script can run, and no command or account.
 - The title and the body contain no secret value or token, no private repository, organization, customer, or person name, no internal hostname, no absolute machine path, no proprietary code or data, and no private plan or issue title. The second and third scans below check the repository names.
 - For a private project, the title and the body contain no owner or name of its remotes and no branch name, also in quoted output, and no `#` before its issue and pull request numbers in prose (stage 4).
 - The problem is not a security problem. If it is, give a private draft only.

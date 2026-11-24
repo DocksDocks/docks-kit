@@ -103,7 +103,7 @@ import { MAX_UPLOAD_BYTES, TIMEOUT_MS, STORAGE_KEY, type State } from "./transfe
 
 ## Verify
 
-Run the local binary: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. Use the project's lint script only after you read it and see that it calls the local binary and installs or downloads nothing. Do not use `npx` or `bunx`: they can contact the registry or download a missing package, and npm assumes yes when standard input is not a terminal. If the binary is missing, ask the user and end your turn; do not install or download it in that turn. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
+Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. When the project has a lint script, pass the same arguments that the script passes. Never run the linter through `npm run`, `npx`, or `bunx`: `npm run` also runs matching `pre` and `post` scripts, and `npx` and `bunx` can contact the registry or download a missing package; npm assumes yes when standard input is not a terminal. If the binary is missing, ask the user and end your turn; do not install or download it in that turn. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
 
 ## Sources
 
@@ -117,3 +117,4 @@ Run the local binary: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` 
 - anti-slop MIT license: <https://github.com/dmmulroy/anti-slop/blob/main/LICENSE>
 - npm `npx` install of a missing package and the implied `--yes` without a terminal: <https://docs.npmjs.com/cli/v11/commands/npm-exec>
 - Bun `bunx` auto-install of a missing package: <https://bun.com/docs/pm/bunx>
+- npm `pre` and `post` scripts that `npm run` runs: <https://docs.npmjs.com/cli/v11/using-npm/scripts/#pre--post-scripts>

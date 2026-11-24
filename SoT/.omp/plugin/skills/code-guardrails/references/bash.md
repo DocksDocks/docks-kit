@@ -69,7 +69,7 @@ Check each input as decimal digits before arithmetic. Bash evaluates the content
 #!/usr/bin/env bash
 set -euo pipefail
 # Accept 1 to 15 decimal digits; 10# reads a leading zero as decimal.
-for count in "${1:?}" "${2:?}"; do
+for count in "${1-}" "${2-}"; do
   [[ ${count} =~ ^[0-9]{1,15}$ ]] || { printf 'invalid byte count: %s\n' "${count}" >&2; exit 2; }
 done
 file_bytes=$((10#${1}))
@@ -87,7 +87,7 @@ fi
 #!/usr/bin/env bash
 set -euo pipefail
 # Accept 1 to 15 decimal digits; 10# reads a leading zero as decimal.
-for count in "${1:?}" "${2:?}"; do
+for count in "${1-}" "${2-}"; do
   [[ ${count} =~ ^[0-9]{1,15}$ ]] || { printf 'invalid byte count: %s\n' "${count}" >&2; exit 2; }
 done
 file_bytes=$((10#${1}))
