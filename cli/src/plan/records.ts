@@ -68,34 +68,38 @@ const EMPHASIZED_MACHINE_PATH = new RegExp(
 // run opens a span that the next run of the same length on the line closes, with no escape inside the span; a run
 // without a closer is literal. Other characters stay, so a path read on the result is the path of the text.
 function blankCodeSpans(text: string): string {
-  let out = "";
-  for (const line of text.split("\n")) {
-    if (out) out += "\n";
-    let index = 0;
-    while (index < line.length) {
-      if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
-        out += line.slice(index, index + 2);
-        index += 2;
-        continue;
+  if (!text.includes("`")) return text;
+  // The result has the length of `text`, so an offset into it is an offset into `text`.
+  return text
+    .split("\n")
+    .map((line) => {
+      const parts: Array<string> = [];
+      let copied = 0;
+      let index = 0;
+      while (index < line.length) {
+        if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
+          index += 2;
+          continue;
+        }
+        if (line[index] !== "`") {
+          index += 1;
+          continue;
+        }
+        const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
+        const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
+        if (!close) {
+          index += run.length;
+          continue;
+        }
+        const end = index + run.length + close.index + run.length;
+        parts.push(line.slice(copied, index), " ".repeat(end - index));
+        copied = end;
+        index = end;
       }
-      if (line[index] !== "`") {
-        out += line[index];
-        index += 1;
-        continue;
-      }
-      const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
-      const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
-      if (!close) {
-        out += run;
-        index += run.length;
-        continue;
-      }
-      const end = index + run.length + close.index + run.length;
-      out += " ".repeat(end - index);
-      index = end;
-    }
-  }
-  return out;
+      parts.push(line.slice(copied));
+      return parts.join("");
+    })
+    .join("\n");
 }
 const SECTIONS = [
   "Goal",
