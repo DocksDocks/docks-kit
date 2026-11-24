@@ -199,46 +199,22 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
 }
 
 /**
- * A code fence: up to three spaces, then three or more backticks or tildes. The
- * info string after a backtick fence has no backtick (CommonMark 0.31.2, 4.5).
- */
-const FENCE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
-/** The start of an HTML comment block (CommonMark 0.31.2, 4.6), which runs to the line with `-->`. */
-const COMMENT_OPEN = /^ {0,3}<!--/;
-/**
  * An ATX heading: up to three spaces, one to six `#`, then a space, a tab, or the
  * end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
  */
 const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t]|$)(.*)$/;
 /** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
 const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
+/** A fence delimiter line: up to three spaces, then three or more backticks or tildes. */
+const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
 
-/**
- * The offset of each ATX heading line with the text `title`, at any level,
- * outside fenced code and HTML comment blocks. Lines end at `\n` or `\r\n`. A
- * fence or comment that is open at the end runs to the end of the file, as in
- * CommonMark, so a heading inside it does not count. The scan does not track
- * container blocks: an unclosed fence or comment inside a list item runs to the
- * end of the file here, so the check then reports the section missing and
- * fails closed.
- */
+/** The offset of each line that is an ATX heading with the text `title`, at any level. Lines end at `\n` or `\r\n`. */
 function headingOffsets(content: string, title: string): Array<number> {
   const offsets: Array<number> = [];
-  let fence: string | null = null;
-  let inComment = false;
   let offset = 0;
   for (const raw of content.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    const marker = FENCE.exec(line)?.[1];
-    if (inComment) inComment = !line.includes("-->");
-    else if (fence !== null) {
-      if (marker?.[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) {
-        fence = null;
-      }
-    } else if (marker !== undefined) fence = marker;
-    else if (COMMENT_OPEN.test(line)) {
-      inComment = !line.slice(line.indexOf("<!--") + 4).includes("-->");
-    } else if (ATX_HEADING.exec(line)?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
+    if (ATX_HEADING.exec(line)?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
       offsets.push(offset);
     }
     offset += raw.length + 1;
@@ -247,11 +223,17 @@ function headingOffsets(content: string, title: string): Array<number> {
 }
 
 /**
- * Each skill ends with the canonical report section, byte for byte. The files
- * are read as latin1 (one character per byte), so line endings and the final
- * newline count. A heading with the Report text inside fenced code or an HTML
- * comment does not count, so a skill can quote the heading; outside them, the
- * file has exactly one such heading.
+ * Each skill ends with the canonical report section, byte for byte; the
+ * `reportSection` text of config.json is the one source of that section. The
+ * files are read as latin1 (one character per byte), so line endings and the
+ * final newline count. Every line that is the Report heading in ATX form
+ * counts, also inside fenced code or an HTML comment, and the file must have
+ * exactly one. Before it, the fence delimiter lines must come in pairs, and each
+ * `<!--` needs a `-->`, so the section is not inside an unclosed code fence or
+ * HTML comment. The check does no Markdown block parsing: a line scan cannot
+ * see container blocks such as list items, and a wrong guess about where a
+ * fence ends let a second section pass. These counts fail closed instead. A
+ * skill that quotes the heading quotes it in another form, such as inline code.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -266,6 +248,7 @@ export function checkReportSection(
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const content = readFileSync(file, "latin1");
     const starts = headingOffsets(content, heading.slice("## ".length));
+    const before = content.slice(0, starts[0]);
     if (starts.length === 0) {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
@@ -273,6 +256,14 @@ export function checkReportSection(
     } else if (starts.length > 1) {
       failures.push(
         `${shown(repoRoot, file)}: has ${starts.length} Report sections; keep one, at the end of the file`,
+      );
+    } else if (before.split("\n").filter((line) => FENCE_LINE.test(line)).length % 2 === 1) {
+      failures.push(
+        `${shown(repoRoot, file)}: an unclosed code fence comes before the Report section`,
+      );
+    } else if (before.split("<!--").length > before.split("-->").length) {
+      failures.push(
+        `${shown(repoRoot, file)}: an unclosed HTML comment comes before the Report section`,
       );
     } else if (content.slice(starts[0]) !== canonical) {
       failures.push(

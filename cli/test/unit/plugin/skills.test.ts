@@ -248,40 +248,28 @@ describe("kit plugin skills: report section and shared copies", () => {
     });
   }
 
-  it("passes a report section after an inline code line that starts with three backticks", () => {
-    const root = copyFixture();
-    edit(root, skillFile("zoom-out"), (text) =>
-      text.replace(
-        "## Report a problem with this skill",
-        "```js `x` ```\n\n## Report a problem with this skill",
-      ),
-    );
-    expect(checkReportSection(root)).toEqual([]);
-  });
+  for (const { place, before, after } of [
+    { place: "inside an unclosed code fence", before: "```text\n", after: "" },
+    { place: "inside an unclosed HTML comment", before: "<!-- draft\n\n", after: "" },
+    {
+      place: "after an unclosed fence in a list item",
+      before: "- item\n\n  ```text\n\n",
+      after: "```text\nx\n```\n\n",
+    },
+  ]) {
+    it(`fails a stale report section ${place} before the canonical one`, () => {
+      const root = copyFixture();
+      edit(
+        root,
+        skillFile("zoom-out"),
+        (text) =>
+          `${text.replace("## Report a problem with this skill", `${before}## Report a problem with this skill`)}${after}${config.reportSection}`,
+      );
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+    });
+  }
 
-  it("fails a report section inside an unclosed code fence", () => {
-    const root = copyFixture();
-    edit(root, skillFile("zoom-out"), (text) =>
-      text.replace(
-        "## Report a problem with this skill",
-        "```text\n## Report a problem with this skill",
-      ),
-    );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
-  });
-
-  it("fails a report section inside an unclosed HTML comment", () => {
-    const root = copyFixture();
-    edit(root, skillFile("zoom-out"), (text) =>
-      text.replace(
-        "## Report a problem with this skill",
-        "<!-- draft\n\n## Report a problem with this skill",
-      ),
-    );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
-  });
-
-  it("passes a quoted heading inside a closed fence", () => {
+  it("fails a report heading quoted inside a closed fence", () => {
     const root = copyFixture();
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace(
@@ -289,8 +277,28 @@ describe("kit plugin skills: report section and shared copies", () => {
         "```markdown\n## Report a problem with this skill\n```\n\n## Report a problem with this skill",
       ),
     );
-    expect(checkReportSection(root)).toEqual([]);
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
   });
+
+  for (const { block, opener } of [
+    { block: "code fence", opener: "```text\n\n" },
+    { block: "HTML comment", opener: "<!-- draft\n\n" },
+  ]) {
+    it(`fails an unclosed ${block} just before the only report section`, () => {
+      const root = copyFixture();
+      edit(root, skillFile("zoom-out"), (text) =>
+        text.replace(
+          "## Report a problem with this skill",
+          `${opener}## Report a problem with this skill`,
+        ),
+      );
+      expectFailure(
+        checkReportSection(root),
+        skillFile("zoom-out"),
+        `an unclosed ${block} comes before the Report section`,
+      );
+    });
+  }
 
   it("checks a skill whose SKILL.md is a symbolic link", () => {
     const root = copyFixture();
