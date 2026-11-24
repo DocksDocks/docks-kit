@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "00d5c2ce30537e0936fe974a3edc6c2dbbaf696565a4f0bf75754e129b2d3fb2"
+  content_hash: "27cc152a44b029236622f76ef802c63505bcefef24edee90808980c3aff485b0"
 ---
 
 # Code Guardrails
