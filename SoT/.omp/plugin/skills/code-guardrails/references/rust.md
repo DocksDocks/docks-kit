@@ -15,7 +15,7 @@
 - Inspect the root `Cargo.toml` for `[workspace.lints]` and member manifests for `[lints] workspace = true`.
 - Inspect `clippy.toml` or `.clippy.toml` for existing Clippy options.
 - Inspect crate roots for `#![warn(...)]` and other crate-level lint settings.
-- Check whether `cargo clippy` runs before you propose installing Clippy. Ask before installing an absent tool.
+- Run `cargo clippy --version` to check that Clippy is installed; this command prints the version and does not build the project or fetch dependencies. Ask before installing an absent tool.
 
 ## Recommended config
 
@@ -55,12 +55,9 @@ Add this entry to each member manifest that has no `[lints]` table, including a 
 workspace = true
 ```
 
-Cargo does not merge `workspace = true` with other lint keys in the same member. A member that already has `[lints.clippy]` or `[lints.rust]` needs one of these paths:
+Cargo does not merge `workspace = true` with other lint keys in the same member. Do not move, merge, or change the levels of an existing member table. A member that already has `[lints.clippy]` or `[lints.rust]` keeps its own tables: add only the missing reference rules to its `[lints.clippy]` table, and do not add `workspace = true` to it. Ask the user before you move member tables into `[workspace.lints]`.
 
-- **All members can share one set:** move each member's lint levels into `[workspace.lints]`. When two members set the same lint differently, keep the stricter level (`forbid`, then `deny`, then `warn`, then `allow`). Then replace the member tables with `workspace = true`.
-- **A member needs different levels:** keep that member's own tables. Add the missing reference rules to them directly, and do not add `workspace = true` to that member.
-
-Report each member you changed and the path you used.
+Report each member you changed and the table you edited.
 
 A negative `pedantic` priority lets individually configured lints take precedence. Choose restriction lints individually; do not enable the whole `restriction` group. Preserve existing `clippy.toml` options instead of replacing that file. Report each rule added or changed and any stricter setting you preserved.
 
@@ -108,7 +105,7 @@ Do not compare a constant to itself.
 
 ## Verify
 
-Run `cargo clippy --all-targets --all-features -- -D warnings` for one package. Run `cargo clippy --workspace --all-targets --all-features -- -D warnings` from a workspace root to cover every member. The `-D warnings` flag also rejects rustc warnings.
+Follow the verify rule in `../SKILL.md`: run the project's Clippy command, such as its CI step, unchanged, with its own feature flags. When the project has no Clippy command, run `cargo clippy --offline --all-targets -- -D warnings` for one package, or `cargo clippy --offline --workspace --all-targets -- -D warnings` from a workspace root to cover every member. `--offline` stops Cargo from using the network. If Cargo reports a missing dependency, follow the approval gate in `../SKILL.md` before you run `cargo fetch` or an online Cargo command. Feature and package selection apply only to this fallback: add `--all-features` only when all features can be on together; otherwise, run the fallback once for each distinct pair of package selection and feature flags that the project's build, check, or test commands use. Keep that package selection: `-p <package>` for a member build, and `--workspace` only for configurations that the project builds together, because Cargo unifies features across the selected packages. The `-D warnings` flag also rejects rustc warnings.
 
 ## Sources
 
@@ -118,6 +115,8 @@ Run `cargo clippy --all-targets --all-features -- -D warnings` for one package. 
 - [Clippy configuration file and manifest lint settings](https://doc.rust-lang.org/clippy/configuration.html)
 - [Clippy groups, restriction policy, and warning flags](https://doc.rust-lang.org/clippy/usage.html)
 - [Cargo target and feature selection](https://doc.rust-lang.org/cargo/commands/cargo-check.html)
+- [Cargo mutually exclusive features](https://doc.rust-lang.org/cargo/reference/features.html#mutually-exclusive-features)
+- [`cargo clippy --version` exits before it runs Cargo](https://github.com/rust-lang/rust-clippy/blob/master/src/main.rs)
 - [Rust crate-wide lint attributes](https://doc.rust-lang.org/rustc/lints/levels.html#via-an-attribute)
 - [Clippy `unwrap_used`](https://rust-lang.github.io/rust-clippy/master/#unwrap_used), [`expect_used`](https://rust-lang.github.io/rust-clippy/master/#expect_used), [`todo`](https://rust-lang.github.io/rust-clippy/master/#todo), [`unimplemented`](https://rust-lang.github.io/rust-clippy/master/#unimplemented), [`dbg_macro`](https://rust-lang.github.io/rust-clippy/master/#dbg_macro)
 - [Clippy `unreadable_literal`](https://rust-lang.github.io/rust-clippy/master/#unreadable_literal), [`decimal_literal_representation`](https://rust-lang.github.io/rust-clippy/master/#decimal_literal_representation), [`approx_constant`](https://rust-lang.github.io/rust-clippy/master/#approx_constant)

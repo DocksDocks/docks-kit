@@ -63,12 +63,17 @@ ShellCheck has no rule that detects repeated numeric or string literals across s
 ## Constant map
 
 Use `readonly` names near the top of one script for local values. Source one owning `constants.sh` or `lib/config.sh` when scripts share values. Derive units with `$(( ... ))`. Include units in names, such as `MAX_BYTES` and `TIMEOUT_SECONDS`. Put `set -euo pipefail` after the Bash shebang in scripts that use Bash.
+Check each input as decimal digits before arithmetic. Bash evaluates the contents of a variable in `(( ))` as an expression, and that expression can run commands. Read the checked value with `10#` so that a leading zero does not select octal.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-file_bytes=${1:?}
-backup_bytes=${2:?}
+# Accept 1 to 15 decimal digits; 10# reads a leading zero as decimal.
+for count in "${1-}" "${2-}"; do
+  [[ ${count} =~ ^[0-9]{1,15}$ ]] || { printf 'invalid byte count: %s\n' "${count}" >&2; exit 2; }
+done
+file_bytes=$((10#${1}))
+backup_bytes=$((10#${2}))
 # BAD — the byte limit and output path have separate copies.
 if (( file_bytes > 8388608 )); then
   printf '%s\n' "$HOME/cache/output.bin"
@@ -81,8 +86,12 @@ fi
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-file_bytes=${1:?}
-backup_bytes=${2:?}
+# Accept 1 to 15 decimal digits; 10# reads a leading zero as decimal.
+for count in "${1-}" "${2-}"; do
+  [[ ${count} =~ ^[0-9]{1,15}$ ]] || { printf 'invalid byte count: %s\n' "${count}" >&2; exit 2; }
+done
+file_bytes=$((10#${1}))
+backup_bytes=$((10#${2}))
 # GOOD — both comparisons use the owning byte limit.
 readonly KIB=1024
 readonly MIB=$((KIB * KIB))
@@ -98,7 +107,7 @@ fi
 
 ## Verify
 
-Adjust the pruned directory names to match the repository. Add extensionless Bash scripts to the selected paths. Run this command from the repository root:
+Follow the verify rule in `../SKILL.md`: run the project's ShellCheck command, such as its CI step, unchanged. When the project has no ShellCheck command, run this command from the repository root. Adjust the pruned directory names to match the repository, and add extensionless Bash scripts to the selected paths:
 
 ```bash
 find . -type d \( -name .git -o -name node_modules -o -name vendor -o -name third_party \) -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -exec shellcheck {} +
@@ -115,3 +124,4 @@ Record every rule that you add to the existing configuration. Report any differe
 - [SC2154: unassigned variables](https://www.shellcheck.net/wiki/SC2154); [SC2230: command lookup](https://www.shellcheck.net/wiki/SC2230)
 - [SC2248: quotes](https://www.shellcheck.net/wiki/SC2248); [SC2250: braces](https://www.shellcheck.net/wiki/SC2250)
 - [shfmt manual: EditorConfig and formatting](https://github.com/mvdan/sh/blob/master/cmd/shfmt/shfmt.1.scd)
+- [Bash manual: arithmetic evaluation, octal constants, and `base#n`](https://www.gnu.org/software/bash/manual/html_node/Shell-Arithmetic.html)

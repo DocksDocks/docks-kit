@@ -1,35 +1,57 @@
 # Python guardrails
 
+## Contents
+
+- [Detect](#detect)
+- [Recommended config](#recommended-config)
+- [Rules that catch raw values](#rules-that-catch-raw-values)
+- [Constant map](#constant-map)
+- [Verify](#verify)
+- [Sources](#sources)
+
 ## Detect
 
-- Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
-- Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- Check `pyproject.toml` for `[tool.mypy]` or `[tool.pyright]`.
-- Check `pyrightconfig.json` and existing mypy configuration before selecting a type checker.
-- Ask before installing Ruff or a type checker if the project does not have one.
+- Find the Ruff config files in the repository: `.ruff.toml`, `ruff.toml`, and `pyproject.toml` with a `[tool.ruff]` table.
+- Find the project's Ruff command, such as its CI step, a script, or a pre-commit hook.
+- Read the project's Ruff command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
+  1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
+  2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
+  3. **No `--config`:** Ruff uses config discovery. Each file gets the closest config file up the directory tree, and Ruff does not merge parent files. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
+     - Exactly one Ruff config file in the repository applies to every file in the lint scope: edit that file.
+     - Any other case, also no Ruff config in the repository: do not create or edit a config on your own. Report the configs that you found (none is a valid result), and say that a user-level config, a config above the checkout or above the working directory, or a config near an input outside the repository can still apply. Ask the user which file to edit, or whether to create `[tool.ruff.lint]` in `pyproject.toml` (or `ruff.toml` when the project has no `pyproject.toml`).
+- When you read a config, follow its `extend` chain without changing it, and report the suppressions that you find anywhere in that chain. Report a chain that you cannot resolve without guessing.
+- Report every ignore selector that can match `PLR2004`: the code, its prefixes (such as `PLR2`, `PLR`, and `PL`), `ALL`, the rule name `magic-value-comparison`, and its preview category `pedantic`, in `ignore`, `extend-ignore`, `per-file-ignores`, `extend-per-file-ignores`, and on the command line. Also report a command `--select` that replaces the rule selection. Ask the user before you remove any of them. Do not claim a per-file rule state.
+- Ask before installing Ruff if the project does not have it.
 
 ## Recommended config
 
-Merge these entries into the existing `pyproject.toml`; do not replace its settings. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it. The mypy section applies only when the project uses mypy.
+Merge these entries into the project file that Detect found; do not replace its settings. Ruff reads `pyproject.toml` with `tool.ruff` tables and every other config file, including a custom file name given to `--config`, without that prefix. Use `[tool.ruff.lint]` and `[tool.ruff.lint.pylint]` only in `pyproject.toml`; use `[lint]` and `[lint.pylint]` in every other config file. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
 
 ```toml
+# pyproject.toml
 [tool.ruff.lint]
 extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
 
 [tool.ruff.lint.pylint]
 allow-magic-value-types = []
-
-[tool.mypy]
-strict = true
 ```
 
-`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. Ruff omits `[tool.ruff]` prefixes in `ruff.toml` and `.ruff.toml`. With an existing Pyright setup, use `typeCheckingMode = "strict"` in `[tool.pyright]` or `pyrightconfig.json` instead of adding mypy. Do not install an absent checker without asking. Report each new prefix and setting to the user.
+```toml
+# ruff.toml, .ruff.toml, or another file given to --config
+[lint]
+extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
+
+[lint.pylint]
+allow-magic-value-types = []
+```
+
+`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. Ruff resolves rule selection by specificity, and command-line flags win over config files, so do not infer from one entry that `PLR2004` is on or off for a file. Do not name one entry as the cause, and do not remove any entry without approval. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
 
 ## Rules that catch raw values
 
 | Rule | Catches | Limits |
 | --- | --- | --- |
-| `PLR2004` | Unnamed numerical constants in comparisons. | Comparisons only; it does not find repeated values in assignments, calls, paths, keys, or units. |
+| `PLR2004` | Unnamed constants in comparisons. By default it checks numbers only; with `allow-magic-value-types = []`, it also checks `str` and `bytes` values, such as `state == "ready"`. | Comparisons only; it does not find repeated values in assignments, calls, paths, keys, or units. |
 
 Ruff exempts common comparison values such as `0`, `1`, and `""`. The `allow-magic-value-types = []` setting removes type-based exemptions, including the default string and bytes exemptions; it does not remove the rule's common-value exemptions. Use `SKILL.md` § **Find scattered values** for values beyond comparison checks. Keep `PLR2004` on in tests: a test compares with a named `Final` expected value, not an inline number.
 
@@ -60,25 +82,28 @@ class UploadState(StrEnum):
 # GOOD — consumers import one mapped source instead of copying literals.
 from upload_limits import MAX_PAYLOAD_BYTES, UploadState
 
-def accept_upload(payload_bytes: int, state: UploadState) -> bool:
-    return payload_bytes <= MAX_PAYLOAD_BYTES and state is UploadState.READY
+def accept_upload(payload_bytes: int, state: str) -> bool:
+    return payload_bytes <= MAX_PAYLOAD_BYTES and state == UploadState.READY
 ```
 
-For tests, pass `MAX_PAYLOAD_BYTES` as an input. When the test checks the constant's value, compare it with a named expected value, such as `EXPECTED_MAX_PAYLOAD_BYTES: Final = 8_388_608`.
+A `StrEnum` member is equal to its string value, so callers can still pass `"ready"`. For tests, pass `MAX_PAYLOAD_BYTES` as an input. When the test checks the constant's value, compare it with a named expected value, such as `EXPECTED_MAX_PAYLOAD_BYTES: Final = 8_388_608`.
 
 ## Verify
 
-Run `ruff check .` and the existing type checker: `mypy .` for mypy or `pyright` for Pyright. Review violations, then report the config changes and the remaining findings.
+Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. Do not run Ruff only to learn its settings; no settings probes. After you fix findings, run the same command again, unchanged and subject to the approval gate in `../SKILL.md`. Report its findings and the config changes, and do not claim that `PLR2004` is on for files that the run did not report.
 
 ## Sources
 
-- Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/>
+- Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/#config-file-discovery>
+- Ruff `extend` chain: <https://docs.astral.sh/ruff/settings/#extend>
+- Ruff `extend-per-file-ignores` and the deprecated `extend-ignore`: <https://docs.astral.sh/ruff/settings/#lint_extend-per-file-ignores>
+- Ruff command-line settings and `--config` inline overrides: <https://docs.astral.sh/ruff/configuration/#command-line-interface>
+- Ruff `--isolated` and `--config` in the full command-line interface: <https://docs.astral.sh/ruff/configuration/#full-command-line-interface>
+- Ruff `select` and selector specificity: <https://docs.astral.sh/ruff/settings/#lint_select>
 - Ruff rule families `E`, `F`, `B`, `UP`, `SIM`, `PL`, `RUF`, `ERA`, `T20`, `ANN`: <https://docs.astral.sh/ruff/rules/>
 - Ruff rule `PLR2004` and its exemptions: <https://docs.astral.sh/ruff/rules/magic-value-comparison/>
 - Ruff `extend-select`, per-file ignores, and `allow-magic-value-types`: <https://docs.astral.sh/ruff/settings/>
-- Ruff lint command: <https://docs.astral.sh/ruff/linter/>
-- Mypy configuration and `strict`: <https://mypy.readthedocs.io/en/stable/config_file.html>
-- Mypy invocation: <https://mypy.readthedocs.io/en/stable/running_mypy.html>
-- Pyright configuration and `typeCheckingMode`: <https://github.com/microsoft/pyright/blob/main/docs/configuration.md>
+- Ruff lint command, rule selection, and rule-name selectors in preview: <https://docs.astral.sh/ruff/linter/#rule-selection>
+- Ruff preview rule categories, such as `pedantic` for `PLR2004`: <https://docs.astral.sh/ruff/linter/#rule-categories>
 - Python `Final`: <https://docs.python.org/3/library/typing.html#typing.Final>
 - Python `StrEnum` and `IntEnum`: <https://docs.python.org/3/library/enum.html#enum.StrEnum>

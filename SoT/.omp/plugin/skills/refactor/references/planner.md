@@ -23,7 +23,7 @@ Tier 1 → 2 → 3. Within a tier, independent before dependent. Dead-code remov
 | Field | Content |
 |---|---|
 | Priority tier | 1 / 2 / 3 |
-| Category | dead-code / duplicate / extraction / component-reuse / module-reorg / modernization / solid-violation |
+| Category | dead-code / duplicate / extraction / component-reuse / module-reorg / modernization / solid-violation. File a scanner `Scattered Values` finding as `duplicate`. |
 | Files affected | `file:line` list |
 | What changes | before → after |
 | Risk | low / medium / high |
