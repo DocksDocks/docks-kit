@@ -60,9 +60,10 @@ test('readScope splits the path of grep, glob, and ast_grep on `;` and keeps the
 //
 // Changed exports:
 // - readScope takes the option `lists`: a Map from a target (the trimmed path of a call, or a `;`-part of the path of
-//   grep, glob, or ast_grep, with its read selector) to the paths that omp read for it, without read selectors. A
+//   grep, glob, or ast_grep, with its read selector) to the paths that omp read for it, each as omp wrote it, with its
+//   own read selector (plan #216: readScope checks the path that omp opens for each and its other interpretations). A
 //   target with an entry is allowed only when each of these paths is allowed, and outside lists it as the reviewer
-//   wrote it. A target without an entry is one path. The function reads no file.
+//   wrote it. A target without an entry is one path.
 // - transcriptsCommand gives readScope the lists of the transcript of the reviewer:
 //   - for a read call whose tool result has `details.displayReadTargets`, the paths of that list, except each path
 //     that a note `Could not read <path>: <reason>` in `details.notes` names (omp could not read it);
@@ -245,9 +246,9 @@ test('every existing interpretation of a search path must be allowed, so an ambi
   const { ws, sessions, caseDir, round1 } = fixture;
   put(caseDir, 'plan.md', '# Plan\n');
   put(caseDir, 'review.diff', '');
-  const scopeOf = (target, name = 'grep', details = { cwd: caseDir, files: [] }) => {
+  const scopeOf = (target, name = 'grep', details = { cwd: caseDir, files: [] }, isError = false) => {
     const calls = [[name, name === 'grep' ? { pattern: 'lock', path: target } : { path: target }]];
-    const options = { cwd: caseDir, results: { 'call-1': details } };
+    const options = { cwd: caseDir, results: { 'call-1': details }, isError };
     put(sessions, 'Code7C1LowR1K1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, options));
     assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
     return readJson(path.join(round1, 'meta.json')).reviewers.full.readScope;
@@ -264,6 +265,10 @@ test('every existing interpretation of a search path must be allowed, so an ambi
   put(caseDir, 'snapshot/a.mjs;extra.mjs', 'x\n');
   put(caseDir, 'extra.mjs', 'x\n');
   assert.deepEqual(scopeOf('snapshot/a.mjs;extra.mjs'), { outside: ['extra.mjs'] });
+  // Code review round 7: omp splits a search path only at the `;` outside `{}`, so `extra{one;two}.mjs` is one member.
+  put(caseDir, 'snapshot/a.mjs;extra{one;two}.mjs', 'x\n');
+  put(caseDir, 'extra{one;two}.mjs', 'x\n');
+  assert.deepEqual(scopeOf('snapshot/a.mjs;extra{one;two}.mjs'), { outside: ['extra{one;two}.mjs'] });
   // A grouped read shows the allowed literal `alias.md:1-2`, but `alias.md` is a link out of the inputs.
   put(caseDir, 'snapshot/alias.md:1-2', 'x\n');
   put(path.dirname(ws), 'secret.md', 'x\n');
@@ -276,6 +281,14 @@ test('every existing interpretation of a search path must be allowed, so an ambi
   // omp opens an existing literal `plan.md?q=x` before it reads a JSON query of plan.md.
   put(caseDir, 'plan.md?q=x', 'x\n');
   assert.deepEqual(scopeOf('plan.md?q=x', 'read', {}), { outside: ['plan.md?q=x'] });
+  // A grouped read of two allowed members: a literal file with the whole text now exists outside the inputs.
+  put(caseDir, 'review.diff;plan.md', 'x\n');
+  assert.deepEqual(scopeOf('review.diff;plan.md', 'read', { displayReadTargets: ['review.diff', 'plan.md'] }), {
+    outside: ['review.diff;plan.md'],
+  });
+  // A failed read of a dangling link `outside.md:1-2`: lstat finds it, so it is outside, not missing.
+  fs.symlinkSync(path.join(caseDir, 'gone.md'), path.join(caseDir, 'outside.md:1-2'));
+  assert.deepEqual(scopeOf('outside.md:1-2', 'read', {}, true), { outside: ['outside.md:1-2'] });
 });
 // Plan #216, R68: decoding is bounded. To pick a transcript, the task lookup decodes each record of a candidate up to
 // its first user message; then transcripts decodes the picked transcript one time in full and gives its records to

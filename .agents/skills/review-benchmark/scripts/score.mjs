@@ -3595,14 +3595,14 @@ function existingInterpretations(text, name, probe, always = false) {
 // folder under a workspace `bench-gpt;7`. Only a `;` splits such a path, so only a path with a `;` needs this check of
 // the file system; the path of every other tool is one target without it. An exclusion part (see isExclusion) reads
 // nothing, so it gives no target. A list of exclusions only searches the working directory (see readScope).
-function pathTargets(name, value, cwd) {
+function pathTargets(name, value, cwd, probe = cachedProbe(cwd)) {
   const trimmed = value.trim();
   if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
-  if (trimmed.includes(';') && ompPathExists(ompSplitTarget(trimmed, cwd).path, cwd)) return [trimmed];
+  if (trimmed.includes(';') && ompPathExists(ompSplitTarget(trimmed, cwd, probe).path, cwd)) return [trimmed];
   return value
     .split(';')
     .map((part) => part.trim())
-    .filter((part) => part && !isExclusion(name, part, cwd));
+    .filter((part) => part && !isExclusion(name, part, cwd, probe));
 }
 
 // A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob only when no path
@@ -3611,11 +3611,11 @@ function pathTargets(name, value, cwd) {
 // an existing `!notes.md:backup` is one too, and `!review.diff:notes` is an exclusion when no file has that name,
 // also when `!review.diff` exists (`:notes` is no selector of omp). Without a working directory, a relative part cannot
 // be checked, so it stays a target.
-function isExclusion(name, part, cwd) {
+function isExclusion(name, part, cwd, probe = cachedProbe(cwd)) {
   if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
     return false;
   }
-  return pathInterpretations(part, name).every((item) => literalProbe(item, cwd) === 'missing');
+  return pathInterpretations(part, name).every((item) => probe(item) === 'missing');
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -4032,7 +4032,10 @@ export function readScope(
       continue;
     }
     for (const file of shown) if (!targetAllowed(file, cwd, rules)) outside.add(`${name} result: ${file}`);
-    const targets = typeof value === 'string' ? pathTargets(name, value, cwd) : [];
+    // One call probes each file once: the choice of targets, the pick of omp, and the other interpretations share the
+    // results of `probe`, and `check` gives each resolved path its scope verdict once.
+    const probe = cachedProbe(cwd);
+    const targets = typeof value === 'string' ? pathTargets(name, value, cwd, probe) : [];
     if (!targets.length) {
       if (SEARCH_TOOLS.has(name)) outside.add(`${name} without a path`);
       continue;
@@ -4040,29 +4043,28 @@ export function readScope(
     const refuse = (target, refused) =>
       (error && refused.every((part) => pathMissing(part, cwd)) ? missing : outside).add(target);
     const searches = SEARCH_TOOLS.has(name);
-    // One call checks each file once: the probes of the pick of omp and of the other interpretations share their
-    // results, and a path that the first pass checked is not checked again.
-    const probe = cachedProbe(cwd);
-    const checked = new Set();
+    const verdicts = new Map();
     const check = (item) => {
-      checked.add(ompFile(item, cwd) ?? item);
-      return targetAllowed(item, cwd, rules, searches);
+      const key = ompFile(item, cwd) ?? item;
+      if (!verdicts.has(key)) verdicts.set(key, targetAllowed(item, cwd, rules, searches));
+      return verdicts.get(key);
     };
     // Each text whose interpretations that exist now must be allowed too, with `always` for a text that has no check
-    // of its own: the whole path of a list tool and its `;` members, the targets, and the members of each list.
+    // of its own: the whole path of a list tool and its `;` members outside `{}`, as omp splits them (see
+    // splitPathList), the targets, and each list target as a whole and its members.
     const alternatives = [];
-    if (PATH_LIST_TOOLS.has(name) && value.includes(';')) {
-      alternatives.push([value.trim(), true]);
-      for (const member of value.split(';').map((part) => part.trim())) {
-        if (member) alternatives.push([member, !targets.includes(member)]);
-      }
+    if (PATH_LIST_TOOLS.has(name)) {
+      const members = splitPathList(value, URI_DELIMITER) ?? [];
+      if (members.length) alternatives.push([value.trim(), true]);
+      for (const member of members) alternatives.push([member, !targets.includes(member)]);
     }
     for (const target of targets) {
-      alternatives.push([target, false]);
       const parts = lists.get(target);
+      alternatives.push([target, parts !== undefined]);
       if (parts !== undefined) {
         for (const part of parts) alternatives.push([part, false]);
-        const refused = parts.map((part) => ompTargetPath(part, cwd, name, probe)).filter((part) => !check(part));
+        const opened = distinct(parts.map((part) => ompTargetPath(part, cwd, name, probe)));
+        const refused = opened.filter((part) => !check(part));
         if (refused.length) refuse(target, refused);
         continue;
       }
@@ -4070,10 +4072,13 @@ export function readScope(
       if (!check(read)) refuse(read, [read]);
     }
     // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
-    // which of them omp opened (see pathInterpretations). Such a path exists, so it is outside, never missing.
+    // which of them omp opened (see pathInterpretations). Such a path exists, so it is outside, never missing: a refused
+    // target that went to `missing` and that the probe finds, or cannot decide, moves to `outside`.
     for (const [text, always] of alternatives) {
       for (const item of existingInterpretations(text, name, probe, always)) {
-        if (!checked.has(ompFile(item, cwd) ?? item) && !check(item)) outside.add(item);
+        if (check(item)) continue;
+        outside.add(item);
+        missing.delete(item);
       }
     }
   }
