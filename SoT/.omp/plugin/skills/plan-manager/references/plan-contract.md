@@ -257,8 +257,9 @@ gh api graphql -f query='query($owner:String!,$name:String!,$n:Int!){repository(
 `-f` passes the owner and the repository as strings, also a name such as `123`
 or `true`; `-F` passes the issue number as a number.
 Post only when that list holds exactly the acting login. Otherwise, or when
-the read fails, post nothing, run Work preservation when implementation
-changed files, and stop as the refusal `plan #<n> is owned by <login>` does.
+the read fails, post nothing and write nothing else to the issue. Run Work
+preservation when implementation changed files, and stop as the refusal
+`plan #<n> is owned by <login>` does.
 
 Reviewers never fetch the issue. Save the review blocks of each round comment,
 without the manager response, as `<phase>-<n>-round-<k>.md` in the review
@@ -731,25 +732,28 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    says. Never delete, stash, or move those files. Do not run the command from
    another worktree to avoid them. A new worktree can run other hooks than the
    checkout (Worktree hooks).
-3. Otherwise, run `git fetch origin <default>`. Then run the hook's check on
-   the fetched commit, `FETCH_HEAD`, in a clean worktree. When it fails the
-   same way there, it is a baseline failure. When the fetch fails, the
-   baseline is unknown; record that, and continue as for a baseline failure.
-   Record the hook, the check, and both results in Verification Results.
-   Block the plan with that reason. Then ask the user how to continue. A yolo
-   run uses the hook row in Yolo runs instead of the question.
+3. Otherwise, run `git fetch origin refs/heads/<default>`. Then run the hook's
+   check on the fetched commit, `FETCH_HEAD`, in a clean worktree. The full
+   ref name keeps a tag of the same name from being fetched instead. When the
+   check fails the same way there, it is a baseline failure. When the fetch
+   fails, the baseline is unknown; record that, and continue as for a
+   baseline failure. Record the hook, the check, and both results in
+   Verification Results. Block the plan with that reason. Then ask the user
+   how to continue. A yolo run uses the hook row in Yolo runs instead of the
+   question.
 4. When the check passes on `FETCH_HEAD`, this plan causes the failure.
    Fix it as item 1 says.
 
 Work preservation (above) needs a commit and a push of the plan's own changes
-before a block, a stall exit, or an ended grant. When a hook refuses that
-commit or push, diagnose it with items 1 to 4, but change no status there.
-Fix a failure that this plan causes. Otherwise keep the work where it is,
-record the hook, the check, and the results, and list the branch under Kept
-resources as `not pushed`. Then return to the rule that called Work
-preservation. That rule records its step state. It then asks about the hook
-as item 3 says (a yolo run uses the hook row), and blocks the plan or keeps
-the status as that rule says.
+before a block, a stall exit, or an ended grant. The run is already leaving,
+so when a hook refuses that commit or push, do not diagnose it with items 2
+to 4, and write nothing to the issue for it. Fix a failure that this plan
+clearly causes, as item 1 says. Otherwise keep the work where it is. Put the
+hook, the command, and its output in the report to the user, and list the
+branch under Kept resources as `not pushed`. Outside a yolo run, when `ask`
+is available, ask the user how to continue before you return. Then return to
+the rule that called Work preservation; it continues as it says, and its
+report names the hook.
 
 A step after the landing merge, such as a release, can also meet a failing
 hook. Then leave that step `planned`, and keep the plan status. Record the
@@ -967,8 +971,10 @@ Teardown's exit without a merge. Right before the merge, read the default
 branch again as the Branch check does, and confirm with
 `gh pr view <url> --json headRefOid,baseRefName` that the head is the reviewed
 head and the base is that default branch, the one that the merge question
-named. When the default branch changed, ask the merge question again. Merge
-with
+named. When the default branch or the base changed, the answer no longer
+holds: wait for the checks of the pull request again as this section says,
+run the landing self-check again, and then ask the merge question again.
+Merge with
 `gh pr merge <pr> --repo <owner/repo> --match-head-commit <reviewed-head-sha>`
 and the merge-method flag that the repository allows. A prior plan approval
 never authorizes a merge.
