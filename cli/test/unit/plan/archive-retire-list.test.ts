@@ -289,7 +289,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
   );
 
   it(
-    "show advises a hand reopen for a close by an unknown closer and reopen --pr for a commit of one merged pull request",
+    "show advises a hand reopen for a close by an unknown closer and reopen --pr for a close by a commit",
     () => {
       const { run, updateIssue, updateState, closedPlan } = planCliContext();
       const advice = (number: number): Array<string> => {
@@ -306,7 +306,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
       expect(advice(byHand.number)).toStrictEqual([
         `advice: plan is closed as completed while step fix_parser is in-flight; closed by an unknown closer; run step ${byHand.number} fix_parser done if the merged work finished it; otherwise reopen the plan by hand only if that close was a mistake`,
       ]);
-      // A v3 plan that a commit closed, and the first page of that commit's pull requests lists one merged pull request.
+      // A v3 plan that a commit closed: `reopen --pr` finds and checks the merged pull request of that commit itself.
       const byCommit = closedPlan("v3 closed by a commit", { status: "in-flight" });
       const oid = "c0ffee0000000000000000000000000000000003";
       updateState((state) => {
@@ -319,7 +319,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
         ];
       });
       expect(advice(byCommit.number)).toStrictEqual([
-        `advice: plan is closed as completed while step fix_parser is in-flight; closed by commit ${oid}; run step ${byCommit.number} fix_parser done if the merged work finished it; otherwise run reopen ${byCommit.number} --pr ${byCommit.pr}`,
+        `advice: plan is closed as completed while step fix_parser is in-flight; closed by commit ${oid}; run step ${byCommit.number} fix_parser done if the merged work finished it; otherwise run reopen ${byCommit.number} --pr <pr> when a merged pull request <pr> holds commit ${oid.slice(0, 7)} and closes this plan, or open a new plan with new for the remaining work`,
       ]);
     },
     SPAWN_TIMEOUT_MS,

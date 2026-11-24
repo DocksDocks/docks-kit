@@ -967,20 +967,18 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       const { parent, child } = closableParent(context);
       expectSuccess(archive(context, String(parent)), "archive the parent");
       context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
-      // The closed parent holds two phase labels before the retry reads it, so the settled read shows both.
+      // The closed parent holds two phase labels, neither of them `plan:ongoing`, before the retry reads it, so the
+      // settled read shows both.
       context.updateIssue(parent, (entry) => {
-        entry.labels = ["plan", "plan:blocked", "plan:ongoing"];
+        entry.labels = ["plan", "plan:blocked", "plan:planned"];
       });
-      const before = mutations(context).length;
       const result = archive(context, String(parent));
-      refuse(result, repairHint(parent, child, "plan:blocked, plan:ongoing"));
+      refuse(result, repairHint(parent, child, "plan:blocked, plan:planned"));
       expect(result.stdout, "no reopened status is reported").toBe("");
-      const reopenWrite = mutations(context).slice(before);
-      expect(reopenWrite, "the reopen only").toHaveLength(1);
-      expect(reopenWrite[0]?.join(" "), "the reopen adds no label").not.toContain(
-        "addLabelsToLabelable",
-      );
-      expect(phaseLabels(context, parent)).toStrictEqual(["plan:blocked", "plan:ongoing"]);
+      expect(phaseLabels(context, parent), "the reopen adds no label").toStrictEqual([
+        "plan:blocked",
+        "plan:planned",
+      ]);
       expect(context.issue(parent).state, "the plan is open, so status can repair it").toBe("OPEN");
       expectSuccess(context.run("status", String(parent), "ongoing"), "repair the phase labels");
       expect(phaseLabels(context, parent)).toStrictEqual(["plan:ongoing"]);
@@ -1026,21 +1024,19 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
         entry.assignees = [];
       });
       closePlan(context, parent);
+      // A trusted record needs one owner, so the claim lands before the record: a claim that does not land posts none.
       context.updateState((state) => {
-        state.calls = [];
+        state.mutationDropsAssigneesOnce = true;
       });
+      refuse(archive(context, String(parent)), "plan issue claim did not land; re-read and retry");
+      expect(parentState(context, parent).comments, "no record without the claim").toStrictEqual(
+        [],
+      );
       const result = archive(context, String(parent));
       expectSuccess(result, "archive an unassigned closed parent");
       expect(result.stdout).toBe(`plan #${parent} finished (all 1 children finished)\n`);
       expect(context.issue(parent).assignees).toStrictEqual(["plan-agent"]);
       expect(parentState(context, parent).comments).toStrictEqual([parentRecord([child])]);
-      // A trusted record needs one owner, so the claim is the first write and the record the second.
-      const kinds = mutations(context).map((argv) => {
-        const query = argv.find((argument) => argument.startsWith("query=")) ?? "";
-        if (query.includes("addComment")) return "record";
-        return query.includes("assigneeIds") ? "claim" : "labels";
-      });
-      expect(kinds).toStrictEqual(["claim", "record", "labels"]);
     },
     SPAWN_TIMEOUT_MS,
   );

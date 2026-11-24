@@ -42,8 +42,11 @@ export const PLAN_LABELS = [
 // A machine path points into a user or root home, a mount, a named temporary or runtime directory,
 // a Windows drive, or a network share. URL routes, slash prose, and portable system paths such as
 // /usr/bin/env or a bare /tmp do not match (#71). The match runs to the next space or delimiter.
-// Emphasis does not hide a path: `**/tmp/x**` matches, but only with the same star run on both sides, so a glob such
-// as `src/**/tmp/x` or `**/tmp/*.log` does not (#213, R7).
+// Emphasis does not hide a path: a star run before a path counts as a boundary when the same run closes right after the
+// path (`**/tmp/x**`). This reading skips code spans (a backtick run up to the next run of the same length on the same
+// line), so a glob such as `src/**/tmp/x`, `**/tmp/*.log`, or `` `echo **/tmp/cache/**` `` gives no advice. Limits: a
+// path that opens a longer bold phrase, as in `**/tmp/x is stale**`, gives none either, and a code span that runs over
+// two lines is read as text (#213, R7).
 const MACHINE_PATH_BODY =
   String.raw`(?:\/(?:home|Users|root|mnt|media|Volumes|run\/(?:user|media))\/[^\s/` +
   "`" +
@@ -54,9 +57,14 @@ const MACHINE_PATH_BODY =
   String.raw`'"()[\]{}|,;]*`;
 const MACHINE_PATH_BOUNDARY = String.raw`^|[\s("'` + "`" + String.raw`[{=:;,>|]`;
 const MACHINE_PATH = new RegExp(
-  String.raw`(?<=${MACHINE_PATH_BOUNDARY}|file:\/\/)${MACHINE_PATH_BODY}|(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1)`,
+  String.raw`(?<=${MACHINE_PATH_BOUNDARY}|file:\/\/)${MACHINE_PATH_BODY}`,
   "gm",
 );
+const EMPHASIZED_MACHINE_PATH = new RegExp(
+  String.raw`(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1(?!\*))`,
+  "gm",
+);
+const CODE_SPAN = /(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
 const SECTIONS = [
   "Goal",
   "Research",
@@ -361,9 +369,12 @@ export function normalizePlan(
     ACCEPTANCE_SEPARATOR,
     table(sections.get("Acceptance") ?? "", ACCEPTANCE_HEADER).rows,
   );
+  const withoutCodeSpans = cleaned.replace(CODE_SPAN, (span) => " ".repeat(span.length));
   const machinePaths = new Set(
-    // A path ends before trailing sentence marks; the expression already stops before closing emphasis.
-    Array.from(cleaned.matchAll(MACHINE_PATH), ([match]) => match.replace(/[.:]+$/, "")),
+    [...cleaned.matchAll(MACHINE_PATH), ...withoutCodeSpans.matchAll(EMPHASIZED_MACHINE_PATH)]
+      .sort((a, b) => a.index - b.index)
+      // A path ends before trailing sentence marks and before the stars that close an emphasis around it.
+      .map(([match]) => match.replace(/[.:*]+$/, "")),
   );
   for (const machinePath of machinePaths)
     advice.push(`body contains an absolute machine path: ${machinePath}`);

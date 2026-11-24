@@ -286,17 +286,28 @@ agents define the exact block they return, and that block follows these rules.
   or `round 2, lens correctness`, is allowed. An archive record (Archive) is
   not a review record.
 - A comment holds one or more review blocks. A block starts at the first line,
-  or at a later Markdown heading line (one or more `#`, indented by at most
-  three spaces) that names the comment's kind. A quoted or list-item heading
-  is prose and starts no block. A panel round comment holds one block per lens.
+  or at a later Markdown heading line (one to six `#` and a space or a tab,
+  indented by at most three spaces) that names the comment's kind. A heading
+  after `>` or a list marker is prose and starts no block, but an indented
+  heading on a continuation line of a list item does: quote an earlier round in
+  a first-column fence. A panel round comment holds one block per lens.
 - A verdict line holds `plan-review:` or `code-review:`, then a verdict word.
-  A space can replace the hyphen.
+  A space can replace the hyphen. After quote and list markers, the line
+  starts with the label, with only `*`, `_`, or backtick runs between its parts
+  and no white space, then white space and the verdict word, the whole token
+  without closing punctuation: a word (letters and digits joined by hyphens)
+  with optional `*` or `_` runs outside and one optional backtick pair right
+  around it, so a code span keeps its content. The runs of the label and of the
+  word must pair up in order, as in `**Code-review:** pass` or
+  `**Code-review: pass**`. Any other line, such as `Code-review:_pass`,
+  `Code-review: pa_ss`, or `Code-review: pass2`, reads as an unknown word.
 - On each line, the helper ignores Markdown emphasis (`*`, `_`), code marks,
   blockquote markers, and list markers when it reads a kind or a verdict.
-- The helper reads blocks, verdicts, and severities only above the line
-  `#### Manager response to round <k>` outside a fenced code block, in every
-  contract version. So a finding that the response quotes cannot change the
-  verdict. A fence inside a quote or a list item ends with its container.
+- The helper reads blocks, verdicts, and severities only above the first line
+  `#### Manager response to round <k>` that starts at the first column outside
+  a fenced code block, in every contract version. So a finding that the
+  response quotes cannot change the verdict, and a heading that a block quotes
+  in a quote, a list item, an indent, or a fence cannot cut off a later block.
 
 | Verdict input | Plan result | Code result |
 |---|---|---|
@@ -305,14 +316,27 @@ agents define the exact block they return, and that block follows these rules.
 | `blocked` | `blocked` | `blocked` |
 
 The verdict of a block is its first verdict line of the comment's kind. A line
-inside a fenced code block, also in a quote or a list item, is no block heading
-and no verdict line. A later
+inside a fenced code block whose opening fence starts at the first column is no
+block heading and no verdict line, but a fenced verdict line of the comment's
+kind that is stricter than the comment's verdict keeps the stricter verdict, as
+a fenced `[high]` does. When every live verdict line is masked, the strictest
+masked verdict line counts, unless it is `pass`. A fence inside a quote or a
+list item, or an indented fence, is text: put a verdict example in a fence at
+the first column. Raw HTML changes where a fence opens and closes and can hold
+a line that looks like the response heading, so review text above the manager
+response that holds a line that can open raw HTML (`<` and a letter, `/`, `!`,
+or `?`, after at most three spaces) reads as `blocked` when it also holds a
+first-column fence line or when the comment has a manager response; post it
+again without the HTML. A later
 verdict line in the same block is prose, such as a quoted verdict of an earlier
-round. A verdict line of the other kind does not count. A later block without a
-verdict line is part of the block before it. The first block needs a verdict
-line; without one, the comment is not a review record. A block verdict line
-with a word outside the table makes the comment unreadable as a review, so it
-is not a review record. The most severe block verdict wins: `blocked`, then
+round. A verdict line of the other kind does not count. A block without a
+verdict line is part of the block before it, and the verdict lines of the other
+blocks still count when the first block has none. A comment with no verdict
+line of its kind is not a review record. The verdict word runs to white space
+or to closing punctuation; a word outside the table, such as `pass2`, reads as
+`blocked`, so no block can make the comment unreadable and keep an older pass. A
+block heading has one to six `#`
+and then a space or a tab. The most severe block verdict wins: `blocked`, then
 `repair` or `fixes-required`, then `pass`.
 
 A code pass derives as fixes-required when any line contains `[critical]` or
@@ -544,6 +568,7 @@ plan #<n> was closed by <closer> before pull request #<pr> merged; reopen it by 
 plan #<n> changed during the settle wait; run reopen again
 plan #<n> changed during the settle wait; run archive again
 GitHub left plan #<n> closed with reason REOPENED and refuses every state change; ask GitHub Support to repair it
+plan #<n> lacks the plan label; add it with `gh issue edit <n> --add-label plan`
 plan #<n> closed again after the reopen; no comment was posted; run reopen again
 plan #<n> closed again after the reopen; no comment was posted; run archive again
 plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>

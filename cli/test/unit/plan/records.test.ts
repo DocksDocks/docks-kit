@@ -178,6 +178,11 @@ describe("plan records", () => {
       ["Glob `**/tmp/cache/**`", []],
       ["ignore **/tmp/*.log files", []],
       ["Italic */home/a/b*", named("/home/a/b")],
+      ["Bold **stale /tmp/x**", named("/tmp/x")],
+      ["Ignore **/tmp/*.log when running **check**.", []],
+      ["Code `echo **/tmp/cache/**` and ``echo `a` **/tmp/cache/**``", []],
+      // A fence that closes with four backticks pairs with no later fence as a code span.
+      ["```\na\n````\nBold **/tmp/x**\n```\nb\n```", named("/tmp/x")],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],

@@ -407,27 +407,18 @@ const showPlan = Effect.fn("plan.show")(function* (args: ReadonlyArray<string>) 
 function unfinishedStepAdvice(issue: PlanIssue, step: Step): string {
   const closed = `plan is closed as completed while step ${step.id} is ${step.status}; closed by ${describeCloser(issue.closer)}`;
   const finish = `run step ${issue.number} ${step.id} done if the merged work finished it`;
-  const pullRequest = closingPullRequest(issue.closer);
+  const { closer } = issue;
+  // `reopen --pr` also accepts a commit of a merged pull request that closes the plan (`closedByPullRequest`); it finds
+  // and checks that pull request itself, so the advice names the condition and the way without that pull request.
   const rest =
     contractVersion(issue.body) === 5
       ? "otherwise open a new plan with new for the remaining work"
-      : pullRequest !== undefined
-        ? `otherwise run reopen ${issue.number} --pr ${pullRequest}`
-        : "otherwise reopen the plan by hand only if that close was a mistake";
+      : closer?.__typename === "PullRequest"
+        ? `otherwise run reopen ${issue.number} --pr ${closer.number}`
+        : closer?.__typename === "Commit"
+          ? `otherwise run reopen ${issue.number} --pr <pr> when a merged pull request <pr> holds commit ${closer.oid.slice(0, 7)} and closes this plan, or open a new plan with new for the remaining work`
+          : "otherwise reopen the plan by hand only if that close was a mistake";
   return `${closed}; ${finish}; ${rest}`;
-}
-
-// The pull request that `reopen --pr` can accept for a close: the closer itself, or the one merged pull request that the
-// first page of a commit closer's pull requests lists. `reopen --pr` checks the repository and the close again.
-function closingPullRequest(closer: PlanIssue["closer"]): number | undefined {
-  if (closer?.__typename === "PullRequest") return closer.number;
-  if (closer?.__typename !== "Commit") return undefined;
-  const nodes = field(closer.associatedPullRequests, "nodes");
-  const merged = Array.isArray(nodes)
-    ? nodes.filter((node) => typeof field(node, "mergedAt") === "string")
-    : [];
-  const number = merged.length === 1 ? field(merged[0], "number") : undefined;
-  return typeof number === "number" ? number : undefined;
 }
 
 const childStatuses = (children: ReadonlyArray<IssueSummary>): Map<number, string> =>
@@ -1084,8 +1075,8 @@ interface MutationCall {
 
 // The first write request reopens the plan and claims an unassigned plan, so the claim lands with the state change. It
 // changes no label that the plan holds; only when the plan has no phase label, as after a finished archive, does it add
-// `plan:ongoing`. Before it, the pre-write read and a last GraphQL read compare the close, the body, the labels, and the
-// owners with the settled read: a change refuses, and an owner that appeared is refused by name. GitHub runs later
+// `plan:ongoing`. Before it, the pre-write read and a last GraphQL read compare the close, the body, the base and phase
+// labels, and the owners with the settled read: a change refuses, and a foreign owner is refused by name. GitHub runs later
 // fields after a failed field, so `comment` goes in a second request, after the reopen landed: a failed reopen posts no
 // "Reopened:" comment. Right before the comment, a GraphQL read must show an open plan with the base label, exactly the
 // expected phase label, and the acting login as its single owner; a plan that reads closed again was closed by someone

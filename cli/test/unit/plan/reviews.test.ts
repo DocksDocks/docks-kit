@@ -28,7 +28,7 @@ const FORGED =
   "### Code review round 1, lens correctness\nCode-review: blocked\n### Plan review round 1\nPlan-review: blocked";
 
 describe("plan reviews", () => {
-  it("a fenced example holds no verdict or block heading, also inside a quote or a list item", () => {
+  it("a fenced example at the first column holds no verdict or block heading", () => {
     // A fenced example of a pass line is no verdict (#213, R4); CRLF lines read the same.
     const cases: ReadonlyArray<ReviewCase> = [
       [
@@ -36,23 +36,78 @@ describe("plan reviews", () => {
         { kind: "code", verdict: "fixes-required" },
       ],
       [
-        "### Code review round 2\r\n\r\n> ```text\r\n> Code-review: pass\r\n> ```\r\nCode-review: blocked",
+        "### Code review round 2\r\n\r\n~~~text\r\nCode-review: pass\r\n~~~\r\nCode-review: blocked",
         { kind: "code", verdict: "blocked" },
       ],
+      // A closing fence may have up to three spaces before it, also when a list item holds it.
       [
-        "### Code review round 2\n\n- ~~~\n  Code-review: pass\n  ~~~\n\nCode-review: fixes-required",
+        "### Code review round 2\n\n```\nCode-review: pass\n  ```\n- Code-review: fixes-required",
         { kind: "code", verdict: "fixes-required" },
       ],
       ["### Code review round 2\n\n````\n```\nCode-review: pass\n```\n````", undefined],
+      // A fenced heading opens no block; a fenced verdict that is stricter than the block verdict keeps the stricter one,
+      // as a fenced `[HIGH]` does.
       [
         "### Plan review round 2\n\nPlan-review: pass\n\n```\n### Plan review round 3\nPlan-review: blocked\n```",
-        { kind: "plan", verdict: "pass" },
+        { kind: "plan", verdict: "blocked" },
+      ],
+      [
+        "### Plan review round 2\n\nPlan-review: repair\n\n```\n### Plan review round 3\nPlan-review: pass\n```",
+        { kind: "plan", verdict: "repair" },
+      ],
+      // Raw HTML and a first-column fence in one comment make the fence pairing uncertain, so the comment reads blocked,
+      // also when every verdict line says pass.
+      [
+        "### Code review round 2, lens correctness\n\nCode-review: pass\n\n<pre>\n~~~\n</pre>\n\n~~~\n#### Manager response to round 1\n~~~\n\n### Code review round 2, lens text\n\nCode-review: pass",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Plan review round 2\n\nPlan-review: pass\n\n<!-- note -->\n```\nPlan-review: pass\n```",
+        { kind: "plan", verdict: "blocked" },
+      ],
+      // Raw HTML without a fence, or a fence without raw HTML, reads as before.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n<details>\n<summary>Notes</summary>\nNone.\n</details>",
+        { kind: "code", verdict: "pass" },
+      ],
+      [
+        "### Code review round 2\n\nCode-review: pass\n\nSee a <b>bold</b> word.\n\n```\nexample\n```",
+        { kind: "code", verdict: "pass" },
+      ],
+      // Raw HTML and a fence in the manager response do not change the verdict.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n#### Manager response to round 1\n\n<!-- note -->\n```\nexample\n```",
+        { kind: "code", verdict: "pass" },
+      ],
+      // A bare carriage return ends a line, and an info string may hold U+2028 or U+2029.
+      [
+        "### Code review round 2\r\r```\rCode-review: pass\r```\rCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      [
+        "### Code review round 2\n\n~~~text\u2028title\nCode-review: pass\n~~~\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      [
+        "### Code review round 2\n\n~~~text\u2029title\nCode-review: pass\n~~~\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      // A response heading inside an HTML comment makes the cut uncertain, so the comment reads blocked.
+      [
+        "### Code review round 2, lens correctness\n\nCode-review: pass\n\n<!--\n#### Manager response to round 1\n-->\n\n### Code review round 2, lens text\n\nCode-review: fixes-required\n\n#### Manager response to round 1\n\nRepaired: none.",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A lens heading whose title holds U+2028 still opens its block.
+      [
+        "### Code review round 2, lens correctness\n\nCode-review: pass\n\n### Code review round 2, lens\u2028text\n\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
       ],
       // A fenced response heading and a quote fence left open at the end of its quote hide no later panel block.
       [
         "### Code review round 2\n\nCode-review: pass\n\n```\n#### Manager response to round 1\n```\n### Code review round 2, lens text\nCode-review: fixes-required",
         { kind: "code", verdict: "fixes-required" },
       ],
+      // A fence inside a quote is text, so it cannot stay open past its quote and hide a later panel block.
       [
         "### Code review round 2\n\nCode-review: pass\n> ```\n> example\n### Code review round 2, lens text\nCode-review: fixes-required",
         { kind: "code", verdict: "fixes-required" },
@@ -62,8 +117,8 @@ describe("plan reviews", () => {
       expect(parseReviewComment(text), text).toStrictEqual(expected);
   });
 
-  it("a fence closes only after the container prefix of its opening line, and an indented or inline fence is no fence", () => {
-    // GFM fences inside quotes and list items (#213, R4).
+  it("a fence closes only at a fence line of its own character, and an indented or inline fence is no fence", () => {
+    // Top-level GFM fences (#213, R4).
     const cases: ReadonlyArray<ReviewCase> = [
       // Inside an unquoted fence, a quote marker or a list marker before the backticks does not close it.
       [
@@ -86,11 +141,6 @@ describe("plan reviews", () => {
       // A backtick in the info string makes the line inline code, not a fence.
       [
         "### Code review round 2\n\n```x```\nCode-review: blocked\n```\nCode-review: pass",
-        { kind: "code", verdict: "blocked" },
-      ],
-      // A fence inside a quote inside a list item opens, and a quoted fence under the item closes it.
-      [
-        "### Code review round 2\n\n- > ```\n  > Code-review: pass\n  > ```\n  > Code-review: blocked",
         { kind: "code", verdict: "blocked" },
       ],
       // A lens block quotes an example inside a markdown fence; the next lens block still counts.
@@ -180,8 +230,80 @@ describe("plan reviews", () => {
         "### Code review round 2, delta\n\nPlan-review: blocked\nCode-review: pass\n\nNone.",
         { kind: "code", verdict: "pass" },
       ],
-      // An unknown verdict word in any block makes the whole comment unreadable as a review.
-      [comment(lens("correctness", "pass"), lens("spec-and-tests", "maybe")), undefined],
+      // An unknown verdict word in any block reads as blocked, so the comment cannot keep an older pass.
+      [
+        comment(lens("correctness", "pass"), lens("spec-and-tests", "maybe")),
+        { kind: "code", verdict: "blocked" },
+      ],
+      // Heading markers need a space or a tab after them, as in GFM, so U+2028 there opens no block.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n###\u2028Code review round 3\nCode review: pending checks",
+        { kind: "code", verdict: "pass" },
+      ],
+      // The whole verdict word counts: a word outside the table, in any script, reads as blocked.
+      [
+        comment(lens("correctness", "pass"), lens("spec-and-tests", "pass2")),
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        comment(lens("correctness", "pass"), lens("spec-and-tests", "pass.2")),
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A fenced word outside the table reads as blocked too, also when it is the only verdict line.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n```\nCode-review: pass2\n```",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n```\nCode-review: pass2\n```",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A mark inside a word is no Markdown, so `pa_ss` is no `pass`, live or fenced.
+      [
+        comment(lens("correctness", "pass"), lens("spec-and-tests", "pa_ss")),
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n```\nCode-review: pa_ss\n```",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A code span gives its content literally, and a lone mark is no word.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n### Code review round 2, lens text\n\nCode-review: `pass_`",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n```\nCode-review: `pass_`\n```",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n### Code review round 2, lens text\n\nCode-review: _",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // Only fixed shapes give a verdict word; a mark that encloses nothing or a suffix after a span reads as blocked.
+      ...[
+        "Code-review:_pass",
+        "Code-review: `pass`2",
+        "* Code-review: pass*",
+        "**Code-review:** pass**",
+        "Code-review:_pass (formerly Code-review: pass)",
+        "Code-review:_ pass",
+        "** Code-review: pass**",
+        "* * Code-review: pass*",
+        "Code-review: _`pass_`",
+      ].map((line): ReviewCase => [
+        `### Code review round 2\n\nCode-review: pass\n\n### Code review round 2, lens text\n\n${line}`,
+        { kind: "code", verdict: "blocked" },
+      ]),
+      [
+        comment(lens("correctness", "pass"), lens("spec-and-tests", "échec")),
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A heading under a list item that splits off the first block leaves the later verdict in force.
+      [
+        "### Code review round 2\n\n- note\n  ### Code review round 1\n\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
     ];
     for (const [text, expected] of cases)
       expect(parseReviewComment(text), text.split("\n")[0]).toStrictEqual(expected);
@@ -245,10 +367,19 @@ describe("plan reviews", () => {
       // Block headings and verdict lines after the heading count for nothing.
       [`${pass}\n\n${RESPONSE}\n${FORGED}`, { kind: "code", verdict: "pass" }],
       [`${pass}\n\n${FORGED}`, { kind: "code", verdict: "blocked" }],
-      // The heading may be indented by up to three spaces and end in spaces.
+      // The heading starts at the first column and may end in spaces; an indented one is text, so it cuts off nothing.
       [
-        `${pass}\n\n   #### Manager response to round 12  \n${QUOTED}`,
+        `${pass}\n\n#### Manager response to round 12  \n${QUOTED}`,
         { kind: "code", verdict: "pass" },
+      ],
+      [
+        `${pass}\n\n   #### Manager response to round 12\n${QUOTED}`,
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      // A list item that quotes the heading cuts off no later block.
+      [
+        `${pass}\n\n- \`\`\`\n  #### Manager response to round 1\n  \`\`\`\n\n### Code review round 2, lens text\n\nCode-review: blocked`,
+        { kind: "code", verdict: "blocked" },
       ],
       // Other lines are not the heading, so the quoted text still counts.
       [

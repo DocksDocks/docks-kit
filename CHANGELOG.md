@@ -16,8 +16,11 @@
   the comment after it. When a step fails, the refusal says what landed and
   what to do next.
 - A plan without the `plan` label is refused with the command that adds it.
-- A fenced example in a review comment no longer counts as a heading, a
-  verdict, or the manager response.
+- A fenced example in a review comment, in a fence that starts at the first
+  column, no longer counts as a heading or a verdict; a fenced verdict that is
+  stricter still counts. The manager response starts only at a first-column
+  heading outside a fence. A review comment that holds raw HTML and a fence
+  reads as `blocked`.
 - The plan record check also finds a machine path after `*` and `|`.
 - `new` works when GitHub answers the viewer and the plan labels without node
   ids.
