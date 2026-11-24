@@ -4,8 +4,7 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- Find the Ruff executable that the project's lint command uses: the project's virtual environment (such as `.venv/bin/ruff`) when the command runs Ruff through `uv run`, `hatch run`, or `poetry run`, and a `ruff` on `PATH` only when the command runs bare `ruff` or the project has no Ruff command. When that executable does not exist yet, follow the approval gate in `../SKILL.md`; do not substitute another Ruff version.
-- The settings probe: from the project's working directory, run `ruff check --show-settings <file.py>` with the project's Ruff executable and the lint command's settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). It prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
+- The settings probe: run `ruff check --show-settings <file.py>` the way the project's lint command runs Ruff, with the same executable, working directory, and settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). When that command is a network step, follow the approval gate in `../SKILL.md` first. The probe prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
 - Read the project's Ruff lint command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
   1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
@@ -83,7 +82,7 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Run the project's Ruff executable from Detect directly, with the arguments of the project's Ruff command, or `ruff check .` when the project has none. Never run Ruff through `uv run`, `uvx`, `pre-commit`, `hatch run`, `poetry run`, or another runner that can install or download. After the edit, repeat the same settings probes from Detect for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
+Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. After the edit, repeat the same settings probes from Detect for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 

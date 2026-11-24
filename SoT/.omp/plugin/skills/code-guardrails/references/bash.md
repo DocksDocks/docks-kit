@@ -107,7 +107,7 @@ fi
 
 ## Verify
 
-Adjust the pruned directory names to match the repository. Add extensionless Bash scripts to the selected paths. Run this command from the repository root:
+Follow the verify rule in `../SKILL.md`: run the project's ShellCheck command, such as its CI step, unchanged. When the project has no ShellCheck command, run this command from the repository root. Adjust the pruned directory names to match the repository, and add extensionless Bash scripts to the selected paths:
 
 ```bash
 find . -type d \( -name .git -o -name node_modules -o -name vendor -o -name third_party \) -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -exec shellcheck {} +

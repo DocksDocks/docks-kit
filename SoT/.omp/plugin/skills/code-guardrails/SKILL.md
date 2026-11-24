@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "e936a9c9720ed406ddb1e4ed0b7a566fa4de050714be6d3d872ac78808bcafa9"
+  content_hash: "193a25f837fecbc08553faed214f2fcc23553b105d15b75e3894577827be5512"
 ---
 
 # Code Guardrails
@@ -44,6 +44,13 @@ An error, a cancel, or a timeout result is not approval: do not run the step,
 and end the turn. If `ask` is not available, put the question in your final
 message and end the turn. After approval, create the config of a new linter from
 the reference. A silent dependency or tool change is a change the user did not approve.
+
+**Verify rule.** Verify with the project's own lint command, unchanged: the same
+executable, version, arguments, working directory, and environment that the project
+or its CI uses. When that command is a network step under the rule above, or when you
+cannot tell, take the approval gate first, then run it unchanged. Never substitute
+another executable, version, config, or directory. When the command cannot run here,
+report that verification did not run.
 </constraint>
 
 <constraint>
@@ -87,7 +94,7 @@ Do only the jobs that the request asks for:
    Read the matching reference in the table below.
 2. **Add missing rules.** Compare the existing config with the reference config.
    Add the missing rules. Keep every existing rule that is stricter.
-3. **Run the linter.** Use the verify command in the reference. Fix each finding in
+3. **Run the linter.** Follow the verify rule above. Fix each finding in
    the code. If a fix seems impossible, follow `lint-no-suppressions`.
 4. **Find scattered values.** Run the check in "Find scattered values". Linters miss
    repeated strings and most repeated numbers.
@@ -186,9 +193,10 @@ gives wrong results; leave such a file out with a pathspec.
 
 ```bash
 # Print each value that appears in 2 or more files: file count, value, locations.
-# Each match arrives as 3 lines: file name, line number, matched text.
+# Input: 3 lines per match: file name, line number, matched text.
+# Returns failure when awk or sort fails.
 group() {
-  tr '\0' '\n' | awk '
+  awk '
     NR % 3 == 1 { file = $0; next }
     NR % 3 == 2 { line = $0; next }
     {
@@ -202,16 +210,27 @@ group() {
       where[v] = where[v] " " file ":" line
     }
     END { for (v in files) if (files[v] > 1) print files[v] "\t" v "\t" where[v] }' | sort -rn
+  local s=("${PIPESTATUS[@]}")
+  [ "${s[0]}" -eq 0 ] && [ "${s[1]}" -eq 0 ]
 }
 langs=('*.ts' '*.rs' '*.swift' '*.py' '*.sh')
 
-# Run git grep with fixed output options, then group the matches. git grep exits
-# with 1 when nothing matches; a higher status is a failed scan, so stop and report it.
-scan() {
+# Print the matches as 3 lines each. Return the git grep status, or 2 when tr fails.
+matches() {
   git grep --untracked --no-recurse-submodules --no-column --no-color -z -I -n -o \
-    "$@" -- "${langs[@]}" | group
-  local status=${PIPESTATUS[0]}
-  if [ "$status" -gt 1 ]; then echo "scan failed: git grep exited with $status" >&2; return "$status"; fi
+    "$@" -- "${langs[@]}" | tr '\0' '\n'
+  local s=("${PIPESTATUS[@]}")
+  [ "${s[1]}" -eq 0 ] || return 2
+  return "${s[0]}"
+}
+
+# git grep exits with 1 when nothing matches; a higher status is a failed scan.
+scan() {
+  local found status=0
+  found=$(matches "$@") || status=$?
+  if [ "$status" -gt 1 ]; then echo "scan failed with status $status" >&2; return "$status"; fi
+  if [ -z "$found" ]; then return 0; fi
+  printf '%s\n' "$found" | group || { echo "scan failed: grouping failed" >&2; return 1; }
 }
 
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
@@ -229,9 +248,10 @@ The checks match candidates on one line only. They count `'cache.key'` and
 with a later quote and hide a string, for example a Rust lifetime (`&'static`) or
 an apostrophe in a comment.
 
-When git grep exits with 1, no file matched. A higher exit status means that the scan
-failed: the block prints an error, stops, and returns that status. Do not read the
-empty output of a failed scan as "no repeated values".
+When git grep exits with 1, no file matched, and the scan succeeds. A higher git grep
+status, or a failure of `tr`, `awk`, or `sort`, means that the scan failed: the block
+prints an error, stops, and returns a nonzero status. Do not read the empty output of
+a failed scan as "no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
@@ -297,7 +317,7 @@ Then list the tools you did not install and the questions for the user.
 
 ## Verification
 
-- After lint setup, run the verify command from each language reference. It must
+- After lint setup, verify as the verify rule says. The lint command must
   pass with the new rules.
 - After value mapping, run the two checks in "Find scattered values" again. Each
   remaining repeated value must have a reason in the report.

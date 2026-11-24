@@ -103,7 +103,7 @@ import { MAX_UPLOAD_BYTES, TIMEOUT_MS, STORAGE_KEY, type State } from "./transfe
 
 ## Verify
 
-Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. When the project has a lint script, pass the same arguments that the script passes. Never run the linter through `npm run`, `npx`, or `bunx`: `npm run` also runs matching `pre` and `post` scripts, and `npx` and `bunx` can contact the registry or download a missing package; npm assumes yes when standard input is not a terminal. If the binary is missing, follow the approval gate in `../SKILL.md` before you install or download it. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
+Follow the verify rule in `../SKILL.md`: run the project's lint script or CI lint command unchanged. When the project has no lint command, run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. If that binary is missing, follow the approval gate in `../SKILL.md` before you install or download it. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
 
 ## Sources
 
@@ -115,7 +115,4 @@ Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin
 - Oxlint CLI commands and category behavior: <https://oxc.rs/docs/guide/usage/linter/cli.html>
 - anti-slop install, ownership, and rule names: <https://github.com/dmmulroy/anti-slop>
 - anti-slop MIT license: <https://github.com/dmmulroy/anti-slop/blob/main/LICENSE>
-- npm `npx` install of a missing package and the implied `--yes` without a terminal: <https://docs.npmjs.com/cli/v11/commands/npm-exec>
-- Bun `bunx` auto-install of a missing package: <https://bun.com/docs/pm/bunx>
-- npm `pre` and `post` scripts that `npm run` runs: <https://docs.npmjs.com/cli/v11/using-npm/scripts/#pre--post-scripts>
 - skills 1.7.0 source forms (`/tree/<ref>`, `GH_HOST` for shorthand) and commit checkout: <https://github.com/vercel-labs/skills/blob/v1.7.0/src/source-parser.ts>, <https://github.com/vercel-labs/skills/blob/v1.7.0/src/git.ts>

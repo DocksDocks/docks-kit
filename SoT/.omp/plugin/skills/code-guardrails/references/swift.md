@@ -107,7 +107,7 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run the local standalone `swiftlint` binary directly with the same arguments as the project's SwiftLint command, including its `--config` files and paths, or `swiftlint lint --strict` from the directory with `.swiftlint.yml` when the project has no such command. Run it only when each config in that chain has no remote `parent_config` or `child_config` URL. SwiftLint fetches a remote config, so a remote URL sends the run through the approval gate in `../SKILL.md` first. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
+- Follow the verify rule in `../SKILL.md`: run the project's SwiftLint command unchanged, such as its CI step, Run Script phase, plugin, or build. When the project has no SwiftLint command, run the local standalone binary: `swiftlint lint --strict` from the directory with `.swiftlint.yml`. A remote `parent_config` or `child_config` URL in the config chain makes SwiftLint fetch that file, so that run is a network step.
 - Check each new rule for violations and report every config change.
 - When the request includes value mapping, report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
 - If SwiftLint is absent, follow the approval gate in `../SKILL.md` before you install it; do not claim the lint check passed.
