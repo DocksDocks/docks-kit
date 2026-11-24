@@ -121,8 +121,10 @@ const BLOB_FAILED = 2;
 const LEGACY_PLUGIN_ROOT_TOKEN = `\${CLAUDE_PLUGIN_ROOT}`;
 // A `skill://<skill>` or `skill://<skill>/<path>` URI in a plugin agent. omp resolves it to the installed skill.
 const SKILL_URI = /skill:\/\/([a-z0-9][a-z0-9-]*)(\/[^\s\x60'")]*)?/g;
-// The marker file of a plugin copy (the baseline or a variant) records the commit of the copy.
+// The marker file of a plugin copy (the baseline, a variant, or a self-review root) records its role and its commit.
 const PLUGIN_COPY_MARKER = '.review-bench-ref';
+// The modes of a regular file in a Git tree: not executable and executable.
+const GIT_FILE_MODES = new Set(['100644', '100755']);
 // Every file and setting that `agents` writes starts with this prefix, so `clean` finds them without a record.
 const GENERATED_PREFIX = 'review-bench-';
 // The list of configurations, the fixer and manager settings, and the omp version that `agents` wrote,
@@ -2143,9 +2145,18 @@ function pluginCopyOwner(dir) {
   return { role, sha: first };
 }
 
-// The nearest folder above `dir` that holds a plugin copy, or null.
+// The real path of `dir`: the real path of its nearest existing folder, joined with the rest of `dir`. A folder that
+// does not exist yet goes where its existing ancestor really is, also through a symlink.
+function realDestination(dir) {
+  let existing = dir;
+  while (!fs.existsSync(existing)) existing = path.dirname(existing);
+  return path.join(fs.realpathSync(existing), path.relative(existing, dir));
+}
+
+// The nearest folder above the real path of `dir` that holds a plugin copy, or null.
 function copyAbove(dir) {
-  for (let folder = path.dirname(dir); folder !== path.dirname(folder); folder = path.dirname(folder)) {
+  const real = realDestination(dir);
+  for (let folder = path.dirname(real); folder !== path.dirname(folder); folder = path.dirname(folder)) {
     if (fs.existsSync(path.join(folder, PLUGIN_COPY_MARKER))) return folder;
   }
   return null;
@@ -2500,11 +2511,13 @@ function parseVariants(options, repo, baselineDir) {
         `variant ${name}: ${source} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT_TOKEN}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`,
       );
     }
-    // The skill file must be a file at the commit: `git cat-file -e` also accepts a folder of that name.
+    // The skill file must be a regular file at the commit: `git cat-file -e` also accepts a folder, and `git cat-file
+    // -t` gives `blob` also for a symlink (mode 120000), so the mode of the tree entry decides.
     for (const skill of skills) {
       const file = `${reviewerRoot}/${skill}`;
-      const type = runGit(repo, ['cat-file', '-t', `${sha}:${file}`]);
-      if (type.status !== 0 || type.stdout.toString().trim() !== 'blob') {
+      const entry = runGit(repo, ['ls-tree', '--full-tree', sha, '--', file]);
+      const mode = entry.status === 0 ? entry.stdout.toString().split(' ')[0] : '';
+      if (!GIT_FILE_MODES.has(mode)) {
         fail(`variant ${name}: ${source} at ${ref} names ${file}, which is not a file at ${ref}`);
       }
     }

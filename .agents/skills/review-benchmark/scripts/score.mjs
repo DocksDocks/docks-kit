@@ -3462,15 +3462,16 @@ function pathTargets(name, value, cwd) {
     .filter((part) => part && !isExclusion(name, part, cwd));
 }
 
-// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX and names no existing path is an
-// exclusion glob, as omp reads it. Without a working directory, a relative part cannot be checked, so it stays a target.
+// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX and names no existing path, as written
+// or without its read selector (OMP_SELECTOR), is an exclusion glob, as omp reads it: omp 19.0.0 peels a line selector
+// before it looks for the file, so `!notes.md:1-2` of an existing `!notes.md` is a search root. Without a working
+// directory, a relative part cannot be checked, so it stays a target.
 function isExclusion(name, part, cwd) {
-  return (
-    EXCLUSION_TOOLS.has(name) &&
-    part.startsWith(EXCLUSION_PREFIX) &&
-    typeof ompFile(part, cwd) === 'string' &&
-    !ompPathExists(part, cwd)
-  );
+  if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
+    return false;
+  }
+  const bare = part.replace(OMP_SELECTOR, '');
+  return !ompPathExists(part, cwd) && (bare === part || !ompPathExists(bare, cwd));
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -4456,10 +4457,12 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // decodes each transcript that it picks one time in full (see transcriptEntries), and every reader takes these
 // records. Before it writes, it checks every dispatch name, the shape of every transcript that it
 // picks (see checkTranscriptShape), and the agent of each of these transcripts: omp records the agent that it ran in
-// the `session_init` entry (see sessionAgent), and the command stops when that agent is not the agent of the first
-// line `agent: <name>` of the prompt, or when the transcript names no agent. A transcript of another agent, for
-// example of another plan-reviewer variant under the task name of this one, shows the review of another arm. Then the
-// command writes what it finds, and fails with the names of the dispatches that have no transcript.
+// the `session_init` entry (see sessionAgent). The command stops when the prompt has no first line `agent: <name>`:
+// such a prompt is damaged, so the message names it and asks to restore its header. It stops, too, when the agent of
+// the transcript is not the agent of the prompt, or when the transcript names no agent: a transcript of another agent,
+// for example of another plan-reviewer variant under the task name of this one, shows the review of another arm, so
+// the message asks for a new dispatch. Then the command writes what it finds, and fails with the names of the
+// dispatches that have no transcript.
 export function transcriptsCommand(ws, sessionsDir) {
   const files = transcriptFiles(sessionsDir);
   const wsDir = path.resolve(ws);
@@ -4473,6 +4476,7 @@ export function transcriptsCommand(ws, sessionsDir) {
   const updates = [];
   const missing = [];
   const otherAgents = [];
+  const headless = [];
   for (const [dir, dispatches] of byDir) {
     const metaFile = path.join(dir, 'meta.json');
     const meta = fs.existsSync(metaFile) ? readJson(metaFile) : {};
@@ -4491,10 +4495,10 @@ export function transcriptsCommand(ws, sessionsDir) {
       checkTranscriptShape(entries, file);
       const expected = PROMPT_AGENT.exec(readText(dispatch.prompt))?.[1] ?? null;
       const ran = sessionAgent(entries);
-      // A prompt without its header or a transcript without an agent names no agent, so it proves no arm.
-      if (expected === null || ran === null || ran !== expected) {
-        otherAgents.push(`${name} (${file}): agent ${ran ?? 'none'}, not ${expected ?? 'none'}`);
-      }
+      // A prompt without its header names no agent: restore the header. A transcript without an agent, or with
+      // another agent than the prompt names, proves no arm: dispatch it again.
+      if (expected === null) headless.push(dispatch.prompt);
+      else if (ran !== expected) otherAgents.push(`${name} (${file}): agent ${ran ?? 'none'}, not ${expected}`);
       const { toolCalls, ...facts } = transcriptFacts(entries);
       if (fixer || manager) {
         const agent = { ...parseTranscript(entries, file), ...facts };
@@ -4519,6 +4523,11 @@ export function transcriptsCommand(ws, sessionsDir) {
       results.push({ name, reviewer, entry });
     }
     if (results.length) updates.push({ metaFile, meta, results });
+  }
+  if (headless.length) {
+    fail(
+      `transcripts: ${headless.length} prompts have no agent header: ${listSome(headless, LISTED_READS)}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+    );
   }
   if (otherAgents.length) {
     fail(

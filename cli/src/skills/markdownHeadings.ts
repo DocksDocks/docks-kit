@@ -31,29 +31,38 @@ function decodeReferences(text: string): string {
 }
 
 /**
- * The elements whose start and end break a line in rendered HTML: the
- * block-level tags of a CommonMark HTML block, type 6 (CommonMark 0.31.2, 4.6),
- * and `br` and `pre`. An inline element such as `span` gives no break, so
- * `<span>Re</span>port` stays one word.
+ * The elements that HTML renders as a block, a list item, or a table part, and
+ * `br`: their start and end break a line (HTML rendering,
+ * https://html.spec.whatwg.org/multipage/rendering.html, 15.3). An inline
+ * element such as `span` gives no break, so `<span>Re</span>port` stays one word.
  */
 const BREAKING_ELEMENTS = [
-  "address, article, aside, base, basefont, blockquote, body, caption, center, col, colgroup",
-  "dd, details, dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form, frame",
-  "frameset, h1, h2, h3, h4, h5, h6, head, header, hr, html, iframe, legend, li, link, main",
-  "menu, menuitem, nav, noframes, ol, optgroup, option, p, param, search, section, summary",
-  "table, tbody, td, tfoot, th, thead, title, tr, track, ul, br, pre",
+  "html, body, address, blockquote, center, dialog, div, figure, figcaption, footer, form",
+  "header, hr, legend, listing, main, p, plaintext, pre, search, xmp",
+  "article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section",
+  "dir, dd, dl, dt, menu, ol, ul, li, fieldset, details, summary, optgroup, option",
+  "table, caption, colgroup, col, thead, tbody, tfoot, tr, td, th, br",
 ].join(", ");
+
+/**
+ * The elements that HTML does not render (`display: none` in the same section):
+ * they give no break, and their text does not count.
+ */
+const HIDDEN_ELEMENTS =
+  "area, base, basefont, datalist, head, link, meta, noembed, noframes, param, rp, script, style, template, title";
 
 /**
  * The visible text of a heading's rendered content. The parser passes inline
  * HTML through as raw HTML, so Bun's HTML tokenizer (`HTMLRewriter`,
  * https://bun.sh/docs/runtime/html-rewriter) splits it: only its text chunks
- * count, so tags and comments give no text, and the start and end of each
- * breaking element give a space, so words on two sides of a `<br>` stay apart.
- * Character references are decoded, and runs of whitespace become one space.
+ * count, so tags and comments give no text, the text inside a hidden element is
+ * dropped, and the start and end of each breaking element give a space, so words
+ * on two sides of a `<br>` stay apart. Character references are decoded, and
+ * runs of whitespace become one space.
  */
 function visibleText(html: string): string {
   const chunks: Array<string> = [];
+  let hidden = 0;
   new HTMLRewriter()
     .on(BREAKING_ELEMENTS, {
       element: (element) => {
@@ -65,9 +74,18 @@ function visibleText(html: string): string {
         }
       },
     })
+    .on(HIDDEN_ELEMENTS, {
+      element: (element) => {
+        if (!element.canHaveContent) return;
+        hidden += 1;
+        element.onEndTag(() => {
+          hidden -= 1;
+        });
+      },
+    })
     .onDocument({
       text: (chunk) => {
-        chunks.push(chunk.text);
+        if (hidden === 0) chunks.push(chunk.text);
       },
     })
     .transform(html);

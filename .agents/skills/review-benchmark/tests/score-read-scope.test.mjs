@@ -337,6 +337,12 @@ test('readScope ignores the exclusion parts of a grep path, which read nothing',
   fs.writeFileSync(path.join(live, '!notes.md'), 'x\n');
   const rooted = [{ name: 'grep', path: `${SCOPE_CASE}/snapshot;!notes.md` }];
   assert.deepEqual(score.readScope(rooted, { ...scope, cwd: live }), { outside: ['!notes.md'] });
+  // Code review round 2 of plan #216: omp peels a line selector before it looks for the file, so a part with a
+  // selector that names an existing file is a search root too, not an exclusion.
+  for (const selected of ['!notes.md:1-2', `${SCOPE_CASE}/snapshot;!notes.md:1-2`]) {
+    const call = [{ name: 'grep', path: selected }];
+    assert.deepEqual(score.readScope(call, { ...scope, cwd: live }), { outside: ['!notes.md'] }, selected);
+  }
 });
 test('readScope refuses every skill:// read of the benchmark skill and every read inside the live benchmark folder', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN], heldSkills: [] };
@@ -1047,13 +1053,15 @@ test('score.mjs transcripts exits nonzero on a transcript of another agent and l
   assert.equal(readText(path.join(run, 'meta.json')), before);
 });
 // Code review round 1 of plan #216: a prompt without its `agent:` header and a transcript without an agent name no
-// agent, so they prove no arm, also when both are missing.
+// agent, so they prove no arm, also when both are missing. Round 2: a prompt without the header is a damaged prompt,
+// so the message names the prompt and asks to restore its header; a new dispatch cannot fix it.
 test('transcripts refuses a prompt without an agent header and a transcript without an agent', () => {
   const root = scratch();
   const ws = path.join(root, 'ws');
   const sessions = path.join(root, 'sessions');
   const caseDir = path.join(ws, 'plan-3');
   const run = path.join(caseDir, 'P0-low', 'run-1');
+  const prompt = path.join(run, 'prompts', 'plan.txt');
   put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
   put(caseDir, 'plan.md', '# Plan 3\n');
   put(run, 'prompts/plan.txt', 'Review.\n');
@@ -1066,7 +1074,13 @@ test('transcripts refuses a prompt without an agent header and a transcript with
   put(sessions, 'Plan3P0LowR1Plan.jsonl', transcript);
   const before = readText(path.join(run, 'meta.json'));
   assert.throws(() => transcriptsCommand(ws, sessions), {
-    message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3P0LowR1Plan (${file}): agent none, not none; dispatch them again with the agent of the prompt`,
+    message: `transcripts: 1 prompts have no agent header: ${prompt}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+  });
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+  // With its header back, the prompt names an agent that the transcript does not name: dispatch it again.
+  put(run, 'prompts/plan.txt', 'agent: review-bench-candidate-plan-low\n\nReview.\n');
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3P0LowR1Plan (${file}): agent none, not review-bench-candidate-plan-low; dispatch them again with the agent of the prompt`,
   });
   assert.equal(readText(path.join(run, 'meta.json')), before);
 });

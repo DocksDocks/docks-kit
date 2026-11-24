@@ -578,6 +578,12 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
   fs.rmSync(path.join(repo, skillFile));
   tagCommit('no-plan-skill', { [agentFile]: variantAgentText('gone') });
   tagCommit('folder-skill', { [agentFile]: variantAgentText('folder'), [`${skillFile}/README.md`]: '# Folder\n' });
+  // A Git symlink (mode 120000) is a blob too, so `git cat-file -t` takes it; this one points to no file.
+  fs.rmSync(path.join(repo, skillFile), { recursive: true });
+  fs.symlinkSync('missing.md', path.join(repo, skillFile));
+  tagCommit('link-skill', { [agentFile]: variantAgentText('link') });
+  // treeState cannot read the dangling link; the commit keeps it.
+  fs.rmSync(path.join(repo, skillFile));
   const ownSkill = (ref) =>
     `variant a: ${agentFile} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`;
   const refusals = [
@@ -614,6 +620,10 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
     [
       { variants: '16=v16,a=folder-skill' },
       `variant a: ${agentFile} at folder-skill names ${skillFile}, which is not a file at folder-skill`,
+    ],
+    [
+      { variants: '16=v16,a=link-skill' },
+      `variant a: ${agentFile} at link-skill names ${skillFile}, which is not a file at link-skill`,
     ],
   ];
   const options = variantOptions(fixture);
@@ -758,9 +768,23 @@ test('agents refuses a copy folder inside another plugin copy and a replacement 
   const inner = path.join(baselineCopy, 'inner');
   const state = treeState(root);
   assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': inner }, repo), {
-    message: `${inner} is inside the plugin copy ${baselineCopy}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
+    message: `${inner} is inside the plugin copy ${fs.realpathSync(baselineCopy)}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
   });
   assert.deepEqual(treeState(root), state);
+  // A --baseline-dir through a symlink to a folder of a variant copy puts the copies inside that copy too, also when
+  // the destination does not exist yet.
+  const variantCopy = variantRoot(root, 'a', shas['cand-a']);
+  const link = path.join(root, 'via');
+  fs.symlinkSync(path.join(variantCopy, 'skills'), link);
+  const viaBaseline = path.join(link, 'baseline-plugin');
+  const copyState = treeState(variantCopy);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': viaBaseline }, repo), {
+    message: `${viaBaseline} is inside the plugin copy ${fs.realpathSync(variantCopy)}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
+  });
+  assert.deepEqual(treeState(variantCopy), copyState);
+  assert.deepEqual(treeState(project), {});
+  // treeState reads a symlink to a folder as a file, so the link goes before the next state.
+  fs.rmSync(link);
   // A copy that an earlier version left inside the baseline copy stays when the first setup moves to another baseline.
   const nested = path.join(baselineCopy, `variant-a-${shas['cand-a'].slice(0, 12)}-plugin`);
   put(nested, '.review-bench-ref', `variant ${shas['cand-a']}\n`);

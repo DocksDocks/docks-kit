@@ -261,6 +261,15 @@ describe("kit plugin skills: report section and shared copies", () => {
       stale: "## Report a problem<address>with this skill</address>",
     },
     { shape: "an inline-split", stale: "## <span>Re</span>port a problem with this skill" },
+    { shape: "a listing-element", stale: "## Report a problem<listing>with this skill</listing>" },
+    {
+      shape: "a hidden-link",
+      stale: '## Re<link rel="icon" href="/favicon.ico">port a problem with this skill',
+    },
+    {
+      shape: "a script-text",
+      stale: "## Report a problem with this skill<script>draft()</script>",
+    },
   ]) {
     it(`fails ${shape} stale report heading before the canonical one`, () => {
       const root = copyFixture();
@@ -458,12 +467,12 @@ describe("kit plugin skills: report section and shared copies", () => {
         skillFile("one"),
         minimalSkill("one", "Use when testing.", `# Body\n\n${config.reportSection}`),
       );
-      plant(root, "bin/bun", "#!/bin/sh\ncat >/dev/null\nprintf '[-1,-1]'\n");
+      plant(root, "bin/bun", "#!/bin/sh\nwhile IFS= read -r _; do :; done\nprintf '[-1,-1]'\n");
       chmodSync(join(root, "bin", "bun"), 0o755);
       vi.stubEnv("PATH", join(root, "bin"));
       try {
         expect(checkReportSection(root)).toContainEqual(
-          expect.stringContaining("cannot count the Report headings with Bun's Markdown parser"),
+          expect.stringContaining("did not write one non-negative count per text"),
         );
       } finally {
         vi.unstubAllEnvs();
