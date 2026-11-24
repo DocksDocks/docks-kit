@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "1f7430a3ed6b8167ddc97ad178df36b02725061d94fe616e93747e4303cb9be9"
+  content_hash: "8ca1896262fc5dde282331295be2e4acd64ae544ceadf9ad41f27eb8eae6bd9d"
 ---
 
 # Code Guardrails
@@ -33,8 +33,8 @@ When the project has a lint config, change it only by adding rules. Do not loose
 remove, or reorder an existing rule, and do not change the linter or formatter the
 project chose. Report every rule you add.
 
-These steps need approval: the install of a missing linter, and a network step
-such as the anti-slop installer. A network step is any command that can reach the
+These steps need approval: the install of a missing linter with the project's package
+manager, and any other network step. A network step is any command that can reach the
 network: an install, a download, a package runner, a dependency resolve, a build or
 plugin that resolves packages, a remote config, or a remote lookup such as
 `git ls-remote`. When you cannot tell that a command stays offline, treat it as a
