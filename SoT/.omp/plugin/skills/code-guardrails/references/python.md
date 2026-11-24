@@ -82,7 +82,7 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Run the local `ruff` binary, from `PATH` or from the project's virtual environment (such as `.venv/bin/ruff`), with the arguments of the project's Ruff command, or `ruff check .` when the project has none. Never run Ruff through `uv run`, `uvx`, `pre-commit`, `hatch run`, or another runner that can install or download. If no local `ruff` exists, follow the approval gate in `../SKILL.md`. Run the settings probes from Detect again, one file for each distinct `Settings path` and one test file, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
+Run the local `ruff` binary, from `PATH` or from the project's virtual environment (such as `.venv/bin/ruff`), with the arguments of the project's Ruff command, or `ruff check .` when the project has none. Never run Ruff through `uv run`, `uvx`, `pre-commit`, `hatch run`, or another runner that can install or download. If no local `ruff` exists, follow the approval gate in `../SKILL.md`. After the edit, repeat the same settings probes from Detect for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 

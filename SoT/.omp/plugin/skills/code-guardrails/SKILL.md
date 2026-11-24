@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "c2fa6a0e1481e6907e37b5303df75cfa75191c1ed3e0497e4f319c0d0e1019e3"
+  content_hash: "297ba7eefa36295f147b47783960e9424e2271d291393bf616735e80e3cc1921"
 ---
 
 # Code Guardrails
@@ -34,8 +34,12 @@ remove, or reorder an existing rule, and do not change the linter or formatter t
 project chose. Report every rule you add.
 
 These steps need approval: the install of a missing linter, and a network step
-such as the anti-slop installer. Before such a step, ask the user with the omp
-`ask` tool. Do not install, download, or run the step until the user approves.
+such as the anti-slop installer. A network step is any command that can reach the
+network: an install, a download, a package runner, a dependency resolve, a build or
+plugin that resolves packages, a remote config, or a remote lookup such as
+`git ls-remote`. When you cannot tell that a command stays offline, treat it as a
+network step. Before such a step, ask the user with the omp `ask` tool.
+Do not install, download, or run the step until the user approves.
 An error, a cancel, or a timeout result is not approval: do not run the step,
 and end the turn. If `ask` is not available, put the question in your final
 message and end the turn. After approval, create the config of a new linter from

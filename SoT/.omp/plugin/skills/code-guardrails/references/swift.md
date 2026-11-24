@@ -107,7 +107,7 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run a local standalone `swiftlint` binary directly: `swiftlint lint --strict` from the directory with `.swiftlint.yml`. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
+- Run a local standalone `swiftlint` binary directly, `swiftlint lint --strict` from the directory with `.swiftlint.yml`, only when `.swiftlint.yml` and each config that it references have no remote `parent_config` or `child_config` URL. SwiftLint fetches a remote config, so a remote URL sends the run through the approval gate in `../SKILL.md` first. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
 - Check each new rule for violations and report every config change.
 - When the request includes value mapping, report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
 - If SwiftLint is absent, follow the approval gate in `../SKILL.md` before you install it; do not claim the lint check passed.
@@ -115,6 +115,7 @@ func upload(_ body: Data) {
 ## Sources
 
 - SwiftLint [configuration, command usage, and plugins](https://github.com/realm/SwiftLint/blob/main/README.md) and [rule directory](https://realm.github.io/SwiftLint/rule-directory.html).
+- SwiftLint [remote `parent_config` and `child_config` references](https://github.com/realm/SwiftLint#childparent-configs-remote).
 - SwiftLint rules: [no_magic_numbers](https://realm.github.io/SwiftLint/no_magic_numbers.html), [force_unwrapping](https://realm.github.io/SwiftLint/force_unwrapping.html), [implicitly_unwrapped_optional](https://realm.github.io/SwiftLint/implicitly_unwrapped_optional.html).
 - SwiftLint rules: [fatal_error_message](https://realm.github.io/SwiftLint/fatal_error_message.html), [no_empty_block](https://realm.github.io/SwiftLint/no_empty_block.html), [unhandled_throwing_task](https://realm.github.io/SwiftLint/unhandled_throwing_task.html).
 - SwiftLint rules: [force_cast](https://realm.github.io/SwiftLint/force_cast.html), [force_try](https://realm.github.io/SwiftLint/force_try.html).
