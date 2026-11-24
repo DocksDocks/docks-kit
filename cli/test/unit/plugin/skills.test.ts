@@ -252,6 +252,8 @@ describe("kit plugin skills: report section and shared copies", () => {
       stale: "## <!-->Report a problem with this skill<!-- draft -->",
     },
     { shape: "a character-reference", stale: "## Report&#32;a problem with this skill" },
+    { shape: "a line-break", stale: "## Report a problem<br>with this skill" },
+    { shape: "an inline-split", stale: "## <span>Re</span>port a problem with this skill" },
   ]) {
     it(`fails ${shape} stale report heading before the canonical one`, () => {
       const root = copyFixture();

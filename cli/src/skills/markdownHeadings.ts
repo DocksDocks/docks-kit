@@ -31,15 +31,34 @@ function decodeReferences(text: string): string {
 }
 
 /**
+ * The elements whose start and end break a line in rendered HTML: `br` and the
+ * block-level elements. An inline element such as `span` gives no break, so
+ * `<span>Re</span>port` stays one word.
+ */
+const BREAKING_ELEMENTS =
+  "br, p, div, li, ul, ol, dl, dt, dd, table, tr, td, th, h1, h2, h3, h4, h5, h6, hr, pre, blockquote, section, article, header, footer, nav, aside, figure, figcaption, details, summary";
+
+/**
  * The visible text of a heading's rendered content. The parser passes inline
  * HTML through as raw HTML, so Bun's HTML tokenizer (`HTMLRewriter`,
  * https://bun.sh/docs/runtime/html-rewriter) splits it: only its text chunks
- * count, so tags and comments give no text. Character references are decoded,
- * and runs of whitespace become one space.
+ * count, so tags and comments give no text, and the start and end of each
+ * breaking element give a space, so words on two sides of a `<br>` stay apart.
+ * Character references are decoded, and runs of whitespace become one space.
  */
 function visibleText(html: string): string {
   const chunks: Array<string> = [];
   new HTMLRewriter()
+    .on(BREAKING_ELEMENTS, {
+      element: (element) => {
+        chunks.push(" ");
+        if (element.canHaveContent) {
+          element.onEndTag(() => {
+            chunks.push(" ");
+          });
+        }
+      },
+    })
     .onDocument({
       text: (chunk) => {
         chunks.push(chunk.text);
