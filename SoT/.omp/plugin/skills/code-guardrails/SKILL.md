@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "fb9a50749a59bca43fda1bb3e4528150eb0cd4590058c40afb46f5109055243e"
+  content_hash: "1ba5c28d8a9d277dbeb35742ca31904b6e7eba281d5f9ec47f7ec8d5cf54b021"
 ---
 
 # Code Guardrails
@@ -237,24 +237,23 @@ matches() {
 # git grep exits with 1 when nothing matches; a higher status is a failed scan.
 # git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
 # The matches go to a temporary file, and the grouping runs only after these checks pass.
-scan() {
-  local found errors status=0
-  found=$(mktemp) || return 2
-  errors=$(mktemp) || { rm -f "$found"; return 2; }
+# The scan runs in a subshell, so its traps stay inside it. One EXIT trap removes the
+# temporary files on every path, also after TERM or INT, and a failed removal fails the scan.
+scan() (
+  found='' errors='' status=0
+  trap 'rm -f -- ${found:+"$found"} ${errors:+"$errors"} ||
+    { echo "scan failed: cannot remove the temporary files" >&2; exit 2; }' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  found=$(mktemp) || exit 2
+  errors=$(mktemp) || exit 2
   # `>|` writes the files even with noclobber set. A file that cannot be written fails the scan.
-  if ! true >| "$found" 2>| "$errors"; then
-    echo "scan failed: cannot write $found or $errors" >&2; rm -f "$found" "$errors"; return 2
-  fi
+  if ! true >| "$found" 2>| "$errors"; then echo "scan failed: cannot write $found or $errors" >&2; exit 2; fi
   matches "$@" >| "$found" 2>| "$errors" || status=$?
   if [ "$status" -le 1 ] && [ -s "$errors" ]; then status=2; fi
-  if [ "$status" -gt 1 ]; then
-    echo "scan failed with status $status" >&2; cat "$errors" >&2; rm -f "$found" "$errors"; return "$status"
-  fi
-  # Status 1 (no match) passed the checks above; from here, status reports the grouping.
-  status=0; group < "$found" || status=1
-  rm -f "$found" "$errors"
-  if [ "$status" -ne 0 ]; then echo "scan failed: grouping failed" >&2; return 1; fi
-}
+  if [ "$status" -gt 1 ]; then echo "scan failed with status $status" >&2; cat "$errors" >&2; exit "$status"; fi
+  group < "$found" || { echo "scan failed: grouping failed" >&2; exit 1; }
+)
 
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
 # 2 or more digits, with an optional Rust type suffix such as u64.
@@ -275,8 +274,9 @@ When git grep exits with 1, no file matched, and the scan succeeds. A higher git
 status, any error output from git grep or `tr` (such as a file that git cannot read),
 a failure of `tr`, `awk`, or `sort`, or a failure to write the temporary files that
 hold the matches and the error output means that the scan failed: the block prints an
-error, stops, and returns a nonzero status. The scan removes its temporary files before
-it returns. Do not read the empty output of a failed scan as "no repeated values".
+error, stops, and returns a nonzero status. The scan removes its temporary files on
+every exit, also after TERM or INT, and a failed removal also fails the scan. Do not
+read the empty output of a failed scan as "no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
