@@ -18,9 +18,17 @@
 - code-guardrails: the GOOD examples pass the recommended magic-number rules
   and keep their behavior. The Bash examples validate their numeric
   arguments before arithmetic.
-- code-guardrails: the Python recipe edits the Ruff config that Ruff uses,
-  reports an ignore of `PLR2004`, and leaves type checkers alone. The Oxlint,
-  SwiftLint `only_rules`, and Rust workspace recipes add only missing rules.
+- code-guardrails: the Python recipe edits the one Ruff config that applies to
+  the whole lint scope, and asks the user in every other case, also before it
+  creates a first config. It reports every ignore that can turn `PLR2004`
+  off and leaves type checkers alone. The Oxlint, SwiftLint `only_rules`, and
+  Rust workspace recipes add only missing rules.
+- code-guardrails: an approval covers only the approved action. A first config
+  is proposed only for the file that the Verify command loads. The TypeScript
+  recipe gives the user the pinned `install-anti-slop` command and does not
+  run it.
+- code-guardrails: the scattered-values scan keeps its matches in memory and
+  writes no temporary file of its own.
 - report-skill-issue: every gh command names the host `github.com`, and the
   account is checked again right before filing. Without gh, the skill gives a
   browser search link and says when the duplicate search did not run.
