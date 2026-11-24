@@ -6,7 +6,7 @@ disable-model-invocation: true
 metadata:
   pattern: pipeline
   updated: "2026-11-24"
-  content_hash: "3b678a7d416b01ac317a7fe8cc7a26ad1b0058f886cf2f905e5fb898abbba408"
+  content_hash: "015329e95ae2b2225ea247b02b50b1903d2a2ca3d113e8016a6a206d54500463"
 ---
 
 # Yolo
@@ -126,9 +126,9 @@ To adopt a plan:
    `Asked:` part quotes the old line, and publish the change with `edit`. After
    `plan=pass`, this change needs a plan-review round, as the contract's Phases
    and review comments says.
-5. Reuse the branch that `gh issue develop <n> --list` shows, or the head branch
-   of the open pull request, after the contract's Branch check of Linked branch
-   passes for it. When neither exists, use the contract's Linked branch steps.
+5. Reuse the plan's branch, as the contract's Linked branch defines it, after
+   its Branch check passes. When neither source names a branch, use the
+   contract's Linked branch steps.
 6. Continue at the first Run order phase whose Done when is not met.
 
 ## Draft
@@ -233,9 +233,8 @@ without a merge. The contract's Round ceiling also says this.
    `origin/<default>` into the linked branch. Do not rebase. Rerun acceptance,
    and run a code-review round on the result. Commit each repair.
 3. Run the Branch check of the contract's Linked branch, then push the linked
-   branch as that section says, with `git push -u origin HEAD`. When a
-   repository hook fails, follow the contract's Repository hooks. Never skip
-   the hook.
+   branch with the push command of that section. When a repository hook
+   fails, follow the contract's Repository hooks. Never skip the hook.
 4. Write the run summary from `../plan-manager/references/run-summary.md`, as
    the practices Run summary says.
 5. When `gh pr list --repo <owner/repo> --head <branch> --state open` shows a

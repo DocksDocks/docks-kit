@@ -645,36 +645,42 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
    approval, set it up with Linked branch timing items 1 to 5, and skip items
    3 to 5 here. Otherwise block the plan. Report the dirty paths as Worktree
    hooks says.
-3. Run `gh issue develop <n> --list --repo <owner/repo>`. Reuse a listed branch.
-4. If no branch is listed, run
+3. Find the plan's branch, as Branch check below defines it. Reuse it.
+4. Only when neither source names a branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default> --checkout`.
-5. If a call fails, list again. Continue only when the list shows the branch
-   and the Branch check below passes. Otherwise block the plan. Never work on
-   an unlinked branch or on the default branch.
+5. If a call fails, find the plan's branch again. Continue only when the
+   Branch check passes. Otherwise block the plan. Never work on an unlinked
+   branch or on the default branch.
+
+The plan's branch is a branch of `<owner/repo>` that one of two sources names:
+the branch that `gh issue develop <n> --list --repo <owner/repo>` lists, whose
+URL must start with `https://github.com/<owner/repo>/tree/`; or, after the pull
+request opens and GitHub drops that link, the head of the open pull request
+that `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`
+names, read with
+`gh pr view <pr> --repo <owner/repo> --json state,headRepositoryOwner,headRepository,headRefName`,
+whose head repository must be `<owner/repo>`. A branch of another repository
+is not the plan's branch.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
 When a lookup fails, stop. The check passes when all of these hold:
 
-- The branch is the plan's branch: `gh issue develop <n> --list --repo
-  <owner/repo>` lists it, or, after the pull request opens and GitHub drops
-  that link, it is the `headRefName` of the open pull request that
-  `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`
-  names.
+- The branch is the plan's branch.
 - The branch differs from the default branch.
 - Each URL that `git remote get-url --push --all origin` prints names
   `<owner/repo>`, because a push goes to every push URL of the remote.
 
 Run it for every branch that a run selects: here, in Linked branch timing,
-when a run adopts a plan and reuses a listed branch or the head branch of an
-open pull request, and right before each push, for the current branch. When it
-fails, push nothing, keep the commits local, and block the plan with that
-reason.
+when a run adopts a plan and reuses its branch, and right before each push,
+for the current branch. When it fails, push nothing, keep the commits local,
+and block the plan with that reason.
 
-Push only with `git push -u origin HEAD` from the checked branch. The explicit
-`HEAD` refspec sends the current branch to the branch of the same name on
-`origin`, so `remote.origin.push` and `push.default` cannot choose another
-destination.
+Push only with `git push -u origin HEAD --no-follow-tags` from the checked
+branch. The explicit `HEAD` refspec sends the current branch to the branch of
+the same name on `origin`, so `remote.origin.push` and `push.default` cannot
+choose another destination, and `--no-follow-tags` keeps `push.followTags`
+from sending a tag, which can start a release workflow.
 
 ### Work preservation
 
@@ -1386,10 +1392,11 @@ the run starts it, before its research. The status stays
 items 3 to 5. When it is dirty, do not ask. Run the checkout check of Worktree
 hooks. When it passes, use these commands instead:
 
-1. If `gh issue develop <n> --list --repo <owner/repo>` lists no branch, run
+1. Find the plan's branch, as Linked branch defines it. Only when neither
+   source names a branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default>`.
-2. List again and read the branch name. Run the Branch check of Linked branch
-   for it.
+2. Find the plan's branch again and read its name. Run the Branch check of
+   Linked branch for it.
 3. Run `git fetch origin <branch>`.
 4. Run `git worktree add <worktree> <branch>`, where `<worktree>` is
    `${XDG_DATA_HOME:-$HOME/.local/share}/agent-worktrees/<repository-name>/issue-<n>`.
