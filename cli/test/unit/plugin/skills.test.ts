@@ -280,11 +280,26 @@ describe("kit plugin skills: report section and shared copies", () => {
     expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
   });
 
-  for (const { block, opener } of [
-    { block: "code fence", opener: "```text\n\n" },
-    { block: "HTML comment", opener: "<!-- draft\n\n" },
+  for (const { shape, block, opener } of [
+    { shape: "a lone opener", block: "code fence", opener: "```text\n\n" },
+    { shape: "a lone opener", block: "HTML comment", opener: "<!-- draft\n\n" },
+    {
+      shape: "four backticks then three",
+      block: "code fence",
+      opener: "````text\n```\n\n",
+    },
+    {
+      shape: "a `-->` in an earlier fenced example, then a lone `<!--`",
+      block: "HTML comment",
+      opener: "```html\n-->\n```\n\n<!-- draft\n\n",
+    },
+    {
+      shape: "an inline code line that starts with three backticks, then a lone `<!--`",
+      block: "HTML comment",
+      opener: "```js `x` ```\n<!-- draft\n```\n\n",
+    },
   ]) {
-    it(`fails an unclosed ${block} just before the only report section`, () => {
+    it(`fails an unclosed ${block} (${shape}) just before the only report section`, () => {
       const root = copyFixture();
       edit(root, skillFile("zoom-out"), (text) =>
         text.replace(

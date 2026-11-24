@@ -205,8 +205,11 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
 const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t]|$)(.*)$/;
 /** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
 const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
-/** A fence delimiter line: up to three spaces, then three or more backticks or tildes. */
-const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
+/**
+ * A fence delimiter line: up to three spaces, then three or more backticks or
+ * tildes; after backticks, the line has no other backtick (CommonMark 0.31.2, 4.5).
+ */
+const FENCE_LINE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 
 /** The offset of each line that is an ATX heading with the text `title`, at any level. Lines end at `\n` or `\r\n`. */
 function headingOffsets(content: string, title: string): Array<number> {
@@ -223,17 +226,51 @@ function headingOffsets(content: string, title: string): Array<number> {
 }
 
 /**
+ * The block that is still open at the end of `text`, in one ordered scan of its
+ * lines. A fence line opens a code fence; while it is open, only a fence line of
+ * the same character, at least as long, with nothing but spaces or tabs after
+ * it, closes it, and nothing else counts. Outside a fence, `<!--` opens an HTML
+ * comment and a later `-->` closes it; a `-->` with no open comment does not count.
+ */
+function openBlock(text: string): "code fence" | "HTML comment" | null {
+  let fence: string | null = null;
+  let inComment = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const marker = FENCE_LINE.exec(line)?.[1];
+    if (fence !== null) {
+      if (marker?.[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) {
+        fence = null;
+      }
+    } else if (!inComment && marker !== undefined) {
+      fence = marker;
+    } else {
+      let at = 0;
+      for (;;) {
+        const token = inComment ? "-->" : "<!--";
+        const found = line.indexOf(token, at);
+        if (found === -1) break;
+        inComment = !inComment;
+        at = found + token.length;
+      }
+    }
+  }
+  if (fence !== null) return "code fence";
+  return inComment ? "HTML comment" : null;
+}
+
+/**
  * Each skill ends with the canonical report section, byte for byte; the
  * `reportSection` text of config.json is the one source of that section. The
  * files are read as latin1 (one character per byte), so line endings and the
  * final newline count. Every line that is the Report heading in ATX form
  * counts, also inside fenced code or an HTML comment, and the file must have
- * exactly one. Before it, the fence delimiter lines must come in pairs, and each
- * `<!--` needs a `-->`, so the section is not inside an unclosed code fence or
- * HTML comment. The check does no Markdown block parsing: a line scan cannot
- * see container blocks such as list items, and a wrong guess about where a
- * fence ends let a second section pass. These counts fail closed instead. A
- * skill that quotes the heading quotes it in another form, such as inline code.
+ * exactly one. Before it, no code fence or HTML comment may still be open (see
+ * `openBlock`). The check does no Markdown block parsing beyond that scan, and
+ * it does not model container blocks such as list items: a fence or comment
+ * that a list item ends early stays open to the heading, so the check fails
+ * closed. A skill that quotes the heading quotes it in another form, such as
+ * inline code.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -248,7 +285,7 @@ export function checkReportSection(
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const content = readFileSync(file, "latin1");
     const starts = headingOffsets(content, heading.slice("## ".length));
-    const before = content.slice(0, starts[0]);
+    const open = openBlock(content.slice(0, starts[0]));
     if (starts.length === 0) {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
@@ -257,13 +294,9 @@ export function checkReportSection(
       failures.push(
         `${shown(repoRoot, file)}: has ${starts.length} Report sections; keep one, at the end of the file`,
       );
-    } else if (before.split("\n").filter((line) => FENCE_LINE.test(line)).length % 2 === 1) {
+    } else if (open !== null) {
       failures.push(
-        `${shown(repoRoot, file)}: an unclosed code fence comes before the Report section`,
-      );
-    } else if (before.split("<!--").length > before.split("-->").length) {
-      failures.push(
-        `${shown(repoRoot, file)}: an unclosed HTML comment comes before the Report section`,
+        `${shown(repoRoot, file)}: an unclosed ${open} comes before the Report section`,
       );
     } else if (content.slice(starts[0]) !== canonical) {
       failures.push(
