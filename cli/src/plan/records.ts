@@ -64,8 +64,8 @@ const EMPHASIZED_MACHINE_PATH = new RegExp(
   String.raw`(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1(?!\*))`,
   "gm",
 );
-// A backtick after a backslash is literal (GFM), so it opens no span.
-const CODE_SPAN = /(?<![`\\])(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
+// A backtick after an odd run of backslashes is literal (GFM), so it opens no span; after an even run it does.
+const CODE_SPAN = /(?<!`)(?<!(?:^|[^\\])(?:\\\\)*\\)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
 const SECTIONS = [
   "Goal",
   "Research",
@@ -374,15 +374,13 @@ export function normalizePlan(
   const machinePaths = new Set(
     [...cleaned.matchAll(MACHINE_PATH), ...withoutCodeSpans.matchAll(EMPHASIZED_MACHINE_PATH)]
       .sort((a, b) => a.index - b.index)
-      // A path ends before trailing sentence marks, and before a star run that closes an emphasis that the same line
-      // opened before the path; a literal trailing star, as in `/tmp/log*`, stays.
+      // A path ends before trailing sentence marks. Outside a code span, a trailing star run closes emphasis and goes,
+      // as in `**stale /tmp/x**`; inside a code span it is literal and stays, as in `` `/tmp/log*` ``. Limit: a
+      // literal trailing star outside a code span goes too.
       .map(({ 0: match, index }) => {
         const path = match.replace(/[.:]+$/, "");
-        const stars = /\*+$/.exec(path)?.[0];
-        const lineStart = cleaned.lastIndexOf("\n", index) + 1;
-        return stars && cleaned.slice(lineStart, index).includes(stars)
-          ? path.slice(0, -stars.length).replace(/[.:]+$/, "")
-          : path;
+        const inSpan = withoutCodeSpans[index] !== cleaned[index];
+        return inSpan ? path : path.replace(/\*+$/, "").replace(/[.:]+$/, "");
       }),
   );
   for (const machinePath of machinePaths)

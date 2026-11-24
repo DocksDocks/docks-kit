@@ -303,8 +303,9 @@ agents define the exact block they return, and that block follows these rules.
   `**Code-review: pass**`. Any other line, such as `Code-review:_pass`,
   `Code-review: pa_ss`, or `Code-review: pass2`, reads as an unknown word.
 - On each line, the helper ignores Markdown emphasis (`*`, `_`), code marks,
-  blockquote markers, and list markers when it reads a kind, a heading, or a
-  severity.
+  blockquote markers, and list markers when it reads a kind or a severity. A
+  block heading must match as a raw heading line first; only its title is then
+  read through emphasis and code marks.
 - The helper reads blocks, verdicts, and severities only above the first line
   `#### Manager response to round <k>` that starts at the first column outside
   a fenced code block whose opening fence starts at the first column, in every
@@ -336,9 +337,9 @@ verdict line in the same block is prose, such as a quoted verdict of an earlier
 round. A verdict line of the other kind does not count. A block without a
 verdict line is part of the block before it, and the verdict lines of the other
 blocks still count when the first block has none. A comment with no verdict
-line of its kind is not a review record. The verdict word runs to white space
-or to closing punctuation; a word outside the table, such as `pass2`, reads as
-`blocked`, so no block can make the comment unreadable and keep an older pass. A
+line of its kind is not a review record. A verdict word outside the table, such
+as `pass2`, reads as `blocked`, so no block can make the comment unreadable and
+keep an older pass. A
 block heading has one to six `#`
 and then a space or a tab. The most severe block verdict wins: `blocked`, then
 `repair` or `fixes-required`, then `pass`.

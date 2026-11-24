@@ -185,6 +185,8 @@ describe("plan records", () => {
       ["```\na\n````\nBold **/tmp/x**\n```\nb\n```", named("/tmp/x")],
       ["Log `/tmp/log*` here", named("/tmp/log*")],
       ["Esc \\` then `echo **/tmp/cache/**`", []],
+      ["Esc \\\\`echo **/tmp/cache/**`", []],
+      ["*Note* then open `/tmp/log*`", named("/tmp/log*")],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],

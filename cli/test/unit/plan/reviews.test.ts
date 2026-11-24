@@ -128,28 +128,22 @@ describe("plan reviews", () => {
   it("a fence closes only at a fence line of its own character, and an indented or inline fence is no fence", () => {
     // Top-level GFM fences (#213, R4).
     const cases: ReadonlyArray<ReviewCase> = [
-      // Inside an unquoted fence, a quote marker or a list marker before the backticks does not close it.
-      [
-        "### Code review round 2\n\n```\n> ```\nCode-review: pass\n```\nCode-review: blocked",
-        { kind: "code", verdict: "blocked" },
-      ],
-      [
-        "### Code review round 2\n\n```\n- ```\nCode-review: pass\n```\nCode-review: blocked",
-        { kind: "code", verdict: "blocked" },
-      ],
+      // Inside an unquoted fence, a quote marker or a list marker before the backticks does not close it, so a
+      // fenced-only pass is no record.
+      ["### Code review round 2\n\n```\n> ```\nCode-review: pass\n```", undefined],
+      ["### Code review round 2\n\n```\n- ```\nCode-review: pass\n```", undefined],
       // A fence line indented four spaces is code text: it neither opens nor closes a fence.
       [
-        "### Code review round 2\n\n    ```\nCode-review: blocked\n    ```\nCode-review: pass",
-        { kind: "code", verdict: "blocked" },
+        "### Code review round 2\n\n    ```\nCode-review: pass\n    ```",
+        { kind: "code", verdict: "pass" },
       ],
-      [
-        "### Code review round 2\n\n```\n    ```\nCode-review: pass\n```\nCode-review: blocked",
-        { kind: "code", verdict: "blocked" },
-      ],
+      ["### Code review round 2\n\n```\n    ```\nCode-review: pass\n```", undefined],
       // A backtick in the info string makes the line inline code, not a fence.
+      ["### Code review round 2\n\n```x```\nCode-review: pass", { kind: "code", verdict: "pass" }],
+      // Raw HTML with inline code that starts with three backticks, and no fence, reads as written.
       [
-        "### Code review round 2\n\n```x```\nCode-review: blocked\n```\nCode-review: pass",
-        { kind: "code", verdict: "blocked" },
+        "### Code review round 2\n\nCode-review: pass\n\n<b>note</b>\n```x``` is inline code.",
+        { kind: "code", verdict: "pass" },
       ],
       // A lens block quotes an example inside a markdown fence; the next lens block still counts.
       [
