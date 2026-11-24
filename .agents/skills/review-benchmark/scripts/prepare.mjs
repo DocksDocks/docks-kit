@@ -53,7 +53,7 @@ import {
   readKnown,
   readRunPlan,
   PLUGIN_LAYOUTS,
-  reviewerPluginRoots,
+  reviewerSkillPaths,
   runLabel,
   SELF_REVIEW_AGENT_PREFIX,
   unwrapBlock,
@@ -349,9 +349,7 @@ export function armAgent(kind, side, config, root) {
 const variantCommit = (sha) => sha.slice(0, 12);
 // The side of the agents of a variant, `variant-<name>-<commit>`.
 const variantSide = ({ name, sha }) => `variant-${name}-${variantCommit(sha)}`;
-// The reviewer skill paths under the plugin copy `dir` in a rendered agent text; group 1 is the path in the copy.
-const reviewerSkillUnder = (dir) =>
-  new RegExp(`${escapeRegExp(dir)}/(skills/(?:[^\\s\\x60'"/]+/)?(?:code|plan)-reviewer/SKILL\\.md)`, 'g');
+// The reviewer skill that a variant agent must name below its plugin copy (see score.mjs reviewerSkillPaths).
 const PLAN_SKILL = /\/plan-reviewer\/SKILL\.md$/;
 
 // The arm `arm` of a case kind, or undefined when the kind has no such arm: an arm of ARMS, on a plan kind the arm
@@ -673,12 +671,15 @@ export function pluginRootText(text, pluginRoot) {
     .replace(SKILL_URI, (_, skill, rest) => `${pluginRoot}/skills/${skill}${rest ?? '/SKILL.md'}`);
 }
 
+// The frontmatter of an agent file; group 1 holds its lines. The text after it is the body, the prompt of the agent.
+const AGENT_FRONTMATTER = /^---\n([\s\S]*?)\n---\n/;
+
 // Copies a plugin agent under `name` and pins its model and effort (EFFORT_KEY). It removes every model and effort key
 // of the source (omp.mjs MODEL_KEYS), also the `effort` key that an agent at an old ref can have. With `pluginRoot`,
 // the copy reads its skill from that plugin copy: it loses AUTOLOAD_KEY, which would load the installed skill, and
 // each skill path names the plugin copy (pluginRootText).
 export function renderAgent(source, { name, model, effort, pluginRoot }) {
-  const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(source);
+  const frontmatter = AGENT_FRONTMATTER.exec(source);
   if (!frontmatter) throw new Error('the agent file has no frontmatter');
   const keyOf = (line) => /^([\w-]+):/.exec(line)?.[1];
   const lines = frontmatter[1]
@@ -2142,11 +2143,35 @@ function pluginCopyOwner(dir) {
   return { role, sha: first };
 }
 
+// The nearest folder above `dir` that holds a plugin copy, or null.
+function copyAbove(dir) {
+  for (let folder = path.dirname(dir); folder !== path.dirname(folder); folder = path.dirname(folder)) {
+    if (fs.existsSync(path.join(folder, PLUGIN_COPY_MARKER))) return folder;
+  }
+  return null;
+}
+
+// The plugin copies below `dir`, without `dir` itself: the folders of the marker files below it.
+function copiesBelow(dir) {
+  return fs
+    .readdirSync(dir, { recursive: true })
+    .filter((entry) => path.basename(entry) === PLUGIN_COPY_MARKER && entry !== PLUGIN_COPY_MARKER)
+    .map((entry) => path.join(dir, path.dirname(entry)));
+}
+
 // Stops before `agents` changes a file when the plugin copy `copy` ({ role, sha, dir }) cannot go to its folder: a
-// folder with files but no marker, the copy of another role, or a variant copy of another commit. The agents of an
-// earlier setup read such a copy, so it stays. A copy of the same role at another commit is replaced (see
-// extractPlugin), except a variant copy, which belongs to its commit (see variantCommit).
+// folder inside another plugin copy, which a refresh of that copy would delete; a folder with files but no marker; the
+// copy of another role; a variant copy of another commit; or a copy of another commit that holds another plugin copy,
+// which the replacement would delete. The agents of an earlier setup read such a copy, so it stays. A copy of the same
+// role at another commit is replaced (see extractPlugin), except a variant copy, which belongs to its commit (see
+// variantCommit).
 function checkPluginCopy({ role, sha, dir }) {
+  const above = copyAbove(dir);
+  if (above !== null) {
+    fail(
+      `${dir} is inside the plugin copy ${above}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
+    );
+  }
   const owner = pluginCopyOwner(dir);
   if (owner === null) {
     if (fs.existsSync(dir) && fs.readdirSync(dir).length) {
@@ -2157,6 +2182,12 @@ function checkPluginCopy({ role, sha, dir }) {
   if (owner.role !== role || (role === 'variant' && owner.sha !== sha)) {
     fail(
       `${dir} holds the ${owner.role} plugin copy at ${owner.sha.slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`,
+    );
+  }
+  const [below] = owner.sha === sha ? [] : copiesBelow(dir);
+  if (below !== undefined) {
+    fail(
+      `${dir} holds the plugin copy ${below}, which replacing ${dir} would delete; move that copy, or pass another --out or --baseline-dir`,
     );
   }
 }
@@ -2454,19 +2485,27 @@ function parseVariants(options, repo, baselineDir) {
     if (blob.status !== 0) fail(`${source} does not exist at ${ref} (variant ${name})`);
     const text = blob.stdout.toString();
     // score.mjs takes the plugin root of a reviewer from the path of its reviewer skill in the agent text. An agent
-    // text that names no such path, or another root, would make every run of the variant read outside its inputs.
-    const rendered = pluginRootText(text, dir);
-    const roots = reviewerPluginRoots(rendered);
-    const skills = [...new Set(Array.from(rendered.matchAll(reviewerSkillUnder(dir)), (match) => match[1]))];
-    if (roots.length !== 1 || roots[0] !== dir || !skills.length || !skills.every((skill) => PLAN_SKILL.test(skill))) {
+    // text that names no such path, or another root, would make every run of the variant read outside its inputs. Only
+    // a complete path in the body of the rendered agent counts: renderAgent drops frontmatter fields, and omp gives
+    // the reviewer the body. reviewerSkillPaths reads each path whole, as the read scope does, so a quoted path can
+    // hold an apostrophe in any folder, and `SKILL.md.bak` or `SKILL.md/x` names no skill.
+    const frontmatter = AGENT_FRONTMATTER.exec(text);
+    const body = pluginRootText(frontmatter ? text.slice(frontmatter[0].length) : text, dir);
+    const paths = reviewerSkillPaths(body);
+    const roots = [...new Set(paths.map((item) => item.root))];
+    const skills = [...new Set(paths.map((item) => item.skill))];
+    const namesPlanSkill = skills.length > 0 && skills.every((skill) => PLAN_SKILL.test(skill));
+    if (roots.length !== 1 || roots[0] !== dir || !namesPlanSkill) {
       fail(
         `variant ${name}: ${source} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT_TOKEN}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`,
       );
     }
+    // The skill file must be a file at the commit: `git cat-file -e` also accepts a folder of that name.
     for (const skill of skills) {
       const file = `${reviewerRoot}/${skill}`;
-      if (runGit(repo, ['cat-file', '-e', `${sha}:${file}`]).status !== 0) {
-        fail(`variant ${name}: ${source} at ${ref} names ${file}, which does not exist at ${ref}`);
+      const type = runGit(repo, ['cat-file', '-t', `${sha}:${file}`]);
+      if (type.status !== 0 || type.stdout.toString().trim() !== 'blob') {
+        fail(`variant ${name}: ${source} at ${ref} names ${file}, which is not a file at ${ref}`);
       }
     }
     const variant = { name, ref, sha, delta: !fullOnly.includes(name), dir, text };

@@ -31,12 +31,18 @@ function decodeReferences(text: string): string {
 }
 
 /**
- * The elements whose start and end break a line in rendered HTML: `br` and the
- * block-level elements. An inline element such as `span` gives no break, so
+ * The elements whose start and end break a line in rendered HTML: the
+ * block-level tags of a CommonMark HTML block, type 6 (CommonMark 0.31.2, 4.6),
+ * and `br` and `pre`. An inline element such as `span` gives no break, so
  * `<span>Re</span>port` stays one word.
  */
-const BREAKING_ELEMENTS =
-  "br, p, div, li, ul, ol, dl, dt, dd, table, tr, td, th, h1, h2, h3, h4, h5, h6, hr, pre, blockquote, section, article, header, footer, nav, aside, figure, figcaption, details, summary";
+const BREAKING_ELEMENTS = [
+  "address, article, aside, base, basefont, blockquote, body, caption, center, col, colgroup",
+  "dd, details, dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form, frame",
+  "frameset, h1, h2, h3, h4, h5, h6, head, header, hr, html, iframe, legend, li, link, main",
+  "menu, menuitem, nav, noframes, ol, optgroup, option, p, param, search, section, summary",
+  "table, tbody, td, tfoot, th, thead, title, tr, track, ul, br, pre",
+].join(", ");
 
 /**
  * The visible text of a heading's rendered content. The parser passes inline

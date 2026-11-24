@@ -549,19 +549,35 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
     gitIn(repo, 'tag', tag);
   };
   // A commit that does not change the plan contract, an agent that names no reviewer skill, an agent that also names
-  // the reviewer skill of another plugin root, an agent that names the code-reviewer skill only, and an agent whose
-  // plan-reviewer skill the commit does not hold. Each commit is on HEAD, which has the kit layout.
+  // the reviewer skill of another plugin root, an agent that names its skill only in a frontmatter field that
+  // renderAgent drops, an agent that names only a longer path, an agent that names the code-reviewer skill only, an
+  // agent whose plan-reviewer skill the commit does not hold, and one whose skill path is a folder. Each commit is on
+  // HEAD, which has the kit layout.
   const agentFile = `${KIT_ROOT}/agents/plan-reviewer.md`;
   const skillFile = `${KIT_ROOT}/skills/plan-reviewer/SKILL.md`;
   const noSkill = '---\nname: plan-reviewer\ndescription: Reviews plans.\n---\n\n# Plan Reviewer\n';
   const otherRoot = `${variantAgentText('other')}Also load \`/opt/x/skills/plan-reviewer/SKILL.md\`.\n`;
+  const frontmatterSkill = [
+    '---',
+    'name: plan-reviewer',
+    'description: Reviews plans.',
+    'autoload-skills: skill://plan-reviewer/SKILL.md',
+    '---',
+    '',
+    '# Plan Reviewer',
+    '',
+  ].join('\n');
+  const bakSkill = variantAgentText('bak').replace('plan-reviewer/SKILL.md', 'plan-reviewer/SKILL.md.bak');
   const codeSkill = variantAgentText('code').replace('skill://plan-reviewer', 'skill://code-reviewer');
   tagCommit('same-contract', {});
   tagCommit('no-skill', { [agentFile]: noSkill });
   tagCommit('other-root', { [agentFile]: otherRoot });
+  tagCommit('frontmatter-skill', { [agentFile]: frontmatterSkill });
+  tagCommit('bak-skill', { [agentFile]: bakSkill, [`${skillFile}.bak`]: '# Backup\n' });
   tagCommit('code-skill', { [agentFile]: codeSkill });
   fs.rmSync(path.join(repo, skillFile));
   tagCommit('no-plan-skill', { [agentFile]: variantAgentText('gone') });
+  tagCommit('folder-skill', { [agentFile]: variantAgentText('folder'), [`${skillFile}/README.md`]: '# Folder\n' });
   const ownSkill = (ref) =>
     `variant a: ${agentFile} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`;
   const refusals = [
@@ -588,10 +604,16 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
     ],
     [{ variants: '16=v16,a=no-skill' }, ownSkill('no-skill')],
     [{ variants: '16=v16,a=other-root' }, ownSkill('other-root')],
+    [{ variants: '16=v16,a=frontmatter-skill' }, ownSkill('frontmatter-skill')],
+    [{ variants: '16=v16,a=bak-skill' }, ownSkill('bak-skill')],
     [{ variants: '16=v16,a=code-skill' }, ownSkill('code-skill')],
     [
       { variants: '16=v16,a=no-plan-skill' },
-      `variant a: ${agentFile} at no-plan-skill names ${skillFile}, which does not exist at no-plan-skill`,
+      `variant a: ${agentFile} at no-plan-skill names ${skillFile}, which is not a file at no-plan-skill`,
+    ],
+    [
+      { variants: '16=v16,a=folder-skill' },
+      `variant a: ${agentFile} at folder-skill names ${skillFile}, which is not a file at folder-skill`,
     ],
   ];
   const options = variantOptions(fixture);
@@ -658,6 +680,27 @@ test("agents --variants takes an --out folder whose parent has an apostrophe, as
     assert.deepEqual(score.reviewerPluginRoots(text), [pluginRoot]);
   }
 });
+// Code review round 1 of plan #216: `agents --variants` and the read scope share the parser of score.mjs
+// (reviewerSkillPaths), so a quoted reviewer skill path keeps an apostrophe in its category folder, and agents checks
+// that the commit holds that skill file.
+test("agents --variants takes a variant whose reviewer skill sits in a category folder with an apostrophe", () => {
+  const fixture = variantRepo();
+  const { root, repo, agentDir } = fixture;
+  const skill = "skills/team's/plan-reviewer/SKILL.md";
+  const agent = legacyVariantAgentText('team').replace('skills/plan-reviewer/', "skills/team's/plan-reviewer/");
+  put(repo, `${KIT_ROOT}/agents/plan-reviewer.md`, agent);
+  put(repo, `${KIT_ROOT}/${skill}`, '# Plan reviewer team\n');
+  gitIn(repo, 'add', '-A');
+  gitIn(repo, 'commit', '-q', '-m', 'team skill');
+  gitIn(repo, 'tag', 'team-skill');
+  const sha = gitIn(repo, 'rev-parse', 'team-skill').trim();
+  agentsOnBun({ ...variantOptions(fixture), variants: '16=v16,a=team-skill' }, repo);
+  const pluginRoot = variantRoot(root, 'a', sha);
+  const text = readText(path.join(agentDir, `${variantAgent('a', sha, 'low')}.md`));
+  assert.ok(text.includes(`\`${pluginRoot}/${skill}\``));
+  assert.deepEqual(score.reviewerPluginRoots(text), [pluginRoot]);
+  assert.ok(fs.existsSync(path.join(pluginRoot, skill)));
+});
 // A variant copy and the agents of a variant belong to the commit of the variant, so a setup at another commit
 // replaces no copy that agents of another setup read, and a prompt for the old commit names an agent that is gone.
 test('agents keeps the variant copy of a commit when another setup prepares the variant at another commit', () => {
@@ -703,6 +746,30 @@ test('agents refuses a --baseline-dir that holds the copy of a variant, and the 
     message: holds(legacy, 'variant', shas['cand-a']),
   });
   assert.deepEqual(treeState(root), legacyState);
+});
+test('agents refuses a copy folder inside another plugin copy and a replacement that would delete a copy inside it', () => {
+  const fixture = variantRepo();
+  const { root, repo, shas } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const baselineCopy = path.join(root, 'baseline-plugin');
+  // A second setup puts its baseline copy inside the baseline copy of the first, so its variant copies go there too.
+  const project = path.join(root, 'project2');
+  fs.mkdirSync(project);
+  const inner = path.join(baselineCopy, 'inner');
+  const state = treeState(root);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': inner }, repo), {
+    message: `${inner} is inside the plugin copy ${baselineCopy}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
+  });
+  assert.deepEqual(treeState(root), state);
+  // A copy that an earlier version left inside the baseline copy stays when the first setup moves to another baseline.
+  const nested = path.join(baselineCopy, `variant-a-${shas['cand-a'].slice(0, 12)}-plugin`);
+  put(nested, '.review-bench-ref', `variant ${shas['cand-a']}\n`);
+  put(nested, 'skills/plan-reviewer/SKILL.md', '# Plan reviewer A\n');
+  const nestedState = treeState(root);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), 'baseline-ref': 'cand-a' }, repo), {
+    message: `${baselineCopy} holds the plugin copy ${nested}, which replacing ${baselineCopy} would delete; move that copy, or pass another --out or --baseline-dir`,
+  });
+  assert.deepEqual(treeState(root), nestedState);
 });
 // The commands run on the repository of their own checkout, so these tests put the scripts into the fixture repository
 // and run the copy with a fake omp first on PATH.

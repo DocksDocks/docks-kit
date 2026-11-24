@@ -175,51 +175,57 @@ const BENCHMARK_REPOSITORY = {
 };
 // An invalid-run reason names this many outside targets, then the count of the others.
 const LISTED_READS = 3;
-// The instruction paths of an agent text are absolute paths. A path in backticks or quotes ends at the closing quote
-// of the same kind and can hold spaces and the other quote characters, for example in a plugin root under a folder
-// `Team's review runs`. A bare path ends at the first space or quote. In the patterns below, group 2 holds the path
-// in quotes and group 3 the bare path.
-//
-// The path `<plugin root>/skills/[<folder>/]code-reviewer/SKILL.md` (or plan-reviewer). The groups hold the plugin
-// root.
-const REVIEWER_SKILL_TAIL = String.raw`\/skills\/(?:[^\s\x60'"/]+\/)?(?:code|plan)-reviewer\/SKILL\.md`;
-const REVIEWER_SKILL = new RegExp(
-  String.raw`([\x60'"])(\/(?:(?!\1)[^\r\n])*?)${REVIEWER_SKILL_TAIL}\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*?)${REVIEWER_SKILL_TAIL}`,
-  'g',
-);
+// The instruction paths of an agent text are absolute paths. A path in backticks or quotes ends only at the closing
+// quote of the same kind, so it can hold spaces and the other quote characters in any segment, for example a plugin
+// root under `Team's review runs` or a category folder `skills/team's/` (group 2). A bare path starts at the start of
+// the text or after white space, a quote, or an opening bracket, and ends at the first white space or quote (group 3);
+// the sentence marks at its end are no part of it. instructionPaths reads each path whole, and the readers below then
+// match the path of a skill or an agent file at its end. prepare.mjs reads reviewer skill paths only through
+// reviewerSkillPaths, so `agents` and the read scope read an agent text the same way.
+const INSTRUCTION_PATH = /([\x60'"])(\/(?:(?!\1)[^\r\n])*)\1|(?<=^|[\s\x60'"(<[])(\/[^\s\x60'"]*)/g;
+const BARE_PATH_END = /[.,;:!?)\]>]+$/;
+function instructionPaths(text) {
+  return Array.from(text.matchAll(INSTRUCTION_PATH), (match) => match[2] ?? match[3].replace(BARE_PATH_END, ''));
+}
+// The path `<plugin root>/skills/[<folder>/]code-reviewer/SKILL.md` (or plan-reviewer): group 1 is the plugin root and
+// group 2 the skill file below it.
+const REVIEWER_SKILL_PATH = /^(\/.*?)\/(skills\/(?:[^/]+\/)?(?:code|plan)-reviewer\/SKILL\.md)$/;
 // The name of the self-review agent of a configuration starts with this prefix (see prepare.mjs selfReviewAgent).
 export const SELF_REVIEW_AGENT_PREFIX = 'review-bench-selfreview-';
 // The path `<project>/.omp/agents/<self-review agent>.md`. The self-review agent has no plugin root, so its text names
-// its own agent file. The groups hold the full path.
-const SELF_REVIEW_AGENT_TAIL = String.raw`\/\.omp\/agents\/${SELF_REVIEW_AGENT_PREFIX}[^\s\x60'"/]+\.md`;
-const SELF_REVIEW_AGENT_FILE = new RegExp(
-  String.raw`([\x60'"])(\/(?:(?!\1)[^\r\n])*${SELF_REVIEW_AGENT_TAIL})\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*${SELF_REVIEW_AGENT_TAIL})(?=$|[\s\x60'")>])`,
-  'g',
-);
+// its own agent file.
+const SELF_REVIEW_AGENT_PATH = new RegExp(String.raw`\/\.omp\/agents\/${SELF_REVIEW_AGENT_PREFIX}[^/]+\.md$`);
 // The path `<self-review root>/skills/[<folder>/]code-review/SKILL.md` (or code-clarity) in the text of the
-// self-review agent of a self-review root (`prepare.mjs agents --self-review-roots`). The groups hold the root.
-const SELF_REVIEW_SKILL_TAIL = String.raw`\/skills\/(?:[^\s\x60'"/]+\/)?(?:code-review|code-clarity)\/SKILL\.md`;
-const SELF_REVIEW_SKILL = new RegExp(
-  String.raw`([\x60'"])(\/(?:(?!\1)[^\r\n])*?)${SELF_REVIEW_SKILL_TAIL}\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*?)${SELF_REVIEW_SKILL_TAIL}`,
-  'g',
-);
-// The path of a match of one of the patterns above: in quotes, else bare.
-const instructionPath = (match) => match[2] ?? match[3];
+// self-review agent of a self-review root (`prepare.mjs agents --self-review-roots`): group 1 is the root.
+const SELF_REVIEW_SKILL_PATH = /^(\/.*?)\/skills\/(?:[^/]+\/)?(?:code-review|code-clarity)\/SKILL\.md$/;
 
-// The plugin roots that an agent text names: the folder P of each absolute path `P/skills/[<folder>/]code-reviewer/
-// SKILL.md` or `P/skills/[<folder>/]plan-reviewer/SKILL.md`, each once, in text order. readScope lets a reviewer read
-// the instructions under these roots, and `prepare.mjs agents` refuses a variant agent that names another root.
+// The reviewer skill paths of an agent text, in text order: `{ root, skill }` for each absolute path
+// `<root>/skills/[<folder>/]code-reviewer/SKILL.md` or `.../plan-reviewer/SKILL.md`, with `skill` the path below the
+// root. `prepare.mjs agents` checks the skill paths of a variant agent with it.
+export function reviewerSkillPaths(text) {
+  return instructionPaths(text).flatMap((file) => {
+    const match = REVIEWER_SKILL_PATH.exec(file);
+    return match ? [{ root: match[1], skill: match[2] }] : [];
+  });
+}
+
+// The plugin roots that an agent text names (see reviewerSkillPaths), each once, in text order. readScope lets a
+// reviewer read the instructions under these roots, and `prepare.mjs agents` refuses a variant agent that names
+// another root.
 export function reviewerPluginRoots(text) {
-  return [...new Set(Array.from(text.matchAll(REVIEWER_SKILL), instructionPath))];
+  return [...new Set(reviewerSkillPaths(text).map((item) => item.root))];
 }
 
 // The self-review roots that the text of a self-review agent names: the folder P of each absolute path
 // `P/skills/[<folder>/]code-review/SKILL.md` or `P/skills/[<folder>/]code-clarity/SKILL.md`, each once.
 export function selfReviewSkillRoots(text) {
-  return [...new Set(Array.from(text.matchAll(SELF_REVIEW_SKILL), instructionPath))];
+  const roots = instructionPaths(text).map((file) => SELF_REVIEW_SKILL_PATH.exec(file)?.[1]);
+  return [...new Set(roots.filter((root) => root !== undefined))];
+}
+
+// The self-review agent files that an agent text names, in text order.
+function selfReviewAgentFiles(text) {
+  return instructionPaths(text).filter((file) => SELF_REVIEW_AGENT_PATH.test(file));
 }
 
 function fail(message) {
@@ -2532,7 +2538,7 @@ export function renderReport(
     'Unknown pairs is the number of unknown answers for pairs of a finding of the run and a known defect. Unresolved counts the known defects of those answers that can change recall. Doubtful extras counts the valid extras that have an unknown pair, so they can repeat a known defect.',
     'Diff read is the share of the lines of the own diff of a reviewer (its focus, full, or delta diff) that its read results showed whole; a line of a focus diff also counts when a read of the full diff showed it. The Runs table gives the lowest share of the reviewers of a run. The summary and the decision tables give the mean over the reviewers of their runs. It is an observation: it makes no run invalid.',
     'Seconds is the slowest reviewer of a round, added over the rounds of a run. Tokens is the sum over the reviewers and rounds of a run. A dash means no value.',
-    'The Runs table lists every run. The summary, the configuration or arm tables, and the self-review lead leave out invalid runs: runs whose reviewer transcripts show another model, effort, or served tier than their configuration; loops whose fixer transcripts show another model, effort, or served tier than the fixer setting; runs with a configuration whose reviewer or fixer has no transcript facts or no served assistant message, also a loop round of such a run that gave findings to the fixer and has no transcript facts of its fixer (for example a repair with --fixer-patch); loops with a configuration and a fixer but without a fixer setting; runs with a reviewer that read a file outside the inputs of its run; and runs with a round in which a reviewer block holds no review (missing, unreadable, or blocked).',
+    'The Runs table lists every run. The summary, the configuration or arm tables, and the self-review lead leave out invalid runs: runs whose reviewer transcripts show another model, effort, or served tier than their configuration; loops whose fixer transcripts show another model, effort, or served tier than the fixer setting; runs with a configuration whose reviewer or fixer has no transcript facts or no served assistant message, also a loop round of such a run that gave findings to the fixer and has no transcript facts of its fixer (for example a repair with --fixer-patch); loops with a configuration and a fixer but without a fixer setting; and, also without a configuration, runs with a reviewer or a fixer whose transcript shows a revived agent (more than one task in one transcript), runs with a reviewer that read a file outside the inputs of its run, and runs with a round in which a reviewer block holds no review (missing, unreadable, or blocked).',
     `${columnNote} The decision table covers all runs of the group. The code-loop table covers the loop runs (runs with round folders), and the single-review table covers the other runs; a table without runs is left out. A round row covers the loops that reached that round. Extra-only rounds are rounds whose previous fix step repaired valid extra findings and no known defect that a finding of the previous round matched. The fixer repaired the valid extras when it got them, its patch changed the tree, and it replied repaired for at least one of them. A known defect was repaired when its fix patch applied, or when the fixer repaired it: its patch changed the tree, and it replied repaired for a finding of the defect. A finding without a reply of the fixer counts as not repaired. A patch whose fix the tree already held and a pulled-in patch repair no such defect. Fixer seconds and fixer tokens are the time and the tokens of the fix steps of a loop, apart from the loop seconds and the tokens of the reviewers; their medians cover only the loops with a fixer. An interval row gives the 90% two-level paired bootstrap interval of the difference from the reference column, over the cases that both columns ran: each resample draws the cases, then the runs of each column in each drawn case. ${referenceNote} The loop seconds interval compares loop runs only.`,
     `The decision table also gives the wrong findings and the unknown ratings of each column with its runs, and the reads of missing paths: reads with an error result of a path that does not exist, which make no run invalid. Against the reference column, it gives the cases whose escaped defects differ, and the one-sided exact Poisson test of more wrong findings and of more unknown ratings than the reference, with the runs of each column as the exposure. The intervals and the escaped defects per 50 known (W) are information. The decision measure is N: for each shared case with known defects, e is the mean escaped defects of the runs of the column minus those of the reference runs, divided by the known defects of the case, and N is 50 times the mean of e, so each case weighs 1. The seeded row gives the share of these cases whose defects a patch planted, when the case metadata tells it for each case. With a margin m, the not-worse row runs a one-sided betting test of the hypothesis that the mean e is m / 50 or more (Waudby-Smith and Ramdas, JRSS-B 86(1), 2024): each e goes to (e + 1) / 2 in a seeded case order, with predictable plug-in bets cut at ${BET_CAP}, and the row gives pass when the capital reaches the threshold ${whole(1 / DECISION_ALPHA)}. Its claim holds for the population of review rounds only if assumption S holds: the cases are independent draws from the review rounds that the case-building procedure gives. The equivalence row gives yes when the test of a mean e of -m / 50 or less also rejects. The fixed-corpus row holds the cases fixed and bootstraps the runs only: it is a check of these cases, not a ship decision. The neutral-data limit row gives the shared cases with known defects and the count below which no valid rule can pass a column that differs in no case, as information.`,
     'With a margin, the second judge must answer every item of the sample that its seed gives from the current answers of the first judge, or each decision row and each sequential look gives second judge incomplete and no pass. With --sequential, the sequential looks are the decision, and the not-worse and equivalence rows point to the not-worse and equivalence decisions of the looks.',
@@ -3000,18 +3006,18 @@ export function transcriptSession(entries) {
       .filter((part) => typeof part === 'string')
       .join('\n');
     for (const root of reviewerPluginRoots(prompt)) pluginRoots.add(root);
-    const files = Array.from(prompt.matchAll(SELF_REVIEW_AGENT_FILE), instructionPath);
+    const files = selfReviewAgentFiles(prompt);
     for (const file of files) agentFiles.add(file);
     if (files.length) for (const root of selfReviewSkillRoots(prompt)) skillRoots.add(root);
   }
   return { cwd, pluginRoots: [...pluginRoots], agentFiles: [...agentFiles], skillRoots: [...skillRoots] };
 }
 
-// The agent that omp ran for a transcript: the `agent` of its first `session_init` entry, or null without one.
-// transcriptsCommand compares it with the agent that the prompt of the dispatch names.
+// The agent that omp ran for a transcript: the nonempty `agent` of its first `session_init` entry, or null without
+// one. transcriptsCommand compares it with the agent that the prompt of the dispatch names.
 function sessionAgent(entries) {
-  const init = entries.find((entry) => entry.type === 'session_init');
-  return typeof init?.agent === 'string' ? init.agent : null;
+  const agent = entries.find((entry) => entry.type === 'session_init')?.agent;
+  return typeof agent === 'string' && agent.trim() !== '' ? agent : null;
 }
 
 // The folder itself or a path below it.
@@ -3440,12 +3446,16 @@ const withoutSelector = (target) => {
 // that names an existing file or folder as a whole, as written or without its read selector (OMP_SELECTOR, for
 // example `:1-20`), is one target, because omp keeps such a literal path before it splits a list
 // (splitDelimitedPathEntry in packages/coding-agent/src/tools/path-utils.ts of omp 19.0.0): for example a snapshot
-// folder under a workspace `bench-gpt;7`. An exclusion part (see isExclusion) reads nothing, so it gives no target. A
-// list of exclusions only searches the working directory (see readScope).
+// folder under a workspace `bench-gpt;7`. Only a `;` splits such a path, so only a path with a `;` needs this check of
+// the file system; the path of every other tool is one target without it. An exclusion part (see isExclusion) reads
+// nothing, so it gives no target. A list of exclusions only searches the working directory (see readScope).
 function pathTargets(name, value, cwd) {
   const trimmed = value.trim();
-  const literal = ompPathExists(trimmed, cwd) || ompPathExists(trimmed.replace(OMP_SELECTOR, ''), cwd);
-  if (!PATH_LIST_TOOLS.has(name) || literal) return [trimmed].filter(Boolean);
+  if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
+  if (trimmed.includes(';')) {
+    const bare = trimmed.replace(OMP_SELECTOR, '');
+    if (ompPathExists(trimmed, cwd) || (bare !== trimmed && ompPathExists(bare, cwd))) return [trimmed];
+  }
   return value
     .split(';')
     .map((part) => part.trim())
@@ -4481,7 +4491,10 @@ export function transcriptsCommand(ws, sessionsDir) {
       checkTranscriptShape(entries, file);
       const expected = PROMPT_AGENT.exec(readText(dispatch.prompt))?.[1] ?? null;
       const ran = sessionAgent(entries);
-      if (ran !== expected) otherAgents.push(`${name} (${file}): agent ${ran ?? 'none'}, not ${expected ?? 'none'}`);
+      // A prompt without its header or a transcript without an agent names no agent, so it proves no arm.
+      if (expected === null || ran === null || ran !== expected) {
+        otherAgents.push(`${name} (${file}): agent ${ran ?? 'none'}, not ${expected ?? 'none'}`);
+      }
       const { toolCalls, ...facts } = transcriptFacts(entries);
       if (fixer || manager) {
         const agent = { ...parseTranscript(entries, file), ...facts };

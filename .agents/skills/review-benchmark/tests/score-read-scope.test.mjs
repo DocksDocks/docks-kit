@@ -168,6 +168,39 @@ test('transcripts takes the instruction paths in backticks that hold an apostrop
     outside: [],
   });
 });
+// Code review round 1 of plan #216: a quoted path runs to its matching quote, so its skill folder can hold an
+// apostrophe too. score.mjs parses the whole quoted path first and then matches the skill path at its end.
+test('a quoted instruction path keeps an apostrophe in the category folder of its skill', () => {
+  const kit = '/work/kit';
+  const team = `\`${kit}/skills/team's/plan-reviewer/SKILL.md\``;
+  const reviewer = `Load ${team} and "${kit}/skills/a b/code-reviewer/SKILL.md".`;
+  assert.deepEqual(score.reviewerPluginRoots(reviewer), [kit]);
+  assert.deepEqual(score.reviewerSkillPaths(reviewer), [
+    { root: kit, skill: "skills/team's/plan-reviewer/SKILL.md" },
+    { root: kit, skill: 'skills/a b/code-reviewer/SKILL.md' },
+  ]);
+  const selfReview = `Load \`${kit}/skills/team's/code-review/SKILL.md\` and \`${kit}/skills/code-clarity/SKILL.md\`.`;
+  assert.deepEqual(score.selfReviewSkillRoots(selfReview), [kit]);
+  // A bare path still ends at the first white space, and a sentence mark after it is no part of it.
+  assert.deepEqual(score.reviewerPluginRoots(`Then /opt/t/skills/plan-reviewer/SKILL.md, not /opt/u v/skills/x.`), [
+    '/opt/t',
+  ]);
+});
+// Code review round 1 of plan #216: the read scope probes the file system for the literal path of a call only where
+// the literal path can change how omp splits a list: a grep, glob, or ast_grep path with a `;`.
+test('readScope probes the file system for a literal path only for a search path with a `;`', () => {
+  const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
+  const exists = vi.spyOn(fs, 'existsSync');
+  onTestFinished(() => exists.mockRestore());
+  const probes = (target) => exists.mock.calls.filter(([file]) => file === target).length;
+  const file = `${SCOPE_CASE}/snapshot/src/sync.mjs`;
+  const calls = [...reads(file, `${file}:1-20`), { name: 'grep', path: file }];
+  score.readScope(calls, scope);
+  assert.equal(probes(file), 0);
+  const listed = `${SCOPE_CASE}/snapshot/src;b`;
+  score.readScope([{ name: 'grep', path: listed }], scope);
+  assert.equal(probes(listed), 1);
+});
 test('readScope allows the inputs of the run, the instructions of the reviewer, and other web pages', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
   const allowed = [
@@ -1011,5 +1044,29 @@ test('score.mjs transcripts exits nonzero on a transcript of another agent and l
     cli.stderr.trim(),
     `transcripts: 1 transcripts show another agent than their prompt names: Plan3VaLowR1Plan (${file}): agent ${swapped}, not ${agent}; dispatch them again with the agent of the prompt`,
   );
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+});
+// Code review round 1 of plan #216: a prompt without its `agent:` header and a transcript without an agent name no
+// agent, so they prove no arm, also when both are missing.
+test('transcripts refuses a prompt without an agent header and a transcript without an agent', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'P0-low', 'run-1');
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(run, 'prompts/plan.txt', 'Review.\n');
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const file = path.join(sessions, 'Plan3P0LowR1Plan.jsonl');
+  const transcript = toolTranscript(caseDir, 30, [['read', { path: path.join(caseDir, 'plan.md') }]])
+    .split('\n')
+    .filter((line) => JSON.parse(line).type !== 'session_init')
+    .join('\n');
+  put(sessions, 'Plan3P0LowR1Plan.jsonl', transcript);
+  const before = readText(path.join(run, 'meta.json'));
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3P0LowR1Plan (${file}): agent none, not none; dispatch them again with the agent of the prompt`,
+  });
   assert.equal(readText(path.join(run, 'meta.json')), before);
 });

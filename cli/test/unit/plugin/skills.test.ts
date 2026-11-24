@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
@@ -63,6 +64,8 @@ function plant(root: string, relative: string, text: string): void {
 const skillFile = (name: string): string => `${SKILLS}/${name}/SKILL.md`;
 /** The failure for a canonical suffix that a block before it keeps from being a heading. */
 const HIDDEN = "the Report section at the end is not a heading: a block before it hides it";
+/** The failure for a file that does not end with the canonical section bytes. */
+const NOT_CANONICAL = "does not end with the canonical Report section";
 
 /** Expect a failure that names `file` and contains `detail`. */
 function expectFailure(failures: ReadonlyArray<string>, file: string, detail: string): void {
@@ -211,7 +214,7 @@ describe("kit plugin skills: report section and shared copies", () => {
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace("Leave out secrets", "Leave out passwords"),
     );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), NOT_CANONICAL);
   });
 
   it("fails a skill without the report section", () => {
@@ -219,7 +222,7 @@ describe("kit plugin skills: report section and shared copies", () => {
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace("## Report a problem with this skill", "## Report"),
     );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), NOT_CANONICAL);
   });
 
   it("fails a stale report section before the canonical one", () => {
@@ -253,6 +256,10 @@ describe("kit plugin skills: report section and shared copies", () => {
     },
     { shape: "a character-reference", stale: "## Report&#32;a problem with this skill" },
     { shape: "a line-break", stale: "## Report a problem<br>with this skill" },
+    {
+      shape: "an address-element",
+      stale: "## Report a problem<address>with this skill</address>",
+    },
     { shape: "an inline-split", stale: "## <span>Re</span>port a problem with this skill" },
   ]) {
     it(`fails ${shape} stale report heading before the canonical one`, () => {
@@ -285,7 +292,7 @@ describe("kit plugin skills: report section and shared copies", () => {
     edit(root, skillFile("zoom-out"), (text) =>
       text.replace("## Report a problem with this skill", "> ## Report a problem with this skill"),
     );
-    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), NOT_CANONICAL);
   });
 
   for (const { place, before, after, detail } of [
@@ -440,6 +447,30 @@ describe("kit plugin skills: report section and shared copies", () => {
     },
   );
 
+  // A Bun child that exits 0 but writes negative counts fails the check; a POSIX shell script stands in for bun.
+  it.skipIf(process.versions["bun"] !== undefined || process.platform === "win32")(
+    "fails closed when the Bun Markdown child writes negative counts",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "kit-plugin-skills-"));
+      fixtures.push(root);
+      plant(
+        root,
+        skillFile("one"),
+        minimalSkill("one", "Use when testing.", `# Body\n\n${config.reportSection}`),
+      );
+      plant(root, "bin/bun", "#!/bin/sh\ncat >/dev/null\nprintf '[-1,-1]'\n");
+      chmodSync(join(root, "bin", "bun"), 0o755);
+      vi.stubEnv("PATH", join(root, "bin"));
+      try {
+        expect(checkReportSection(root)).toContainEqual(
+          expect.stringContaining("cannot count the Report headings with Bun's Markdown parser"),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it("checks a skill whose SKILL.md is a symbolic link", () => {
     const root = copyFixture();
     const outside = join(root, "linked-SKILL.md");
@@ -447,7 +478,7 @@ describe("kit plugin skills: report section and shared copies", () => {
     mkdirSync(join(root, SKILLS, "linked"));
     symlinkSync(outside, join(root, skillFile("linked")));
     expect(scoreSkills(root).rows.map((row) => row.name)).toContain("linked");
-    expectFailure(checkReportSection(root), skillFile("linked"), "missing the Report section");
+    expectFailure(checkReportSection(root), skillFile("linked"), NOT_CANONICAL);
   });
 
   it("fails an edit to one shared copy", () => {

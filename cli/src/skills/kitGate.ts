@@ -223,8 +223,14 @@ function headingCounts(texts: ReadonlyArray<string>, title: string): Array<numbe
     );
   }
   const counts: unknown = JSON.parse(child.stdout);
-  if (!Array.isArray(counts) || counts.length !== texts.length || !counts.every(Number.isInteger)) {
-    throw new Error(`${bun} ${script} did not write one count per text: ${child.stdout}`);
+  if (
+    !Array.isArray(counts) ||
+    counts.length !== texts.length ||
+    !counts.every((count) => Number.isInteger(count) && count >= 0)
+  ) {
+    throw new Error(
+      `${bun} ${script} did not write one non-negative count per text: ${child.stdout}`,
+    );
   }
   return counts;
 }
@@ -275,7 +281,7 @@ export function checkReportSection(
       });
     } else {
       failures.push(
-        `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
+        `${shown(repoRoot, file)}: does not end with the canonical Report section; end the file with the reportSection text of config.json`,
       );
     }
   }
@@ -294,11 +300,12 @@ export function checkReportSection(
   ended.forEach(({ file }, index) => {
     const whole = counts[2 * index] ?? 0;
     const before = counts[2 * index + 1] ?? 0;
+    if (whole === 1 && before === 0) return;
     if (before > 0 || whole > 1) {
       failures.push(
         `${shown(repoRoot, file)}: has ${Math.max(whole, before + 1)} Report sections; keep one, at the end of the file`,
       );
-    } else if (whole === 0) {
+    } else {
       failures.push(
         `${shown(repoRoot, file)}: the Report section at the end is not a heading: a block before it hides it`,
       );

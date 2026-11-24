@@ -455,6 +455,9 @@ test('the report legend limits the transcript-fact reasons to runs with a config
     legend,
   );
   assert.ok(legend.includes('loops with a configuration and a fixer but without a fixer setting'), legend);
+  // Code review round 1 of plan #216: a revived reviewer or fixer makes every run invalid, also without a
+  // configuration, and the legend says so.
+  assert.ok(legend.includes('runs with a reviewer or a fixer whose transcript shows a revived agent'), legend);
 });
 test('the summary gives the median and the range of seconds and tokens, so one slow run does not move the median', () => {
   const costs = [
