@@ -426,28 +426,28 @@ test('report.md gives the mean diff coverage of the valid runs and the lowest di
   const [summaryHeader, , ...summaryRows] = tableAfter(report, '## Summary');
   assert.equal(
     summaryHeader,
-    '| Case | Arm | Runs | Known | Recall mean | Recall median | Recall min | Recall max | Valid extras mean | Wrong mean | Unknown mean | Unresolved mean | Unknown pairs mean | Re-argued mean | Diff read mean | Seconds median | Seconds min | Seconds max | Tokens median | Tokens min | Tokens max |',
+    '| Case | Arm | Runs | Known | Recall mean | Recall median | Recall min | Recall max | Valid extras mean | Wrong mean | Unknown mean | Unresolved mean | Unknown pairs mean | Doubtful extras mean | Re-argued mean | Diff read mean | Seconds median | Seconds min | Seconds max | Tokens median | Tokens min | Tokens max |',
   );
   // C3 gives the mean of the 5 values of its valid runs 1 to 3, without the value of run 4, and L1 the mean of the
   // values of its rounds.
   assert.deepEqual(summaryRows, [
-    '| code-7 | B0 | 1 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | - | - | - | - | - | - | - |',
-    '| code-7 | C3 | 3 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.71 | - | - | - | - | - | - |',
-    '| code-7 | L1 | 1 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.75 | - | - | - | - | - | - |',
+    '| code-7 | B0 | 1 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | - | - | - | - | - | - | - |',
+    '| code-7 | C3 | 3 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.71 | - | - | - | - | - | - |',
+    '| code-7 | L1 | 1 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.75 | - | - | - | - | - | - |',
   ]);
   const [runHeader, , ...runRows] = tableAfter(report, '## Runs');
   assert.equal(
     runHeader,
-    '| Case | Arm | Run | Recall | Found | Valid extras | Wrong | Unknown | Unjudged | Unresolved | Unknown pairs | Re-argued | Diff read | Seconds | Tokens | Round verdict | Block verdicts |',
+    '| Case | Arm | Run | Recall | Found | Valid extras | Wrong | Unknown | Unjudged | Unresolved | Unknown pairs | Doubtful extras | Re-argued | Diff read | Seconds | Tokens | Round verdict | Block verdicts |',
   );
   // Each run gives the lowest value of its reviewers, also over the rounds of a loop and in the invalid run 4 of C3.
   assert.deepEqual(runRows, [
-    '| code-7 | B0 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | pass | full: pass |',
-    '| code-7 | C3 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.25 | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
-    '| code-7 | C3 | run-2 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.80 | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
-    '| code-7 | C3 | run-3 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
-    '| code-7 | C3 | run-4 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.10 | - | - | blocked | correctness: pass, spec-and-tests: pass, text-and-safety: blocked |',
-    '| code-7 | L1 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.50 | - | - | pass | delta: pass |',
+    '| code-7 | B0 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | pass | full: pass |',
+    '| code-7 | C3 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.25 | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
+    '| code-7 | C3 | run-2 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.80 | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
+    '| code-7 | C3 | run-3 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | pass | correctness: pass, spec-and-tests: pass, text-and-safety: pass |',
+    '| code-7 | C3 | run-4 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.10 | - | - | blocked | correctness: pass, spec-and-tests: pass, text-and-safety: blocked |',
+    '| code-7 | L1 | run-1 | 0.00 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0.50 | - | - | pass | delta: pass |',
   ]);
   // The decision table of each arm or configuration column gives the mean over the reviewers of all rounds of its
   // valid runs, as the summary gives it for each case.

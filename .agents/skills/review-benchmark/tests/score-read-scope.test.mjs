@@ -42,7 +42,7 @@ import {
 // outside the inputs of its run can see a fix, so its recall does not count.
 //
 // Changed export:
-// - transcriptFacts(text, source): when an assistant message of the transcript has a `toolCall` content item, the
+// - transcriptFacts(entries): when an assistant message of the transcript has a `toolCall` content item, the
 //   result also has `toolCalls`: one { name, path } per item, in transcript order. path is `arguments.path` when it
 //   is a string, else null. A `web_search` call also has `query`: `arguments.query` when it is a string, else null.
 //   When the transcript has a `toolResult` message for a `web_search` call (same `toolCallId`), the call also has
@@ -123,7 +123,7 @@ test('transcript facts list the name and the path of each tool call of the assis
     { type: 'message', timestamp: isoAt(6), message: { role: 'toolResult', content: [{ type: 'text', text: 'x' }] } },
     second,
   ]);
-  assert.deepEqual(score.transcriptFacts(text, 'tools.jsonl'), {
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(text, 'tools.jsonl')), {
     requestedTier: null,
     messages: [
       { model: MODEL, effort: null, servedTier: 'default' },
@@ -139,7 +139,91 @@ test('transcript facts list the name and the path of each tool call of the assis
     ],
   });
   // A transcript without a tool call has no toolCalls field.
-  assert.equal('toolCalls' in score.transcriptFacts(jsonl(FALLBACK_TRANSCRIPT), 'fallback.jsonl'), false);
+  assert.equal('toolCalls' in score.transcriptFacts(score.transcriptEntries(jsonl(FALLBACK_TRANSCRIPT))), false);
+});
+// Plan #216, R59: an instruction path in backticks ends at the closing backtick, so a project under a folder such as
+// `Team's review runs` keeps its roots and its agent file, and the self-review agent may read its own file.
+test('transcripts takes the instruction paths in backticks that hold an apostrophe', () => {
+  const team = "/work/Team's review runs";
+  const agentFile = `${team}/project/.omp/agents/review-bench-selfreview-low.md`;
+  const prompt = [
+    `Load \`${team}/baseline-plugin/skills/code-reviewer/SKILL.md\`.`,
+    `Your agent file is \`${agentFile}\`.`,
+    `Load \`${team}/selfreview-x-plugin/skills/code-review/SKILL.md\`.`,
+  ].join('\n');
+  assert.deepEqual(score.reviewerPluginRoots(prompt), [`${team}/baseline-plugin`]);
+  assert.deepEqual(score.selfReviewSkillRoots(prompt), [`${team}/selfreview-x-plugin`]);
+  const text = jsonl([
+    sessionRecord({ cwd: LIVE }),
+    { type: 'session_init', timestamp: isoAt(0), systemPrompt: ['You are a coding assistant.', prompt] },
+  ]);
+  const session = score.transcriptSession(score.transcriptEntries(text, 'team.jsonl'));
+  assert.deepEqual(session, {
+    cwd: LIVE,
+    pluginRoots: [`${team}/baseline-plugin`],
+    agentFiles: [agentFile],
+    skillRoots: [`${team}/selfreview-x-plugin`],
+  });
+  assert.deepEqual(score.readScope(reads(agentFile), { runDir: `${SCOPE_CASE}/S1-low/run-1`, ...session }), {
+    outside: [],
+  });
+});
+// Code review round 1 of plan #216: a quoted path runs to its matching quote, so its skill folder can hold an
+// apostrophe too. score.mjs parses the whole quoted path first and then matches the skill path at its end.
+test('a quoted instruction path keeps an apostrophe in the category folder of its skill', () => {
+  const kit = '/work/kit';
+  const team = `\`${kit}/skills/team's/plan-reviewer/SKILL.md\``;
+  const reviewer = `Load ${team} and "${kit}/skills/a b/code-reviewer/SKILL.md".`;
+  assert.deepEqual(score.reviewerPluginRoots(reviewer), [kit]);
+  assert.deepEqual(score.reviewerSkillPaths(reviewer), [
+    { root: kit, skill: "skills/team's/plan-reviewer/SKILL.md" },
+    { root: kit, skill: 'skills/a b/code-reviewer/SKILL.md' },
+  ]);
+  const selfReview = `Load \`${kit}/skills/team's/code-review/SKILL.md\` and \`${kit}/skills/code-clarity/SKILL.md\`.`;
+  assert.deepEqual(score.selfReviewSkillRoots(selfReview), [kit]);
+  // A bare path still ends at the first white space, and a sentence mark after it is no part of it.
+  assert.deepEqual(score.reviewerPluginRoots(`Then /opt/t/skills/plan-reviewer/SKILL.md, not /opt/u v/skills/x.`), [
+    '/opt/t',
+  ]);
+});
+// Code review round 1 of plan #216: the read scope probes the file system for the literal path of a call only where
+// the literal path can change how omp splits a list: a grep, glob, or ast_grep path with a `;`.
+test('readScope probes the file system for a literal path only for a search path with a `;`', () => {
+  const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
+  const exists = vi.spyOn(fs, 'existsSync');
+  onTestFinished(() => exists.mockRestore());
+  const probes = (target) => exists.mock.calls.filter(([file]) => file === target).length;
+  const file = `${SCOPE_CASE}/snapshot/src/sync.mjs`;
+  const calls = [...reads(file, `${file}:1-20`), { name: 'grep', path: file }];
+  score.readScope(calls, scope);
+  assert.equal(probes(file), 0);
+  const listed = `${SCOPE_CASE}/snapshot/src;b`;
+  score.readScope([{ name: 'grep', path: listed }], scope);
+  assert.equal(probes(listed), 1);
+});
+// Code review round 8 of plan #216: the rules of the read scope read a path as the reviewer wrote it (a `..` after a
+// glob segment, a `..` in an installed skill path), so a call reuses a scope verdict only for the same spelling.
+test('a scope verdict belongs to the spelling of a path, not only to the path that it reaches', () => {
+  const searched = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: SCOPE_CASE, pluginRoots: [LIVE_PLUGIN] };
+  const globs = [{ name: 'glob', path: 'snapshot/*.json;snapshot/**/../*.json' }];
+  assert.deepEqual(score.readScope(globs, searched), { outside: ['snapshot/**/../*.json'] });
+  const kitPackage = '/home/user/.omp/plugins/node_modules/docks-kit-omp/skills';
+  const scope = {
+    runDir: `${SCOPE_CASE}/C3-low/run-1`,
+    cwd: `${kitPackage}/unslop`,
+    pluginRoots: [LIVE_PLUGIN],
+    heldSkills: ['code-reviewer', 'plan-manager', 'plan-reviewer'],
+  };
+  const allowed = `${kitPackage}/code-review/SKILL.md`;
+  const relative = '../code-review/SKILL.md';
+  for (const members of [
+    [allowed, relative],
+    [relative, allowed],
+  ]) {
+    const target = members.join(', ');
+    const lists = new Map([[target, members]]);
+    assert.deepEqual(score.readScope(reads(target), { ...scope, lists }), { outside: [target] }, target);
+  }
 });
 test('readScope allows the inputs of the run, the instructions of the reviewer, and other web pages', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
@@ -277,6 +361,38 @@ test('readScope ignores the exclusion parts of a grep path, which read nothing',
   fs.writeFileSync(path.join(live, '!notes.md'), 'x\n');
   const rooted = [{ name: 'grep', path: `${SCOPE_CASE}/snapshot;!notes.md` }];
   assert.deepEqual(score.readScope(rooted, { ...scope, cwd: live }), { outside: ['!notes.md'] });
+  // Code review round 2 of plan #216: omp peels a line selector before it looks for the file, so a part with a
+  // selector that names an existing file is a search root too, not an exclusion. Round 3: omp folds a colon-form
+  // range list such as `:20:40,85:100` into ranges on the file, so the whole list is the selector.
+  const selectors = ['!notes.md:1-2', `${SCOPE_CASE}/snapshot;!notes.md:1-2`, '!notes.md:20:40,85:100'];
+  for (const selected of selectors) {
+    const call = [{ name: 'grep', path: selected }];
+    assert.deepEqual(score.readScope(call, { ...scope, cwd: live }), { outside: ['!notes.md'] }, selected);
+  }
+});
+// Code review round 4 of plan #216: omp 19.0.0 (grep.ts parsePathSpecs and isExclusionEntry, path-utils.ts
+// splitPathAndSelPreferringLiteral) keeps an existing literal path before it reads a selector, and reads only its own
+// selector forms. The read scope and the exclusion check take the path that this decision gives.
+test('readScope and the exclusion check take the path that omp opens for a target with a selector-like tail', () => {
+  const root = scratch();
+  const caseDir = path.join(root, 'bench;dev', 'plan-3');
+  const scope = { runDir: path.join(caseDir, 'P0-low', 'run-1'), cwd: root, pluginRoots: [LIVE_PLUGIN] };
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  // A file named `plan.md:1-20` exists, so omp searched it, not the input plan.md, and the search is outside.
+  const literal = path.join(caseDir, 'plan.md:1-20');
+  fs.writeFileSync(literal, 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: literal }], scope), { outside: [literal] });
+  // `:notes` is no selector of omp: no file is named `!review.diff:notes`, so the part is an exclusion, also when a
+  // file `!review.diff` exists. A grep of exclusions only searches the working directory.
+  fs.writeFileSync(path.join(root, '!review.diff'), 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: '!review.diff:notes' }], scope), {
+    outside: ['grep without a path'],
+  });
+  // `:1-2` is the selector, and `!notes.md:backup` exists, so omp searched `!notes.md:backup`.
+  fs.writeFileSync(path.join(root, '!notes.md:backup'), 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: '!notes.md:backup:1-2' }], scope), {
+    outside: ['!notes.md:backup'],
+  });
 });
 test('readScope refuses every skill:// read of the benchmark skill and every read inside the live benchmark folder', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN], heldSkills: [] };
@@ -944,13 +1060,100 @@ test('transcripts command takes the changed files of a plan case from the Files 
   put(
     sessions,
     'Plan3P0R1Plan.jsonl',
-    toolTranscript(path.join(ws, 'plan-3'), 30, [
-      ['read', { path: contractRead }],
-      ['read', { path: 'skill://code-review/references/perf.md' }],
-    ]),
+    toolTranscript(
+      path.join(ws, 'plan-3'),
+      30,
+      [
+        ['read', { path: contractRead }],
+        ['read', { path: 'skill://code-review/references/perf.md' }],
+      ],
+      'review-bench-candidate-plan-low',
+    ),
   );
   assert.deepEqual(transcriptsCommand(ws, sessions), ['Plan3P0R1Plan']);
   assert.deepEqual(readJson(path.join(ws, 'plan-3/P0/run-1/meta.json')).reviewers.plan.readScope, {
     outside: [contractRead],
   });
+});
+// Plan #216, R51, end to end: `score.mjs transcripts` as the operator runs it refuses a transcript whose agent is
+// another variant than the prompt names, exits nonzero, and leaves meta.json as it was.
+test('score.mjs transcripts exits nonzero on a transcript of another agent and leaves meta.json unchanged', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'Va-low', 'run-1');
+  const agent = 'review-bench-variant-a-0123456789ab-plan-low';
+  const swapped = 'review-bench-variant-16-ba9876543210-plan-low';
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const file = path.join(sessions, 'Plan3VaLowR1Plan.jsonl');
+  const calls = [['read', { path: path.join(caseDir, 'plan.md') }]];
+  put(sessions, 'Plan3VaLowR1Plan.jsonl', toolTranscript(caseDir, 30, calls, swapped));
+  const before = readText(path.join(run, 'meta.json'));
+  const args = [path.join(SCRIPTS_DIR, 'score.mjs'), 'transcripts', ws, '--omp-sessions', sessions];
+  const cli = spawnSync(BUN_RUNTIME, args, { encoding: 'utf8' });
+  assert.equal(cli.status, 1, cli.stdout);
+  assert.equal(
+    cli.stderr.trim(),
+    `transcripts: 1 transcripts show another agent than their prompt names: Plan3VaLowR1Plan (${file}): agent ${swapped}, not ${agent}; dispatch them again with the agent of the prompt`,
+  );
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+});
+// Code review round 1 of plan #216: a prompt without its `agent:` header and a transcript without an agent name no
+// agent, so they prove no arm, also when both are missing. Round 2: a prompt without the header is a damaged prompt,
+// so the message names the prompt and asks to restore its header; a new dispatch cannot fix it.
+test('transcripts refuses a prompt without an agent header and a transcript without an agent', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'P0-low', 'run-1');
+  const prompt = path.join(run, 'prompts', 'plan.txt');
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(run, 'prompts/plan.txt', 'Review.\n');
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const file = path.join(sessions, 'Plan3P0LowR1Plan.jsonl');
+  const transcript = toolTranscript(caseDir, 30, [['read', { path: path.join(caseDir, 'plan.md') }]])
+    .split('\n')
+    .filter((line) => JSON.parse(line).type !== 'session_init')
+    .join('\n');
+  put(sessions, 'Plan3P0LowR1Plan.jsonl', transcript);
+  const before = readText(path.join(run, 'meta.json'));
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 prompts have no agent header: ${prompt}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+  });
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+  // With its header back, the prompt names an agent that the transcript does not name: dispatch it again.
+  put(run, 'prompts/plan.txt', 'agent: review-bench-candidate-plan-low\n\nReview.\n');
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3P0LowR1Plan (${file}): agent none, not review-bench-candidate-plan-low; dispatch them again with the agent of the prompt`,
+  });
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+});
+// Code review round 3 of plan #216: transcripts checks the header of every saved prompt before it looks for any
+// transcript, so a damaged prompt without a transcript stops the command before it writes the meta.json of another
+// dispatch. A well-formed prompt without a transcript keeps the partial write (see the tests above).
+test('transcripts checks every prompt header first and writes nothing when one is damaged', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = (n) => path.join(caseDir, 'P0-low', `run-${n}`);
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  // run-1 has a damaged prompt and no transcript; run-2 has a well-formed prompt and its transcript.
+  put(run(1), 'prompts/plan.txt', 'Review.\n');
+  put(run(2), 'prompts/plan.txt', 'agent: review-bench-candidate-plan-low\n\nReview.\n');
+  for (const n of [1, 2]) put(run(n), 'meta.json', { config: CONFIGS.low });
+  const calls = [['read', { path: path.join(caseDir, 'plan.md') }]];
+  put(sessions, 'Plan3P0LowR2Plan.jsonl', toolTranscript(caseDir, 30, calls, 'review-bench-candidate-plan-low'));
+  const before = readText(path.join(run(2), 'meta.json'));
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 prompts have no agent header: ${path.join(run(1), 'prompts', 'plan.txt')}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+  });
+  assert.equal(readText(path.join(run(2), 'meta.json')), before);
 });

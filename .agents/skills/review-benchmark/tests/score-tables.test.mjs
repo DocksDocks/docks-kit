@@ -117,6 +117,7 @@ test('the code-loop rows leave out single reviews, and the fixer median leaves o
     '| Unjudged per run | 0.00 | 0.00 |',
     '| Unknown ratings per run | 0.00 | 0.00 |',
     '| Unknown pairs per run | 0.00 | 0.00 |',
+    '| Doubtful extras per run | 0.00 | 0.00 |',
     '| Tokens median | 1100 | 500 |',
     '| Side-call tokens median | 0 | 0 |',
     // The low loop of code-8 ran no fixer: the median is 30.0, not the median 15.0 of 30 and 0.
@@ -143,6 +144,7 @@ test('the code-loop rows leave out single reviews, and the fixer median leaves o
     '| Unjudged per run | 0.00 | 0.00 |',
     '| Unknown ratings per run | 0.00 | 0.00 |',
     '| Unknown pairs per run | 0.00 | 0.00 |',
+    '| Doubtful extras per run | 0.00 | 0.00 |',
     '| Tokens median | 4000 | 3000 |',
   ]);
   // The held-out group has single reviews only, so it has no code-loop table.

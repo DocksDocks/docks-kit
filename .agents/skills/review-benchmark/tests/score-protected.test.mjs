@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'vitest';
+import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import * as prepare from '../scripts/prepare.mjs';
 import * as score from '../scripts/score.mjs';
 import { blindId, findingsCommand, main, pairsCommand, renderReport, reportCommand, scoreRuns } from '../scripts/score.mjs';
@@ -16,6 +18,7 @@ import {
   PLAN_KEY,
   put,
   readJson,
+  SCRIPTS_DIR,
   tableAfter,
   treeState,
   workspace,
@@ -270,10 +273,10 @@ test('a reargued match counts as a re-argued decision of its run, not in recall,
   assert.deepEqual(summary.recall, { mean: 0.5 / 3, median: 0, min: 0, max: 0.5 });
   const lines = renderReport(scores).split('\n');
   for (const expected of [
-    '| code-7 | C3 | 3 | 2 | 0.17 | 0.00 | 0.00 | 0.50 | 0.67 | 0.67 | 0.00 | 0.00 | 0.00 | 1.33 | - | - | - | - | - | - | - |',
-    '| code-7 | C3 | run-1 | 0.50 | D1 | 1 | 1 | 0 | 0 | 0 | 0 | U1, U2 | - | - | - | pass | correctness: pass |',
-    '| code-7 | C3 | run-2 | 0.00 | - | 1 | 1 | 0 | 0 | 0 | 0 | U2 | - | - | - | pass | correctness: pass |',
-    '| code-7 | C3 | run-3 | 0.00 | - | 0 | 0 | 0 | 1 | 0 | 0 | U3 | - | - | - | pass | correctness: pass |',
+    '| code-7 | C3 | 3 | 2 | 0.17 | 0.00 | 0.00 | 0.50 | 0.67 | 0.67 | 0.00 | 0.00 | 0.00 | 0.00 | 1.33 | - | - | - | - | - | - | - |',
+    '| code-7 | C3 | run-1 | 0.50 | D1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | U1, U2 | - | - | - | pass | correctness: pass |',
+    '| code-7 | C3 | run-2 | 0.00 | - | 1 | 1 | 0 | 0 | 0 | 0 | 0 | U2 | - | - | - | pass | correctness: pass |',
+    '| code-7 | C3 | run-3 | 0.00 | - | 0 | 0 | 0 | 1 | 0 | 0 | 0 | U3 | - | - | - | pass | correctness: pass |',
   ]) {
     assert.ok(lines.includes(expected), `the report lacks ${expected}`);
   }
@@ -373,22 +376,22 @@ test('report.md gives the re-argued decisions of each run, and a reargued match 
   const [summaryHeader, , ...summaryRows] = tableAfter(report, '## Summary');
   assert.equal(
     summaryHeader,
-    '| Case | Arm | Runs | Known | Recall mean | Recall median | Recall min | Recall max | Valid extras mean | Wrong mean | Unknown mean | Unresolved mean | Unknown pairs mean | Re-argued mean | Diff read mean | Seconds median | Seconds min | Seconds max | Tokens median | Tokens min | Tokens max |',
+    '| Case | Arm | Runs | Known | Recall mean | Recall median | Recall min | Recall max | Valid extras mean | Wrong mean | Unknown mean | Unresolved mean | Unknown pairs mean | Doubtful extras mean | Re-argued mean | Diff read mean | Seconds median | Seconds min | Seconds max | Tokens median | Tokens min | Tokens max |',
   );
   assert.deepEqual(summaryRows, [
-    '| code-7 | B0 | 1 | 3 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 1.00 | - | - | - | - | - | - | - |',
-    '| plan-3 | P0 | 1 | 2 | 0.50 | 0.50 | 0.50 | 0.50 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.00 | - | - | - | - | - | - | - |',
+    '| code-7 | B0 | 1 | 3 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 1.00 | - | - | - | - | - | - | - |',
+    '| plan-3 | P0 | 1 | 2 | 0.50 | 0.50 | 0.50 | 0.50 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.00 | - | - | - | - | - | - | - |',
   ]);
   const [runHeader, , ...runRows] = tableAfter(report, '## Runs');
   assert.equal(
     runHeader,
-    '| Case | Arm | Run | Recall | Found | Valid extras | Wrong | Unknown | Unjudged | Unresolved | Unknown pairs | Re-argued | Diff read | Seconds | Tokens | Round verdict | Block verdicts |',
+    '| Case | Arm | Run | Recall | Found | Valid extras | Wrong | Unknown | Unjudged | Unresolved | Unknown pairs | Doubtful extras | Re-argued | Diff read | Seconds | Tokens | Round verdict | Block verdicts |',
   );
   assert.deepEqual(runRows, [
-    '| code-7 | B0 | run-1 | 0.00 | - | 0 | 1 | 0 | 0 | 0 | 0 | U1 | - | - | - | fixes-required | full: fixes-required |',
-    '| code-7 | C3 | run-1 | 0.00 | - | 4 | 0 | 0 | 0 | 0 | 0 | U1 | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: fixes-required, text-and-safety: unreadable |',
-    '| code-7 | C3 | run-2 | 0.00 | - | 3 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
-    '| plan-3 | P0 | run-1 | 0.50 | K1 | 1 | 0 | 0 | 0 | 0 | 0 | U1, U2 | - | - | - | repair | plan: repair |',
+    '| code-7 | B0 | run-1 | 0.00 | - | 0 | 1 | 0 | 0 | 0 | 0 | 0 | U1 | - | - | - | fixes-required | full: fixes-required |',
+    '| code-7 | C3 | run-1 | 0.00 | - | 4 | 0 | 0 | 0 | 0 | 0 | 0 | U1 | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: fixes-required, text-and-safety: unreadable |',
+    '| code-7 | C3 | run-2 | 0.00 | - | 3 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
+    '| plan-3 | P0 | run-1 | 0.50 | K1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | U1, U2 | - | - | - | repair | plan: repair |',
   ]);
   // The report names protected ids and no text of a protected decision.
   for (const { section, summary } of PROTECTED) {
@@ -540,4 +543,77 @@ test('report --keys refuses a key whose protected decisions changed after pairs'
   // The same protected ids in another order do not stop the report.
   put(keys, 'plan-3.key.json', { known: PLAN_KEY, protected: [decisions[1], decisions[0]] });
   assert.equal(main(['report', ws, '--keys', keys]), 'report.md: 4 runs');
+});
+// Plan #216, R55: with --keys, every held-out key comes from the keys folder, so a held-out key that is missing there
+// stops the report. The dev case code-7 has inline known defects and needs no key file. The protected workspace with
+// its keys folder, scored once with every key, and then without the held-out key of plan-3.
+function missingKeyWorkspace() {
+  const { ws, cases } = protectedWorkspace();
+  const keys = path.join(path.dirname(ws), 'keys');
+  put(keys, 'plan-3.key.json', { known: PLAN_KEY, protected: PROTECTED.slice(0, 2) });
+  findingsCommand(ws);
+  pairsCommand(ws, cases, { keys });
+  judgeAll(ws, () => 'no');
+  judgeProtected(ws, () => 'no');
+  const reportFile = path.join(ws, 'report.md');
+  assert.equal(main(['report', ws, '--keys', keys]), 'report.md: 4 runs');
+  fs.rmSync(reportFile);
+  const keyFile = path.join(keys, 'plan-3.key.json');
+  fs.rmSync(keyFile);
+  const message = `${keyFile} is missing: --keys reads the key of every held-out case from the keys folder; copy the key there and run score.mjs pairs again`;
+  return { ws, keys, reportFile, message };
+}
+// `bun score.mjs <args>` as the operator runs it.
+const scoreCli = (...args) =>
+  spawnSync(BUN_RUNTIME, [path.join(SCRIPTS_DIR, 'score.mjs'), ...args], { encoding: 'utf8' });
+test('report --keys refuses a held-out case whose key file is missing from the keys folder', () => {
+  const { ws, keys, reportFile, message } = missingKeyWorkspace();
+  assert.throws(() => main(['report', ws, '--keys', keys]), { message });
+  assert.equal(fs.existsSync(reportFile), false);
+});
+test('score.mjs report --keys exits nonzero when a held-out key file is missing and writes no report.md', () => {
+  const { ws, keys, reportFile, message } = missingKeyWorkspace();
+  const cli = scoreCli('report', ws, '--keys', keys);
+  assert.equal(cli.status, 1, cli.stdout);
+  assert.equal(cli.stderr.trim(), message);
+  assert.equal(cli.stdout, '');
+  assert.equal(fs.existsSync(reportFile), false);
+});
+test('score.mjs power --keys exits nonzero when a held-out key file is missing and writes no report.md', () => {
+  const { ws, keys, reportFile, message } = missingKeyWorkspace();
+  const cli = scoreCli('power', ws, '--keys', keys);
+  assert.equal(cli.status, 1, cli.stdout);
+  assert.equal(cli.stderr.trim(), message);
+  assert.equal(cli.stdout, '');
+  assert.equal(fs.existsSync(reportFile), false);
+});
+// Plan #216, R63: the report that the executable writes has the Doubtful extras column. The first candidate pair gets
+// the answer unknown, and its finding, rated valid, is a doubtful extra of its run.
+test('score.mjs report writes the Doubtful extras column, with a valid extra that has an unknown pair', () => {
+  const { ws, cases } = protectedWorkspace();
+  findingsCommand(ws);
+  pairsCommand(ws, cases);
+  let first = true;
+  judgeAll(ws, () => {
+    const verdict = first ? 'unknown' : 'no';
+    first = false;
+    return verdict;
+  });
+  judgeProtected(ws, () => 'no');
+  const cli = scoreCli('report', ws);
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(cli.stdout.trim(), 'report.md: 4 runs');
+  const report = fs.readFileSync(path.join(ws, 'report.md'), 'utf8');
+  const [summaryHeader] = tableAfter(report, '## Summary');
+  assert.ok(summaryHeader.includes('| Unknown pairs mean | Doubtful extras mean | Re-argued mean |'), summaryHeader);
+  const [runHeader, , ...runRows] = tableAfter(report, '## Runs');
+  const cells = (line) =>
+    line
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+  const column = cells(runHeader).indexOf('Doubtful extras');
+  assert.equal(cells(runHeader)[column - 1], 'Unknown pairs');
+  // Exactly one run, the run of the finding of the first pair, has one doubtful extra.
+  assert.deepEqual(runRows.map((line) => cells(line)[column]).sort(), ['0', '0', '0', '1']);
 });
