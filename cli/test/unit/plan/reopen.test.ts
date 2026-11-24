@@ -494,7 +494,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       refuse(
         reopen(context, plan),
-        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to repair the phase label and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to set the phase label plan:ongoing and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
       );
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
@@ -515,7 +515,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       refuse(
         reopen(context, plan),
-        `plan #${plan.number} reopened, but plan #${plan.number} is owned by other-agent; no comment was posted; settle the ownership with other-agent by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+        `plan #${plan.number} reopened, but it reads phase labels plan:ongoing and owners plan-agent, other-agent; no comment was posted; settle the ownership with other-agent by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
       );
       expect(context.writes().length, "the reopen only").toBe(1);
     },

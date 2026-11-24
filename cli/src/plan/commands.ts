@@ -1081,6 +1081,8 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   const { issue, login, viewerId, labelIds } = plan;
   const phases = issue.labels.map((label) => token(label.name)).filter(isPhaseLabel);
   const restoresPhase = phases.length === 0;
+  // The phase label that the reopened plan must hold before its comment; `status` repairs to it.
+  const expectedPhase = phases.length === 1 ? phases[0] : "plan:ongoing";
   const phaseLabelId = restoresPhase
     ? (labelIds?.get("plan:ongoing") ?? (yield* createdLabelId("plan:ongoing")))
     : undefined;
@@ -1098,6 +1100,10 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   // The last read before the reopen, with GraphQL: the close event that the pre-write read cannot show must still be
   // the settled one, and the state, body, labels, and owners must still be those of the pre-write read.
   const settled = (yield* readSnapshot(issue.number, { closure: true })).issue;
+  yield* attempt(() => refuseStuck(settled));
+  const known = new Set([...assignees.map((owner) => String(owner.login)), login]);
+  const foreign = settled.assignees.find((owner) => !known.has(owner.login));
+  if (foreign) return yield* refuse(`plan #${issue.number} is owned by ${foreign.login}`);
   if (
     settled.closedEventAt !== issue.closedEventAt ||
     describeCloser(settled.closer) !== describeCloser(issue.closer) ||
@@ -1164,7 +1170,7 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
           attempt(() => refuseStuck(now)).pipe(
             Effect.andThen(
               refuse(
-                `the reopen of plan #${issue.number} failed (${error.message}); it reads ${String(now.state).toLowerCase()} with phase labels ${phaseList(now.labels)} and owners ${now.assignees.map((owner) => owner.login).join(", ") || "none"}; no comment was posted; ${reopenRecovery(now, login, command, comment)}`,
+                `the reopen of plan #${issue.number} failed (${error.message}); it reads ${String(now.state).toLowerCase()} with phase labels ${phaseList(now.labels)} and owners ${now.assignees.map((owner) => owner.login).join(", ") || "none"}; no comment was posted; ${reopenRecovery(now, login, expectedPhase, command, comment)}`,
               ),
             ),
           ),
@@ -1185,43 +1191,38 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
     if (!Array.isArray(owners) || !owners.some((owner) => field(owner, "id") === viewerId)) {
       const now = (yield* readSnapshot(issue.number)).issue;
       return yield* refuse(
-        `plan #${issue.number} reopened, but its claim did not land; no comment was posted; ${reopenRecovery(now, login, command, comment)}`,
+        `plan #${issue.number} reopened, but its claim did not land; no comment was posted; ${reopenRecovery(now, login, expectedPhase, command, comment)}`,
       );
     }
-    issue.confirmedOwner = login;
   }
-  // The status comes from a fresh read, which must show an open plan with exactly one phase label.
+  // The last read before the comment, with GraphQL, so bot owners count: the comment is a trusted record only when the
+  // plan is open, has the base label and the expected phase label, and has the acting login as its single owner.
   const current = (yield* readSnapshot(issue.number)).issue;
-  const status = statusFromIssueOf(current);
-  if (isClosed(current) || !PLAN_STATUSES.has(status))
+  if (
+    isClosed(current) ||
+    !current.labels.some((label) => token(label.name) === "plan") ||
+    !sameSet(current.labels.map((label) => token(label.name)).filter(isPhaseLabel), [
+      expectedPhase,
+    ]) ||
+    current.assignees.length !== 1 ||
+    current.assignees[0]?.login !== login
+  )
     return yield* refuse(
-      `plan #${issue.number} ${isClosed(current) ? "closed again after the reopen" : `reopened with phase labels ${phaseList(current.labels)}`}; no comment was posted; ${reopenRecovery(current, login, command, comment)}`,
+      `plan #${issue.number} ${isClosed(current) ? "closed again after the reopen" : `reopened, but it reads phase labels ${phaseList(current.labels)} and owners ${current.assignees.map((owner) => owner.login).join(", ") || "none"}`}; no comment was posted; ${reopenRecovery(current, login, expectedPhase, command, comment)}`,
     );
-  yield* refuseChangedIssue(issue, yield* preWriteIssue(issue.number), {
-    state: "OPEN",
-    phases: restoresPhase ? ["plan:ongoing"] : phases,
-  }).pipe(
-    Effect.catchTag("PlanRefusal", (refusal) =>
-      readSnapshot(issue.number).pipe(
-        Effect.flatMap(({ issue: now }) =>
-          refuse(
-            `plan #${issue.number} reopened, but ${refusal.message}; no comment was posted; ${reopenRecovery(now, login, command, comment)}`,
-          ),
-        ),
-      ),
-    ),
-  );
-  yield* postReopenComment(issue, id, login, comment, command);
-  yield* printLine(`plan #${issue.number} reopened: ${status}`);
+  issue.confirmedOwner = login;
+  yield* postReopenComment(issue, id, login, expectedPhase, comment, command);
+  yield* printLine(`plan #${issue.number} reopened: ${statusFromIssueOf(current)}`);
 });
 
 // The next step after a reopen that stopped before its comment landed, from what the plan reads now: a plan that GitHub
 // left stuck goes to GitHub Support; a closed plan gets the rerun; on an open plan, each repair that blocks the comment,
 // in order: another owner to settle by hand, the base `plan` label, and `status`, which claims an unassigned plan and
-// sets one phase label; then the comment, which only the single owner can post as a trusted record.
+// sets the expected phase label; then the comment, which only the single owner can post as a trusted record.
 function reopenRecovery(
   now: PlanIssue,
   login: string | undefined,
+  expectedPhase: string,
   command: string,
   comment: string,
 ): string {
@@ -1233,8 +1234,11 @@ function reopenRecovery(
   if (other) repairs.push(`settle the ownership with ${other.login} by hand`);
   if (!now.labels.some((label) => token(label.name) === "plan"))
     repairs.push(`add the plan label with \`gh issue edit ${now.number} --add-label plan\``);
-  if (now.assignees.length === 0 || !PLAN_STATUSES.has(statusFromIssueOf(now)))
-    repairs.push(`run status ${now.number} ongoing to repair the phase label and the claim`);
+  const phasesNow = now.labels.map((label) => token(label.name)).filter(isPhaseLabel);
+  if (now.assignees.length === 0 || !sameSet(phasesNow, [expectedPhase]))
+    repairs.push(
+      `run status ${now.number} ${expectedPhase.slice("plan:".length)} to set the phase label ${expectedPhase} and the claim`,
+    );
   return [...repairs, `post this comment as the plan owner: ${comment}`].join(", then ");
 }
 
@@ -1253,6 +1257,7 @@ const postReopenComment = Effect.fn("plan.postReopenComment")(function* (
   issue: PlanIssue,
   id: string,
   login: string | undefined,
+  expectedPhase: string,
   comment: string,
   command: string,
 ) {
@@ -1275,7 +1280,7 @@ const postReopenComment = Effect.fn("plan.postReopenComment")(function* (
           );
           if (landed) return Effect.void;
           return refuse(
-            `plan #${issue.number} ${isClosed(now) ? "closed again after the reopen" : "is open again"}, but its reopen comment did not post (${error.message}); ${reopenRecovery(now, login, command, comment)}`,
+            `plan #${issue.number} ${isClosed(now) ? "closed again after the reopen" : "is open again"}, but its reopen comment did not post (${error.message}); ${reopenRecovery(now, login, expectedPhase, command, comment)}`,
           );
         }),
       ),

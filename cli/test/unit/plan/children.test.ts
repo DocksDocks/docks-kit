@@ -156,7 +156,7 @@ function phaseLabels(context: PlanCliContext, number: number): Array<string> {
 }
 
 function repairHint(number: number, child: number, phases: string): string {
-  return `plan #${number} reopened with phase labels ${phases}; no comment was posted; run status ${number} ongoing to repair the phase label and the claim, then post this comment as the plan owner: ${reopenedComment(number, child)}`;
+  return `plan #${number} reopened, but it reads phase labels ${phases} and owners plan-agent; no comment was posted; run status ${number} ongoing to set the phase label plan:ongoing and the claim, then post this comment as the plan owner: ${reopenedComment(number, child)}`;
 }
 
 function closedAgainRefusal(number: number): string {
