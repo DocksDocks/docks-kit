@@ -32,24 +32,6 @@ upstream installer when Bun is absent: by the POSIX launcher and installer, and
 by sync's Bun bootstrap. The Windows launcher and installer use
 Invoke-WebRequest.
 
-### Move a checkout of DocksDocks/public
-
-The kit moved from DocksDocks/public to DocksDocks/docks-kit. To move a
-checkout of DocksDocks/public, run these commands from the checkout's root:
-
-```
-git remote set-url origin https://github.com/DocksDocks/docks-kit.git
-./docks-kit update        # Linux and macOS
-.\docks-kit.ps1 update    # Windows
-./docks-kit sync          # Linux and macOS
-.\docks-kit.ps1 sync      # Windows
-```
-
-The update pulls from DocksDocks/docks-kit and chains a sync that deploys the
-skills with their new report target. The explicit sync covers an older
-checkout whose launcher still runs a binary from `cli/dist/`, because that
-binary does not chain the sync. A global npm install needs nothing.
-
 ## CLI
 
 ```text
@@ -74,9 +56,6 @@ dry-run output, mutation snapshots, and argv logs. Its dependency graph is
 `bun run lint:effect` checks the Effect rules through `@effect/tsgo`. The
 same package can run as the editor's TypeScript language server
 (`node_modules/.bin/effect-tsgo tsc --lsp --stdio`).
-`@effect/cli` and `@effect/platform` are removed: neither has a 4.x release,
-the CLI API moved into core, and the standalone platform package was unused
-here.
 
 ### Key flags (`docks-kit sync`)
 
@@ -118,7 +97,7 @@ Full reference: `docks-kit docs flags`.
 Sync writes the kit plugin `docks-kit-omp` to `~/.docks-kit/omp-plugin` and
 links it into omp. The kit plugin content comes from `SoT/.omp/plugin/`:
 
-- **Skills** — the 32 docks and plan-lifecycle skills, for example
+- **Skills** — 32 skills, for example
   `plan-manager`, `plan-workspace`, `code-review`, `security`, and
   `refactor`, plus the `workspace-hygiene` skill.
 - **Agents** — the `code-reviewer` and `plan-reviewer` task agents.
@@ -129,12 +108,6 @@ links it into omp. The kit plugin content comes from `SoT/.omp/plugin/`:
 - **Rules and commands** — six trigger rules that teach the safe form of a
   risky command, and the `/cleanup` command.
 
-The kit plugin replaces the former `docks` and `plan-lifecycle` plugins of
-the `docks` marketplace. `docks-kit sync` uninstalls their user-scope installs
-when it can read the omp plugin inventory, and then removes the `docks`
-marketplace when no uninstall failed and it can read the marketplace registry.
-It only warns about a project-scope install, with the manual command. When a
-read fails, sync warns and skips that step, and a later sync tries again.
 Report a problem with a skill, an agent, or the kit in
 [DocksDocks/docks-kit](https://github.com/DocksDocks/docks-kit/issues).
 
