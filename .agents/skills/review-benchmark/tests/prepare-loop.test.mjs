@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'vitest';
+import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import * as prepare from '../scripts/prepare.mjs';
 import * as score from '../scripts/score.mjs';
 import {
@@ -17,6 +19,7 @@ import {
   assistantLine,
   changedLines,
   CONFIGS,
+  copyScripts,
   devLoop,
   escapeRegExp,
   EXTRA_FIXED,
@@ -462,6 +465,39 @@ test('loop --fixer-patch drops the recorded fixer entry and the fixer prompt of 
   assert.equal(readJson(metaFile).fixer, undefined);
   const fixerPrompt = path.join('code-7', 'C1-low', 'run-1', 'round-1', 'fixer', 'fixer-1.txt');
   assert.ok(!namesCommand(ws).some((entry) => entry.prompt === fixerPrompt));
+});
+test('the loop command refuses a fixer patch that undoes the fix step and drops a recorded fixer with --fixer-patch', () => {
+  const { root, repo, cases, run, round, fixerPatch } = devLoop();
+  // The command runs on the repository of its own checkout, so the scripts go into the case repository.
+  const script = copyScripts(repo);
+  const loop = (...args) =>
+    spawnSync(BUN_RUNTIME, [script, 'loop', '--run', run, '--cases', cases, ...args], { encoding: 'utf8' });
+  const metaFile = path.join(round(1), 'meta.json');
+  // A fixer patch that only sets v5 back to 0 gives back the reviewed tree of round 1.
+  const undoing = path.join(root, 'undoing-fixer.patch');
+  fs.writeFileSync(undoing, filePatch(repo, 'src/sync.mjs', SYNC_D1, SYNC_HEAD));
+  const before = readText(metaFile);
+  const refused = loop('--fixer-patch', undoing);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.ok(
+    refused.stderr.includes(
+      `the fixer patch ${undoing} undoes the fix patches of code-7/C1-low/run-1/round-1, so the tree is the reviewed tree of the round`,
+    ),
+    refused.stderr,
+  );
+  assert.equal(fs.existsSync(round(2)), false);
+  assert.equal(readText(metaFile), before);
+  // The first call writes the fixer prompt; `transcripts` then records a fixer of round 1.
+  const stopped = loop();
+  assert.equal(stopped.status, 1, stopped.stderr);
+  assert.match(stopped.stderr, /give their repair with --fixer-patch/);
+  const fixer = { seconds: 20, tokens: 100, agents: { 'fixer-1': { seconds: 20, tokens: 100 } } };
+  put(round(1), 'meta.json', { ...readJson(metaFile), fixer });
+  const repaired = loop('--fixer-patch', fixerPatch);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.ok(fs.existsSync(round(2)));
+  assert.equal(readJson(metaFile).fixer, undefined);
+  assert.equal(fs.existsSync(path.join(round(1), 'fixer', 'fixer-1.txt')), false);
 });
 test('loop counts the fixes of earlier rounds for fix_after and ends after a round without open findings', () => {
   const { repo, ws, cases, run, round, round1Answers, fixerPatch } = devLoop();

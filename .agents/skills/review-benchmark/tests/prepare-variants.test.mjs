@@ -704,6 +704,79 @@ test('agents refuses a --baseline-dir that holds the copy of a variant, and the 
   });
   assert.deepEqual(treeState(root), legacyState);
 });
+// The commands run on the repository of their own checkout, so these tests put the scripts into the fixture repository
+// and run the copy with a fake omp first on PATH.
+const agentsCommand = (script, project, ...args) =>
+  spawnSync(
+    BUN_RUNTIME,
+    [script, 'agents', '--model', MODEL, '--efforts', 'low', '--tiers', 'default', '--project', project, ...args],
+    { encoding: 'utf8', env: fakeOmp().env },
+  );
+// The setup of variant a at cand-a, with the baseline copy of v16 in `<root>/baseline-plugin`.
+const variantSetup = (root) => [
+  '--baseline-ref',
+  'v16',
+  '--baseline-dir',
+  path.join(root, 'baseline-plugin'),
+  '--variants',
+  'a=cand-a',
+];
+test('the agents command refuses a --baseline-dir on a variant copy and leaves the tree as it was', () => {
+  const { root, repo, project, shas } = variantRepo();
+  const script = copyScripts(repo);
+  const first = agentsCommand(script, project, ...variantSetup(root));
+  assert.equal(first.status, 0, first.stderr);
+  const copy = variantRoot(root, 'a', shas['cand-a']);
+  assert.ok(fs.existsSync(path.join(copy, 'skills/plan-reviewer/SKILL.md')));
+  // A second setup in another project gives the folder of that copy as its --baseline-dir.
+  const project2 = path.join(root, 'project2');
+  fs.mkdirSync(project2);
+  // The state of the setups: the folders next to the repository, whose scripts copy links the CLI source.
+  const setups = () => ({
+    folders: fs.readdirSync(root).sort(),
+    ...Object.fromEntries(
+      ['baseline-plugin', path.basename(copy), 'project', 'project2'].map((name) => [
+        name,
+        treeState(path.join(root, name)),
+      ]),
+    ),
+  });
+  const state = setups();
+  const second = agentsCommand(script, project2, '--baseline-ref', 'v16', '--baseline-dir', copy);
+  assert.equal(second.status, 1, second.stderr);
+  const message = `${copy} holds the variant plugin copy at ${shas['cand-a'].slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`;
+  assert.ok(second.stderr.includes(message), second.stderr);
+  assert.deepEqual(setups(), state);
+});
+test('the case command names the commit-pinned agent of a variant in the prompt of its arm', () => {
+  const { root, repo, project, agentDir, shas } = variantRepo();
+  const script = copyScripts(repo);
+  const agents = agentsCommand(script, project, ...variantSetup(root));
+  assert.equal(agents.status, 0, agents.stderr);
+  const cases = path.join(root, 'cases');
+  const ws = path.join(root, 'ws');
+  const planCase = {
+    id: 'plan-3',
+    kind: 'plan',
+    split: 'dev',
+    issue: 3,
+    round: 1,
+    plan: 'plan-3-plan.md',
+    repo_ref: shas.v16,
+    known: [],
+  };
+  put(cases, 'dev/plan-3.json', planCase);
+  put(cases, 'dev/plan-3-plan.md', '# Plan 3\n\nStep 1 and step 2.\n');
+  const args = ['--case', path.join(cases, 'dev', 'plan-3.json'), '--arms', 'Va', '--runs', '1', '--out', ws];
+  const build = spawnSync(BUN_RUNTIME, [script, 'case', ...args, '--configs', 'low', '--project', project], {
+    encoding: 'utf8',
+  });
+  assert.equal(build.status, 0, build.stderr);
+  const agent = `review-bench-variant-a-${shas['cand-a'].slice(0, 12)}-plan-low`;
+  const prompt = readText(path.join(ws, 'plan-3', 'Va-low', 'run-1', 'prompts', 'plan.txt'));
+  assert.equal(prompt.split('\n')[0], `agent: ${agent}`);
+  assert.ok(fs.existsSync(path.join(agentDir, `${agent}.md`)));
+});
 test('agents keeps the previous setup and its plugin copies when a new agent does not render', () => {
   const fixture = variantRepo();
   const { root, repo } = fixture;

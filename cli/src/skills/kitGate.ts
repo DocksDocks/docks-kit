@@ -209,22 +209,26 @@ const COMMENT_OPEN = /^ {0,3}<!--/;
  * An ATX heading: up to three spaces, one to six `#`, then a space, a tab, or the
  * end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
  */
-const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t\r]|$)(.*)$/;
+const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t]|$)(.*)$/;
 /** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
-const CLOSING_HASHES = /(?:^|[ \t])#+[ \t\r]*$/;
+const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
 
 /**
  * The offset of each ATX heading line with the text `title`, at any level,
- * outside fenced code and HTML comment blocks. A fence or comment that is open
- * at the end runs to the end of the file, as in CommonMark, so a heading inside
- * it does not count.
+ * outside fenced code and HTML comment blocks. Lines end at `\n` or `\r\n`. A
+ * fence or comment that is open at the end runs to the end of the file, as in
+ * CommonMark, so a heading inside it does not count. The scan does not track
+ * container blocks: an unclosed fence or comment inside a list item runs to the
+ * end of the file here, so the check then reports the section missing and
+ * fails closed.
  */
 function headingOffsets(content: string, title: string): Array<number> {
   const offsets: Array<number> = [];
   let fence: string | null = null;
   let inComment = false;
   let offset = 0;
-  for (const line of content.split("\n")) {
+  for (const raw of content.split("\n")) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const marker = FENCE.exec(line)?.[1];
     if (inComment) inComment = !line.includes("-->");
     else if (fence !== null) {
@@ -237,7 +241,7 @@ function headingOffsets(content: string, title: string): Array<number> {
     } else if (ATX_HEADING.exec(line)?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
       offsets.push(offset);
     }
-    offset += line.length + 1;
+    offset += raw.length + 1;
   }
   return offsets;
 }

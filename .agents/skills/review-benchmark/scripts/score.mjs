@@ -4046,7 +4046,7 @@ function requireCurrentKeys(pairsDoc, keys) {
     if (key === undefined) {
       if (entry.split === 'heldout') {
         fail(
-          `${keyFile(keys, entry.case)} is missing: report --keys reads the key of every held-out case from the keys folder; copy the key there and run score.mjs pairs again`,
+          `${keyFile(keys, entry.case)} is missing: --keys reads the key of every held-out case from the keys folder; copy the key there and run score.mjs pairs again`,
         );
       }
       continue;
