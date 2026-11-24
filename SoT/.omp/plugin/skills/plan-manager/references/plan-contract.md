@@ -294,20 +294,24 @@ agents define the exact block they return, and that block follows these rules.
 - A verdict line holds `plan-review:` or `code-review:`, then a verdict word.
   A space can replace the hyphen. After quote and list markers, the line
   starts with the label, with only `*`, `_`, or backtick runs between its parts
-  and no white space, then white space and the verdict word, the whole token
-  without closing punctuation: a word (letters and digits joined by hyphens)
+  and no white space, then white space and the verdict word: the whole token up
+  to white space, without closing punctuation at its end (so `pass.2` is one
+  token), that is a word (letters and digits joined by hyphens)
   with optional `*` or `_` runs outside and one optional backtick pair right
   around it, so a code span keeps its content. The runs of the label and of the
   word must pair up in order, as in `**Code-review:** pass` or
   `**Code-review: pass**`. Any other line, such as `Code-review:_pass`,
   `Code-review: pa_ss`, or `Code-review: pass2`, reads as an unknown word.
 - On each line, the helper ignores Markdown emphasis (`*`, `_`), code marks,
-  blockquote markers, and list markers when it reads a kind or a verdict.
+  blockquote markers, and list markers when it reads a kind, a heading, or a
+  severity.
 - The helper reads blocks, verdicts, and severities only above the first line
   `#### Manager response to round <k>` that starts at the first column outside
-  a fenced code block, in every contract version. So a finding that the
-  response quotes cannot change the verdict, and a heading that a block quotes
-  in a quote, a list item, an indent, or a fence cannot cut off a later block.
+  a fenced code block whose opening fence starts at the first column, in every
+  contract version. So a finding that the response quotes cannot change the
+  verdict, and a heading that a block quotes in a quote, a list item, an
+  indent, or such a fence cannot cut off a later block. A fence that opens after
+  spaces is text, so a first-column heading inside it does cut off the rest.
 
 | Verdict input | Plan result | Code result |
 |---|---|---|

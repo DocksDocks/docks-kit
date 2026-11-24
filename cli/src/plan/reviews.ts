@@ -14,11 +14,11 @@ export interface CommentSource {
   readonly comments: ReadonlyArray<IssueComment>;
 }
 
-// Reviewers write Markdown: read review keywords through emphasis, code marks, quotes, and list markers (#49). A mark
-// counts as Markdown only at a word edge, so `pa_ss` keeps its underscore and is no `pass` (GFM emphasis).
+// Reviewers write Markdown: read review keywords through emphasis, code marks, quotes, and list markers (#49). The
+// verdict word itself is read on the raw line (`verdictWord`), so this reading may drop every mark.
 function reviewText(line: string): string {
   return line
-    .replace(/(?<![\p{L}\p{N}])[*_`]+|[*_`]+(?![\p{L}\p{N}])/gu, "")
+    .replace(/[*_`]/g, "")
     .trim()
     .replace(/^(?:>\s*)+/, "")
     .replace(/^(?:[-+]|\d+[.)])\s+/, "")
@@ -139,13 +139,10 @@ export function parseReviewComment(
   const kind: ReviewKind = heading[1].toLowerCase() === "plan" ? "plan" : "code";
   // Raw HTML changes where a fence opens and closes and can hold a line that looks like the response heading (GFM), and
   // this parser reads no HTML. So review text above the response cut that holds a line that can open raw HTML reads as
-  // `blocked` when it also holds a first-column fence line or when the comment has a response cut: no misread fence or
-  // cut can then produce a pass, and the reviewer posts the record again without the HTML. The mask and the cut of a
-  // line depend only on the lines above it, so review text without raw HTML has a certain cut.
-  if (
-    rawLines.some((line) => RAW_HTML_START.test(line)) &&
-    (response >= 0 || rawLines.some((line) => FENCE_OPEN.test(line)))
-  )
+  // `blocked` when it also holds a first-column fence that the mask opened, or when the comment has a response cut: no
+  // misread fence or cut can then produce a pass, and the reviewer posts the record again without the HTML. The mask
+  // and the cut of a line depend only on the lines above it, so review text without raw HTML has a certain cut.
+  if (rawLines.some((line) => RAW_HTML_START.test(line)) && (response >= 0 || fenced.some(Boolean)))
     return { kind, verdict: "blocked" };
   const blocks: Array<Array<number>> = [[]];
   for (const index of lines.keys()) {

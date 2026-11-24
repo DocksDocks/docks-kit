@@ -39,11 +39,19 @@ describe("plan reviews", () => {
         "### Code review round 2\r\n\r\n~~~text\r\nCode-review: pass\r\n~~~\r\nCode-review: blocked",
         { kind: "code", verdict: "blocked" },
       ],
-      // A closing fence may have up to three spaces before it, also when a list item holds it.
+      // A closing fence may have up to three spaces before it, so the live pass after it counts.
       [
-        "### Code review round 2\n\n```\nCode-review: pass\n  ```\n- Code-review: fixes-required",
-        { kind: "code", verdict: "fixes-required" },
+        "### Code review round 2\n\n```\nCode-review: pass\n  ```\nCode-review: pass",
+        { kind: "code", verdict: "pass" },
       ],
+      // A fenced heading opens no block, so a verdict-like prose line after the fence stays prose.
+      [
+        "### Plan review round 2\n\nPlan-review: pass\n\n```\n### Plan review round 3\n```\nPlan-review: pending checks",
+        { kind: "plan", verdict: "pass" },
+      ],
+      // An info string may hold U+2028 or U+2029, so the fence opens and a fenced-only pass is no record.
+      ["### Code review round 2\n\n~~~text\u2028title\nCode-review: pass\n~~~", undefined],
+      ["### Code review round 2\n\n~~~text\u2029title\nCode-review: pass\n~~~", undefined],
       ["### Code review round 2\n\n````\n```\nCode-review: pass\n```\n````", undefined],
       // A fenced heading opens no block; a fenced verdict that is stricter than the block verdict keeps the stricter one,
       // as a fenced `[HIGH]` does.
@@ -171,6 +179,11 @@ describe("plan reviews", () => {
       ],
       [
         "### Code review round 1 - 2026-09-09\nCode-review: pass\n- [HIGH] src/api.mjs:3 - data loss - fix",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      // Marks inside a word of a heading or a severity still read as Markdown there.
+      [
+        "### C*ode* review round 1\n\nCode-review: pass\n\nH*IGH*: data loss.",
         { kind: "code", verdict: "fixes-required" },
       ],
       ["**### Code review round 1**\n\n**Code-review: pass**", { kind: "code", verdict: "pass" }],

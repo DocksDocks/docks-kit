@@ -20,7 +20,7 @@
   column, no longer counts as a heading or a verdict; a fenced verdict that is
   stricter still counts. The manager response starts only at a first-column
   heading outside a fence. A review comment that holds raw HTML and a fence
-  reads as `blocked`.
+  above the manager response reads as `blocked`.
 - The plan record check also finds a machine path after `*` and `|`.
 - `new` works when GitHub answers the viewer and the plan labels without node
   ids.

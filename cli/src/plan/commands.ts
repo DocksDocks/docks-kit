@@ -1075,8 +1075,9 @@ interface MutationCall {
 
 // The first write request reopens the plan and claims an unassigned plan, so the claim lands with the state change. It
 // changes no label that the plan holds; only when the plan has no phase label, as after a finished archive, does it add
-// `plan:ongoing`. Before it, the pre-write read and a last GraphQL read compare the close, the body, the base and phase
-// labels, and the owners with the settled read: a change refuses, and a foreign owner is refused by name. GitHub runs later
+// `plan:ongoing`. Before it, the pre-write read compares the close, the body, and the base and phase labels with the
+// settled read and refuses a foreign owner by name; the acting login may have become an owner. The last GraphQL read
+// then must show the owners of the pre-write read, or the reopen refuses. GitHub runs later
 // fields after a failed field, so `comment` goes in a second request, after the reopen landed: a failed reopen posts no
 // "Reopened:" comment. Right before the comment, a GraphQL read must show an open plan with the base label, exactly the
 // expected phase label, and the acting login as its single owner; a plan that reads closed again was closed by someone
@@ -1096,8 +1097,8 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   const phaseLabelId = restoresPhase
     ? (labelIds?.get("plan:ongoing") ?? (yield* createdLabelId("plan:ongoing")))
     : undefined;
-  // The pre-write read: the observed close, the body, the base label that the open plan needs, the settled phase
-  // labels, and the owners. Ownership follows this read: an owner that appeared is refused by name.
+  // The pre-write read: the observed close, the body, the base label that the open plan needs, and the settled phase
+  // labels. An owner other than the snapshot owners and the acting login is refused by name.
   const before = yield* preWriteIssue(issue.number);
   yield* attempt(() =>
     refuseStuck({
