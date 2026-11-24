@@ -61,7 +61,7 @@ a successful retirement runs no uninstall and no removal.
 
 After a plugin operation, the sync prints one line that names each operation,
 for example
-`omp plugins synced: docks@docks uninstalled, plan-lifecycle@docks uninstalled, docks marketplace removed, pi-intercom 0.14.0 (new), docks-kit-omp linked`.
+`omp plugins synced: docks@docks uninstalled, plan-lifecycle@docks uninstalled, docks marketplace removed, pi-intercom 0.19.0 (new), docks-kit-omp linked`.
 Each uninstall sets the restart next step
 `Restart omp to load any refreshed plugins, skills, or tools.`, because the
 retired plugins ship extensions, and omp loads extensions only at startup. An

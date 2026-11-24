@@ -31,7 +31,12 @@ describe("toolchain report", () => {
       try {
         expect(run.exitCode).toBe(0);
         const omp = run.stdout.split("\n").find((line) => line.startsWith("omp "));
-        expect(omp).toMatch(/^omp\s+check\s+\?\s+19\.0\.0\s+19\.0\.0\s+unknown$/);
+        const [floor, verified] = [floorVersion("omp"), verifiedVersion("omp")].map((version) =>
+          version.replaceAll(".", "\\."),
+        );
+        expect(omp).toMatch(
+          new RegExp(`^omp\\s+check\\s+\\?\\s+${floor}\\s+${verified}\\s+unknown$`),
+        );
       } finally {
         rmSync(run.home, { recursive: true, force: true });
       }
