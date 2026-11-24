@@ -8,8 +8,8 @@
  *
  * Commands:
  *   (default)  Read what omp loads: the linked package, the skills, the task-tool agents, and the warnings.
- *   hooks      Drive the verify-gate and context-tree-nudge extensions in `omp -p` sessions in a scratch git
- *              repository. The fake model plays scripted tool calls. Prints `ok <name>` or
+ *   hooks      Drive the verify-gate, context-tree-nudge, and hygiene extensions in `omp -p` sessions in a
+ *              scratch git repository. The fake model plays scripted tool calls. Prints `ok <name>` or
  *              `FAIL <name>: <reason>` for each check.
  *
  * Usage: bun .agents/skills/verify/scripts/omp-smoke.ts [hooks] [--repo <path>]
@@ -731,6 +731,9 @@ const TRAILER = "Verified: none - probe";
 /** The log keeps metadata only; none of these texts of the commands may appear in it. */
 const SECRET_TEXTS = ["git commit", "fix typo", "Verified", "probe"];
 const LOG_FIELDS = ["cwd", "message_sources", "mode", "session_id", "time"];
+/** The `scratch_new` tool description and the reminder after a temporary directory prefer scratch over /tmp. */
+const SCRATCH_TOOL_TEXT = "Prefer it over /tmp";
+const SCRATCH_REMINDER_TEXT = "Prefer a directory from the `scratch_new` tool";
 
 /** The files of the scratch git repository: a root README.md and a nested `scripts` context-tree node. */
 const FIXTURE_FILES: Readonly<Record<string, string>> = {
@@ -1081,6 +1084,34 @@ async function hooks(): Promise<string[]> {
   quiet("nudge-root-edit-none", "nudge-root", false);
   quiet("nudge-failed-edit-none", "nudge-failed", true);
   quiet("nudge-url-write-none", "nudge-url", false);
+
+  // Hygiene: the request lists `scratch_new` as preferred over /tmp, and a `mktemp -d` result gets the reminder.
+  const requestsBefore = run.requests.length;
+  const hygiene = await session("hygiene", { turns: [bash("hygiene-mktemp", "mktemp -d")] });
+  // omp lists an extension tool such as `scratch_new` in the system prompt as "- `<name>` — <description>".
+  const scratchLine = run.requests
+    .slice(requestsBefore)
+    .flatMap((request) => objects(request["messages"]))
+    .filter((message) => message["role"] === "system" || message["role"] === "developer")
+    .flatMap((message) => textOf(message["content"]).split("\n"))
+    .find((line) => line.startsWith("- `scratch_new` — "));
+  check(
+    "hygiene-scratch-tool",
+    scratchLine === undefined
+      ? "no request lists the scratch_new tool"
+      : scratchLine.includes(SCRATCH_TOOL_TEXT)
+        ? null
+        : `the scratch_new line lacks '${SCRATCH_TOOL_TEXT}': ${short(scratchLine)}`,
+  );
+  const temp = callOutcome(hygiene.messages, "hygiene-mktemp");
+  if (!temp) check("hygiene-temp-reminder", "no tool result in the event stream");
+  else
+    check(
+      "hygiene-temp-reminder",
+      temp.context.some((line) => line.includes(SCRATCH_REMINDER_TEXT))
+        ? null
+        : `no added-context message with '${SCRATCH_REMINDER_TEXT}' after the tool result`,
+    );
 
   const warnings = countWarnings(
     [],

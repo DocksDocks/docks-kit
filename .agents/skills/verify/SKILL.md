@@ -2,7 +2,7 @@
 name: verify
 description: "Use when checking a change to docks-kit end to end: run the CLI the way a user does (sync dry run, toolchain doctor, removed target and flag), the dry-run goldens, the real omp on the kit trigger rules, and the kit plugin smoke in an isolated omp state, and inspect exit codes and output lines. Not for unit tests (run `bun run test:unit`), lint, or a release."
 metadata:
-  updated: "2026-11-20"
+  updated: "2026-11-23"
 ---
 
 # Verify docks-kit
@@ -29,13 +29,13 @@ Hosts: the commands below are POSIX shell for Linux and macOS. On Windows, run `
 | V3 | Dry-run goldens through the engine and the public CLI | `bun run golden:dryrun` | A line `golden-dryrun: OK (<n> case(s))` and exit 0 |
 | V4 | Removed sync target and flag | `./docks-kit sync omp --dry-run; echo "exit $?"; ./docks-kit sync --dry-run --prune; echo "exit $?"` | First the sync help on stdout, then `ERROR` and `Unexpected positional argument: "omp"` on stderr, and `exit 1`. Then `unknown flag --prune for 'sync'` and `exit 2`. Observed 2026-11-19 on Linux x64: exactly these lines |
 | V5 | Trigger rules on a large tool call, in the real omp | `bun .agents/skills/verify/scripts/ttsr-snippet.ts big-reset \| omp ttsr test --rule SoT/.omp/plugin/rules/git-safety.md --source tool --tool eval --file -`, then the same command with `big-quiet` | For `big-reset`, `Triggered (1)` and a `git-safety` line within a few seconds. For `big-quiet`, `No rules triggered. (evaluated 1)`. The `big-reset` snippet is a 21 KB eval cell with many `\"` escapes that ends with `sh("git reset --hard HEAD")`. The rules of 0.22.29 stayed quiet on it after 4.7 s: JavaScriptCore stopped at its match limit and reported no match, so the rule failed open |
-| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 18 `ok` lines of the V6 section below and `exit 0`. Observed 2026-11-20 on Linux x64 with omp 19.0.1: exactly these lines; the load mode took 2 s and the `hooks` mode 3 s |
+| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 20 `ok` lines of the V6 section below and `exit 0`. Observed 2026-11-23 on Linux x64 with omp 19.1.1: exactly these lines; the load mode took 2 s and the `hooks` mode 4 s |
 
 ## V6 — Kit plugin smoke in an isolated omp state
 
 `omp-smoke.ts` creates a docks-kit scratch folder and makes all omp state of the run live there. omp gets only `PATH`, `USER`, `LANG`, `LC_*`, and `TERM` from the environment, so no credential and no omp session variable reaches it. It also gets `HOME` set to a home folder in the scratch folder, `PI_CONFIG_DIR` set to a config root relative to that home, and `XDG_STATE_HOME` and `TMPDIR` set to scratch folders. The scratch home holds a fresh `.cache/docks-kit/tidy.stamp`, so the session-start sweep of `hygiene.ts` (`docks-kit tidy --apply`) is not due and does not start. The script starts a fake local OpenAI-compatible model, runs `omp plugin link <checkout>/SoT/.omp/plugin`, and finds the package through the npm row `docks-kit-omp` of `omp plugin list --json`. It removes the scratch folder at the end, also after a failure. The run writes nothing outside the scratch folder: the real `~/.omp`, the real `~/.cache/docks-kit`, and the real `verify-gate.jsonl` stay unchanged. Use `--repo <path>` to test another checkout.
 
-The load mode reads `omp skill list --json` and the task tool of one `omp -p` session. It counts the skills whose file is inside the linked plugin folder (the 32 skills moved from DocksDocks/docks and `workspace-hygiene`), and it lists the plugin agents that the task tool offers. The `hooks` mode makes a scratch git repository with its own git config. The repository holds a root `AGENTS.md`, a root `README.md`, `notes.txt`, and the nested node `scripts/AGENTS.md` with `scripts/ci.mjs`. The fake model plays scripted tool calls in `omp -p --mode json` sessions, and the script reads the JSON event stream, `git log`, and the `verify-gate.jsonl` log of each session. Each session has its own `XDG_STATE_HOME` in the scratch folder. Expected output of the `hooks` mode, in order:
+The load mode reads `omp skill list --json` and the task tool of one `omp -p` session. It counts the skills whose file is inside the linked plugin folder (the 32 skills moved from DocksDocks/docks and `workspace-hygiene`), and it lists the plugin agents that the task tool offers. The `hooks` mode makes a scratch git repository with its own git config. The repository holds a root `AGENTS.md`, a root `README.md`, `notes.txt`, and the nested node `scripts/AGENTS.md` with `scripts/ci.mjs`. The fake model plays scripted tool calls in `omp -p --mode json` sessions, and the script reads the JSON event stream, the requests that the fake model receives, `git log`, and the `verify-gate.jsonl` log of each session. Each session has its own `XDG_STATE_HOME` in the scratch folder. Expected output of the `hooks` mode, in order:
 
 ```text
 ok install
@@ -52,6 +52,8 @@ ok nudge-node-edit
 ok nudge-root-edit-none
 ok nudge-failed-edit-none
 ok nudge-url-write-none
+ok hygiene-scratch-tool
+ok hygiene-temp-reminder
 ok extensions-loaded
 ok sessions
 ok isolated
@@ -71,6 +73,8 @@ exit 0
 | `nudge-root-edit-none` | `edit` of the root `README.md` | The edit succeeds. No added-context message follows. |
 | `nudge-failed-edit-none` | `edit` of `scripts/ci.mjs` with the stale snapshot tag of the first read | The edit fails. No added-context message follows. |
 | `nudge-url-write-none` | `write` to `local://notes.md`; the session folder is inside the `scripts` node | The write succeeds. No added-context message follows. |
+| `hygiene-scratch-tool` | The requests of a session with one `bash` `mktemp -d` call | A request lists the `scratch_new` tool with `Prefer it over /tmp`. |
+| `hygiene-temp-reminder` | Same session: the `mktemp -d` result | After the tool result, an added-context message holds the reminder `Prefer a directory from the \`scratch_new\` tool`. |
 | `extensions-loaded` | All sessions | omp reported no warning that names the linked plugin folder or `docks-kit-omp`, and no `Failed to load extension` record for a plugin file, `hygiene.ts` included. |
 | `isolated` | The whole run | The `tidy.stamp` of the scratch home kept its modification time, so no hygiene sweep started. |
 | `real-state` | The whole run | The real omp registry files kept their modification times. The real `verify-gate.jsonl` has no new line with a `cwd` inside the scratch folder. Lines that other omp sessions add during the run do not count. |
@@ -87,3 +91,4 @@ A `FAIL <reason>` line in the load mode, or a `FAIL <name>: <reason>` line in th
 | V6 prints `skills:` other than `33`, or misses an agent | omp did not load a skill or agent file of `SoT/.omp/plugin`, or a folder moved | Check the folders under `SoT/.omp/plugin/skills/` and `SoT/.omp/plugin/agents/`, and the `name` frontmatter of each `SKILL.md` and agent file |
 | V6 prints `FAIL extensions-loaded` or `warnings:` above `0` with `Failed to load extension` | A kit extension throws when omp loads it | Fix the file that the `FAIL` line names in `SoT/.omp/plugin/extensions/` |
 | V6 prints a `FAIL gate-` or `FAIL nudge-` line | The gate or the nudge acted on the wrong command, path, or node | Check `checkCommand` in `SoT/.omp/plugin/extensions/verify-gate-core.ts` or `nudgeText` in `SoT/.omp/plugin/extensions/context-tree-core.ts`, and their adapters `verify-gate.ts` and `context-tree-nudge.ts` |
+| V6 prints a `FAIL hygiene-` line | The `scratch_new` description or the temporary-file reminder lost its preference for scratch, or the reminder did not run | Check the `scratch_new` description and `SCRATCH_NOTE` in `SoT/.omp/plugin/extensions/hygiene.ts` |

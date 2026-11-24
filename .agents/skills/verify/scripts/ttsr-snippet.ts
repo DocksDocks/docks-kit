@@ -33,8 +33,8 @@ const SNIPPETS = {
   "small-reset": () => evalCell(RESET_LINE),
   /** Fires temp-and-background on a bash call. */
   "small-tmux": () => ({ command: "tmux new -d -s x" }),
-  /** Fires file-removal through a `KEY=value` word before `rm`. */
-  "small-env-rm": () => ({ i: "T", command: "LC_ALL=C rm old-file" }),
+  /** Fires file-removal through a `KEY=value` word before a recursive `rm`. */
+  "small-env-rm": () => ({ i: "T", command: "LC_ALL=C rm -r old-dir" }),
   /** Stays quiet: the trigger words appear only in the intent field. */
   "small-correct": () => ({ i: "Checking rm and git push --force", command: "git status" }),
 } as const satisfies Record<string, () => object>;

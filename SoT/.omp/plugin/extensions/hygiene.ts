@@ -186,7 +186,7 @@ const STASH_WITHOUT_ENTRY: Record<string, true> = {
 
 const RM_NOTE = "Add `--rm` to `docker run` so that Docker removes the container when it stops.";
 const SCRATCH_NOTE =
-  "Create temporary files and directories inside a directory from the `scratch_new` tool or `docks-kit scratch new <label>`, not in `/tmp`.";
+  "Prefer a directory from the `scratch_new` tool or `docks-kit scratch new <label>` for temporary files and directories, over `/tmp`.";
 const KEEP_SENTENCE =
   "Remove each resource that the task no longer needs. Keep a resource only when the user asked for it or a later step needs it, and name it with the reason in your final answer. Never stop or delete a production resource without an ask in the main session.";
 
@@ -2132,7 +2132,7 @@ export default function docksKitOmp(pi: ExtensionApi): void {
     name: "scratch_new",
     label: "Scratch New",
     description:
-      "Create a private temporary directory under the docks-kit scratch root and return its path. Use it instead of /tmp, also for a single temporary file. Remove it with scratch_remove when the task no longer needs it.",
+      "Create a private temporary directory under the docks-kit scratch root and return its path. Prefer it over /tmp, also for a single temporary file. Remove it with scratch_remove when the task no longer needs it.",
     parameters: z.object({
       label: z.string().describe("Short name: letters, digits, dot, underscore, or hyphen"),
     }),
