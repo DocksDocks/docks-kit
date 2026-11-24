@@ -212,8 +212,13 @@ describe("omp command", () => {
       const firstOverlay = readFileSync(firstPath, "utf8");
       expect(parse(firstOverlay)).toMatchObject({
         defaultThinkingLevel: "high",
-        modelRoles: { default: `${selector}:high`, advisor: `${selector}:high` },
-        retry: { fallbackChains: { default: [] } },
+        modelRoles: {
+          default: `${selector}:high`,
+          advisor: `${selector}:high`,
+          code_reviewer: `${selector}:high`,
+          plan_reviewer: `${selector}:high`,
+        },
+        retry: { fallbackChains: { default: [], code_reviewer: [], plan_reviewer: [] } },
       });
       const argvLog = join(first.home, ".golden-argv.log");
       expect(readFileSync(argvLog, "utf8").trim().split("\n")).toEqual([
