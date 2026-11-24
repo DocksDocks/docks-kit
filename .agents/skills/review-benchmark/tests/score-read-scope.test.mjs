@@ -201,6 +201,30 @@ test('readScope probes the file system for a literal path only for a search path
   score.readScope([{ name: 'grep', path: listed }], scope);
   assert.equal(probes(listed), 1);
 });
+// Code review round 8 of plan #216: the rules of the read scope read a path as the reviewer wrote it (a `..` after a
+// glob segment, a `..` in an installed skill path), so a call reuses a scope verdict only for the same spelling.
+test('a scope verdict belongs to the spelling of a path, not only to the path that it reaches', () => {
+  const searched = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: SCOPE_CASE, pluginRoots: [LIVE_PLUGIN] };
+  const globs = [{ name: 'glob', path: 'snapshot/*.json;snapshot/**/../*.json' }];
+  assert.deepEqual(score.readScope(globs, searched), { outside: ['snapshot/**/../*.json'] });
+  const kitPackage = '/home/user/.omp/plugins/node_modules/docks-kit-omp/skills';
+  const scope = {
+    runDir: `${SCOPE_CASE}/C3-low/run-1`,
+    cwd: `${kitPackage}/unslop`,
+    pluginRoots: [LIVE_PLUGIN],
+    heldSkills: ['code-reviewer', 'plan-manager', 'plan-reviewer'],
+  };
+  const allowed = `${kitPackage}/code-review/SKILL.md`;
+  const relative = '../code-review/SKILL.md';
+  for (const members of [
+    [allowed, relative],
+    [relative, allowed],
+  ]) {
+    const target = members.join(', ');
+    const lists = new Map([[target, members]]);
+    assert.deepEqual(score.readScope(reads(target), { ...scope, lists }), { outside: [target] }, target);
+  }
+});
 test('readScope allows the inputs of the run, the instructions of the reviewer, and other web pages', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
   const allowed = [

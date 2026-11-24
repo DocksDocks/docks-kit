@@ -215,6 +215,23 @@ test('a grep, glob, or ast_grep path that names an existing path as a whole is o
   ];
   assert.deepEqual(listReadScope(fixture, calls), { outside: [] });
 });
+// Code review round 8 of plan #216: one `transcripts` call shares its file checks between the choice of targets, the
+// list inference, and the read scope, so the ranged grep under `bench-gpt;7` checks its literal path once.
+test('transcripts checks the literal path of a ranged search under a `;` workspace once', () => {
+  const fixture = listCase(scratch(), 'bench-gpt;7');
+  const { snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const literal = `${path.join(snapshot, 'src', 'a.mjs')}:1-20`;
+  const lstat = vi.spyOn(fs, 'lstatSync');
+  const exists = vi.spyOn(fs, 'existsSync');
+  onTestFinished(() => {
+    lstat.mockRestore();
+    exists.mockRestore();
+  });
+  assert.deepEqual(listReadScope(fixture, [['grep', { pattern: 'lock', path: literal }]]), { outside: [] });
+  const checks = [...lstat.mock.calls, ...exists.mock.calls].filter(([file]) => file === literal).length;
+  assert.equal(checks, 1);
+});
 // Plan #216, R61: the split of a search path depends on the files at the time of the call, so the files that the
 // tool result shows decide too. A file outside the inputs that the search showed stays outside after it is gone.
 test('a search result file outside the inputs is outside, also when the file is gone after the call', () => {

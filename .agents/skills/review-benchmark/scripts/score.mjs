@@ -3516,26 +3516,48 @@ function splitSelector(rawPath, fold = true) {
 // Whether omp finds a local path: `exists`, `missing`, or `unknown` for another error of the check, as
 // probeLiteralPathExists of omp 19.0.0 checks it with `lstat` (a link counts, also a dangling one). A relative path
 // without a working directory is `missing`: the check cannot find it.
+const MISSING_CODES = ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'];
 function literalProbe(target, cwd) {
-  const file = ompFile(target, cwd);
-  if (typeof file !== 'string') return 'missing';
-  try {
-    fs.lstatSync(file);
-    return 'exists';
-  } catch (error) {
-    return ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'].includes(error?.code) ? 'missing' : 'unknown';
-  }
+  return cachedProbe(cwd)(target);
 }
 
-// literalProbe for the working directory `cwd` that checks each file once: the read scope probes the same path for
-// the pick of omp and for its other interpretations within one call.
+// literalProbe for the working directory `cwd` that checks each file once. `probe.exists(target)` tells, as
+// `fs.existsSync` does, whether the path exists after its links: after an `lstat` of the path it reuses that result
+// (a path that is missing, or that is no link, needs no other check), else it asks `fs.existsSync` once.
+// transcriptsCommand gives one probe to the list inference and the read scope of a transcript, so the choice of
+// targets, the lists, and the scope check each file once (the files do not change while the command runs).
 function cachedProbe(cwd) {
   const seen = new Map();
-  return (target) => {
-    const key = ompFile(target, cwd) ?? target;
-    if (!seen.has(key)) seen.set(key, literalProbe(target, cwd));
-    return seen.get(key);
+  const followed = new Map();
+  const keyOf = (target) => ompFile(target, cwd) ?? target;
+  const probe = (target) => {
+    const key = keyOf(target);
+    if (!seen.has(key)) {
+      const file = ompFile(target, cwd);
+      let found = { probe: 'missing' };
+      if (typeof file === 'string') {
+        try {
+          found = { probe: 'exists', link: fs.lstatSync(file).isSymbolicLink() };
+        } catch (error) {
+          found = { probe: MISSING_CODES.includes(error?.code) ? 'missing' : 'unknown' };
+        }
+      }
+      seen.set(key, found);
+    }
+    return seen.get(key).probe;
   };
+  probe.exists = (target) => {
+    const key = keyOf(target);
+    const found = seen.get(key);
+    if (found?.probe === 'missing') return false;
+    if (found?.probe === 'exists' && !found.link) return true;
+    if (!followed.has(key)) {
+      const file = ompFile(target, cwd);
+      followed.set(key, typeof file === 'string' && fs.existsSync(file));
+    }
+    return followed.get(key);
+  };
+  return probe;
 }
 
 // The local path that omp opens for a target of a read or a search, and its selector, as
@@ -3598,7 +3620,7 @@ function existingInterpretations(text, name, probe, always = false) {
 function pathTargets(name, value, cwd, probe = cachedProbe(cwd)) {
   const trimmed = value.trim();
   if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
-  if (trimmed.includes(';') && ompPathExists(ompSplitTarget(trimmed, cwd, probe).path, cwd)) return [trimmed];
+  if (trimmed.includes(';') && probe.exists(ompSplitTarget(trimmed, cwd, probe).path)) return [trimmed];
   return value
     .split(';')
     .map((part) => part.trim())
@@ -3650,11 +3672,6 @@ function ompFile(target, cwd) {
   return typeof cwd === 'string' ? path.resolve(cwd, target) : null;
 }
 
-function ompPathExists(target, cwd) {
-  const file = ompFile(target, cwd);
-  return typeof file === 'string' && fs.existsSync(file);
-}
-
 // A local path whose file, or for a glob the folder before its first glob segment, does not exist. A URI, and a
 // relative path without a working directory, is no missing path: the check cannot find its file.
 function pathMissing(target, cwd) {
@@ -3667,20 +3684,20 @@ function pathMissing(target, cwd) {
 // the target as a list of paths (see LIST_SPLITS), each with its read selector, or null when omp reads the target as
 // one path. A target whose whole path exists, as written or without its read selector, is one path, also when it
 // holds a delimiter: for example a file whose name holds a space or a `;`, or a workspace folder with a space.
-function delimitedParts(target, cwd, name) {
+function delimitedParts(target, cwd, name, probe = cachedProbe(cwd)) {
   if (splitPathList(target, ANY_DELIMITER) === null) return null;
   if (uriScheme(target) !== undefined) {
     const parts = splitPathList(target, URI_DELIMITER);
     return parts !== null && parts.length > 1 && parts.every((part) => uriScheme(part) !== undefined) ? parts : null;
   }
-  if (ompPathExists(target, cwd) || ompPathExists(target.replace(OMP_SELECTOR, ''), cwd)) return null;
+  if (probe.exists(target) || probe.exists(target.replace(OMP_SELECTOR, ''))) return null;
   // omp reads `<file>?q=<filter>` of a `read` call as one file with a JSON query, also when the filter holds a
   // delimiter; a search path has no JSON query.
-  if (name === READ_TOOL && ompPathExists(target.replace(JSON_QUERY_SELECTOR, ''), cwd)) return null;
+  if (name === READ_TOOL && probe.exists(target.replace(JSON_QUERY_SELECTOR, ''))) return null;
   const exists = (part) => {
     const scheme = uriScheme(part);
     if (scheme !== undefined) return !WEB_SCHEMES.has(scheme);
-    return ompPathExists(globParts(part.replace(OMP_SELECTOR, '')).base, cwd);
+    return probe.exists(globParts(part.replace(OMP_SELECTOR, '')).base);
   };
   for (const { delimiter, existing } of LIST_SPLITS) {
     const parts = splitPathList(target, delimiter);
@@ -3738,14 +3755,14 @@ function toolCallResults(entries) {
 // delimitedParts); readLists checks them when it runs, after the session. Without a record, readLists cannot see which
 // paths omp could not read, so each path of the split counts. When two calls give paths for the same target, the map
 // keeps the paths of both.
-function readLists({ calls, results }, cwd) {
+function readLists({ calls, results }, cwd, probe = cachedProbe(cwd)) {
   const lists = new Map();
   for (const call of calls) {
     const value = call.arguments?.path;
     if (typeof value !== 'string') continue;
     const recorded = call.name === READ_TOOL ? recordedParts(results.get(call.id)?.details) : null;
-    for (const target of pathTargets(call.name, value, cwd)) {
-      const parts = recorded ?? delimitedParts(target, cwd, call.name);
+    for (const target of pathTargets(call.name, value, cwd, probe)) {
+      const parts = recorded ?? delimitedParts(target, cwd, call.name, probe);
       if (parts === null) continue;
       lists.set(target, distinct([...(lists.get(target) ?? []), ...parts]));
     }
@@ -4003,6 +4020,7 @@ export function readScope(
     heldSkills = [],
     changedFiles = [],
     lists = new Map(),
+    probe = cachedProbe(cwd),
   },
 ) {
   const rules = scopeRules(path.resolve(runDir), round, {
@@ -4032,9 +4050,10 @@ export function readScope(
       continue;
     }
     for (const file of shown) if (!targetAllowed(file, cwd, rules)) outside.add(`${name} result: ${file}`);
-    // One call probes each file once: the choice of targets, the pick of omp, and the other interpretations share the
-    // results of `probe`, and `check` gives each resolved path its scope verdict once.
-    const probe = cachedProbe(cwd);
+    // The file checks of `probe` are shared by the choice of targets, the pick of omp, the other interpretations, and
+    // the list inference of the transcript (transcriptsCommand gives readLists the same probe). `check` gives each
+    // path its scope verdict once per spelling: the rules read a path as it is written (a `..` after a glob segment, a
+    // `..` in an installed skill path), so two spellings of one file can differ.
     const targets = typeof value === 'string' ? pathTargets(name, value, cwd, probe) : [];
     if (!targets.length) {
       if (SEARCH_TOOLS.has(name)) outside.add(`${name} without a path`);
@@ -4045,9 +4064,8 @@ export function readScope(
     const searches = SEARCH_TOOLS.has(name);
     const verdicts = new Map();
     const check = (item) => {
-      const key = ompFile(item, cwd) ?? item;
-      if (!verdicts.has(key)) verdicts.set(key, targetAllowed(item, cwd, rules, searches));
-      return verdicts.get(key);
+      if (!verdicts.has(item)) verdicts.set(item, targetAllowed(item, cwd, rules, searches));
+      return verdicts.get(item);
     };
     // Each text whose interpretations that exist now must be allowed too, with `always` for a text that has no check
     // of its own: the whole path of a list tool and its `;` members outside `{}`, as omp splits them (see
@@ -4706,9 +4724,12 @@ export function transcriptsCommand(ws, sessionsDir) {
         const caseDir = path.join(ws, caseId);
         changedFiles ??= caseChangedFiles(caseDir, family, round, dir);
         const runDir = path.join(caseDir, arm, run);
-        const lists = readLists(tools, session.cwd);
+        // One probe for the list inference and the read scope of this transcript (see cachedProbe).
+        const probe = cachedProbe(session.cwd);
+        const lists = readLists(tools, session.cwd, probe);
         const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots]);
-        entry.readScope = readScope(toolCalls, { runDir, round, changedFiles, ...session, heldSkills, lists });
+        const options = { runDir, round, changedFiles, ...session, heldSkills, lists, probe };
+        entry.readScope = readScope(toolCalls, options);
       }
       const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
       const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd);
