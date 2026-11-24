@@ -4,8 +4,8 @@ description: "Use when reporting a problem with a skill, reviewer agent, omp ext
 user-invocable: true
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
-  content_hash: "e4ad7629b280e7ee70463bf349f2ccee0c03f4a452572ab72f2e05b429a07eda"
+  updated: "2026-11-24"
+  content_hash: "a54fcad30b35f5ecebd33d6c28d5c28e9522d66f9d5d6282e6f0556a2120789b"
 ---
 
 # Report a Skill Issue
@@ -13,7 +13,7 @@ metadata:
 The docks-kit kit plugin (`docks-kit-omp`) comes from the public GitHub repository DocksDocks/docks-kit. It holds the docks and plan-lifecycle skills, the reviewer agents, and the omp extensions. When one of its skills, reviewer agents, omp extensions, or scripts gives a wrong, outdated, or unsafe instruction, or a shipped script fails, this skill turns what you saw into one issue there. A useful report lets a maintainer reproduce the problem without access to the user's project. It identifies the exact skill text, quotes the instruction, and shows what happened. It contains nothing private, because anyone can read it.
 
 <constraint>
-DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. In a run where you cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user), print the draft and the prefilled URL as your final message and stop. The URL files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing in that run.
+DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. In a run where you cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user), print the draft and the link from "Without gh, or without a way to ask" as your final message and stop. The URL files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing in that run.
 </constraint>
 
 <constraint>
@@ -35,7 +35,9 @@ Report problems in what ships with the docks-kit kit plugin: skills, reviewer ag
 
 ## Workflow
 
-The goal is one approved, redacted, reproducible report. Each stage below states what it must establish; choose the commands that fit the runtime. Do every stage in order, also in a text-only run. Never skip the search in stage 3, because a duplicate report splits the evidence across two issues.
+The goal is one approved, redacted, reproducible report. Each stage below states what it must establish; choose the commands that fit the runtime. Do every stage in order, also in a text-only run. Do not skip the search in stage 3, because a duplicate report splits the evidence across two issues. When the runtime cannot search, stage 3 tells you what to write instead.
+
+Every gh command in this skill names the host `github.com`: `--repo github.com/DocksDocks/docks-kit`, `gh repo view github.com/<owner>/<repo>`, or `gh api --hostname github.com`. Without the host, `GH_HOST` can send the command to another GitHub host. Do not use `gh search issues`: its `--repo` flag takes no host.
 
 ### 1. Confirm that the problem is in the skill
 
@@ -70,15 +72,15 @@ docks-kit --version
 grep -E '^  (updated|content_hash):' skills/<skill>/SKILL.md
 ```
 
-The version and the hash tell the maintainer which text you read. Release tags have the form `cli-v<version>` (`gh release list --repo DocksDocks/docks-kit` lists them). If the user's version is older than the latest release, say so in the draft.
+The version and the hash tell the maintainer which text you read. Release tags have the form `cli-v<version>` (`gh release list --repo github.com/DocksDocks/docks-kit` lists them). If the user's version is older than the latest release, say so in the draft.
 
 ### 3. Search for an existing report
 
 Search open and closed issues with the skill name and two or three words from the symptom. Use only public words, because the query goes to GitHub.
 
 ```bash
-gh issue list --repo DocksDocks/docks-kit --state all --search "<skill name> <key words>"
-gh issue view <n> --repo DocksDocks/docks-kit --comments
+gh issue list --repo github.com/DocksDocks/docks-kit --state all --search "<skill name> <key words>"
+gh issue view <n> --repo github.com/DocksDocks/docks-kit --comments
 ```
 
 | Search result | Action |
@@ -87,6 +89,8 @@ gh issue view <n> --repo DocksDocks/docks-kit --comments
 | A closed issue fixed it in a later docks-kit version | File nothing; tell the user to update docks-kit (`docks-kit update`) |
 | A closed issue matches, and the problem is still in the latest version | Draft a new issue that links the closed one |
 | No match | Draft a new issue |
+
+Without gh, search in a browser at `https://github.com/search?q=repo%3ADocksDocks%2Fdocks-kit+is%3Aissue+<url-encoded key words>&type=issues`. A query without `state:` matches open and closed issues. If the runtime can run neither gh nor a web search, write the draft anyway. In the message that shows it, say that the duplicate search did not run, and give the search URL for the user to open before filing. Do not write that no report exists.
 
 ### 4. Draft the report
 
@@ -114,21 +118,21 @@ Show the user, as the final message of your turn:
 
 - the target: a new issue in DocksDocks/docks-kit, or a comment on issue #n there;
 - the exact title and body;
-- the command that you will run, and the GitHub account that it files under (`gh auth status` shows it).
+- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it).
 
 Ask the user to approve or change the text, then end your turn. A security problem stops before this step: give the private draft instead (see "Security problems").
 
 ### 6. File the approved text
 
-Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. File the text, remove both files, and give the user the URL that gh prints.
+Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. Run `gh api --hostname github.com user --jq .login`. If it prints an account other than the one in the approved message, file nothing: tell the user and get approval again. Otherwise file the text, remove both files, and give the user the URL that gh prints.
 
 ```bash
 title=$(mktemp)
 body=$(mktemp)
 # Write the approved title to "$title" and the approved body to "$body" with your file tool, then:
-gh issue create --repo DocksDocks/docks-kit --title "$(cat "$title")" --body-file "$body"
+gh issue create --repo github.com/DocksDocks/docks-kit --title "$(cat "$title")" --body-file "$body"
 # Or, for a comment on an existing issue:
-gh issue comment <n> --repo DocksDocks/docks-kit --body-file "$body"
+gh issue comment <n> --repo github.com/DocksDocks/docks-kit --body-file "$body"
 rm -- "$title" "$body"
 ```
 
@@ -138,11 +142,11 @@ If a filed issue or comment names a private repository or holds other private da
 
 ### Without gh, or without a way to ask
 
-Give a prefilled link when gh is missing or not logged in, or when the run cannot ask the user. Do not install gh, and do not ask for a token. The link opens the new-issue form with the text filled in:
+Give a prefilled link when gh is missing or not logged in to `github.com`, or when the run cannot ask the user. Do not install gh, and do not ask for a token. The link opens the new-issue form with the text filled in:
 
 `https://github.com/DocksDocks/docks-kit/issues/new?title=<url-encoded title>&body=<url-encoded body>`
 
-Build the link with a script, not by hand, so that it holds the exact title and body that you show. Write the title and the body to two temporary files as in stage 6, run one of these commands, and then remove both files. Each command strips one trailing newline from the title.
+Build the link with a script, not by hand, so that it holds the exact title and body that you show. Write the title and the body to two temporary files as in stage 6, run one of these commands, and then remove both files. Each command strips one trailing newline from the title. If the runtime cannot run a script, do not build the link: give the title and the body as text, as in the paragraph after the commands.
 
 ```bash
 # Node
@@ -160,7 +164,7 @@ A skill, agent, omp extension, or script that exposes secrets, runs unsafe comma
 1. Tell the user to rotate every credential that was exposed, now.
 2. Draft the report with every section of the template below, and put "Private security report" above the title. A private report needs the same facts as a public one.
 3. Give the draft to the user, to send privately to the repository owner (the DocksDocks account on GitHub). A private channel is not an issue, a comment, a discussion, or a pull request. Give no prefilled issue URL.
-4. If the repository accepts private vulnerability reports, the user can send the draft there instead. `gh api repos/DocksDocks/docks-kit/private-vulnerability-reporting` prints `{"enabled":true}` when it does; the form is in the repository's Security tab.
+4. If the repository accepts private vulnerability reports, the user can send the draft there instead. `gh api --hostname github.com repos/DocksDocks/docks-kit/private-vulnerability-reporting` prints `{"enabled":true}` when it does; the form is in the repository's Security tab.
 
 ## Template
 
@@ -252,12 +256,13 @@ Check the draft before you show it, and again before you file it:
 - Every template section is present; an empty section says `none`.
 - "What the skill says" quotes the instruction exactly, with its heading.
 - The quote comes from the copy that the runtime loaded, and it shows the problem.
-- You searched for an existing report (stage 3). A draft that adds to an existing issue is a comment on that issue.
-- Your message names the target, the command that you will run, and the GitHub account (stage 5). In a run where you cannot ask, it gives the prefilled URL instead.
+- You searched for an existing report (stage 3), or your message says that the search did not run and gives the search URL. A draft that adds to an existing issue is a comment on that issue.
+- Your message names the target, the command that you will run, and the GitHub account (stage 5). In a run where you cannot ask, it gives the link from "Without gh, or without a way to ask" instead.
 - The title and the body contain no secret value or token, no private repository, organization, customer, or person name, no internal hostname, no absolute machine path, no proprietary code or data, and no private plan or issue title. The second and third scans below check the repository names.
 - For a private project, the title and the body contain no owner or name of its remotes and no branch name, also in quoted output, and no `#` before its issue and pull request numbers in prose (stage 4).
 - The problem is not a security problem. If it is, give a private draft only.
-- The user approved this exact title and body after they saw it.
+
+Before you file, also check that the user approved this exact title and body after they saw it.
 
 Run these scans on files that hold the title and the body, as in stage 6. The first scan prints nothing when the files contain no machine path and no token-shaped string.
 
@@ -287,6 +292,9 @@ The scans find only patterns and the names that you give them. They do not find 
 - Creating an issue from a URL query: <https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-an-issue>
 - `gh repo view`: <https://cli.github.com/manual/gh_repo_view>
 - gh environment variables (`GH_HOST`, `GH_REPO`): <https://cli.github.com/manual/gh_help_environment>
+- `gh api`: <https://cli.github.com/manual/gh_api>
+- `gh auth status`: <https://cli.github.com/manual/gh_auth_status>
+- Searching issues: <https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests>
 - Autolinked references: <https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/autolinked-references-and-urls>
 - Edit history of a comment: <https://docs.github.com/en/communities/moderating-comments-and-conversations/tracking-changes-in-a-comment>
 

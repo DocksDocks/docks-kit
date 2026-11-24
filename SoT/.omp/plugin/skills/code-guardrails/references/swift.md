@@ -15,12 +15,13 @@
 - Check `Package.swift` for `SwiftLintBuildToolPlugin` or a SwiftLint package command plugin.
 - Check Xcode targets for a SwiftLint build tool plugin or a Run Script phase.
 - Find `.swift-format` if the project uses `swift-format`. Treat formatting as layout work, not lint coverage.
-- Run `command -v swiftlint` before proposing SwiftLint changes. Ask before installing it when absent.
+- If no package or Xcode plugin runs SwiftLint, run `command -v swiftlint` before proposing SwiftLint changes. Ask before installing it when absent.
 
 ## Recommended config
 
 Merge this `.swiftlint.yml` example into the existing file. Keep existing rules and stricter settings.
-Add only missing opt-in rules. Keep `disabled_rules` untouched and report any conflict before changing it.
+Add only missing rules. If the file has `only_rules`, add the missing rule IDs from the example, including `force_cast` and `force_try`, to that list and do not add `opt_in_rules`. SwiftLint rejects `only_rules` together with `opt_in_rules` or `disabled_rules`, and `only_rules` turns off each rule that it does not list. Otherwise, add the missing `opt_in_rules` entries.
+Keep `disabled_rules` untouched and report any conflict before changing it.
 Keep other config keys, including file scope and analyzer settings. Do not replace the file with this example.
 
 ```yaml
@@ -64,7 +65,7 @@ In tests, use production constants for inputs and a named `let` for each expecte
 
 | Rule | Catches | Limits |
 |---|---|---|
-| [`no_magic_numbers`](https://realm.github.io/SwiftLint/no_magic_numbers.html) | Raw numeric expressions, such as an array index or limit. | It excludes declarations, default allowed values, and all test code. It does not check repeated strings. |
+| [`no_magic_numbers`](https://realm.github.io/SwiftLint/no_magic_numbers.html) | Raw numeric expressions, such as an array index or limit. | It skips a literal that is the whole initializer of a declaration, default allowed values, and all test code. It reports a literal in an expression or a call argument, such as `8 * mibBytes` or `.seconds(30)`. It does not check repeated strings. |
 | [`force_unwrapping`](https://realm.github.io/SwiftLint/force_unwrapping.html) | Forced optional unwraps. | The example removes its default literal-initializer exceptions. It does not find raw values. |
 | [`implicitly_unwrapped_optional`](https://realm.github.io/SwiftLint/implicitly_unwrapped_optional.html) | Implicitly unwrapped optional types. | Its default mode excludes outlets; it does not find raw values. |
 | [`fatal_error_message`](https://realm.github.io/SwiftLint/fatal_error_message.html) | Missing or empty failure messages. | It does not judge message content or find raw values. |
@@ -88,11 +89,14 @@ func upload(_ body: Data) {
 
 // GOOD — one owner names units and derives related values.
 enum UploadPolicy {
-    static let kibBytes = 1_024
-    static let mibBytes = 1_024 * kibBytes
-    static let maxBodyBytes = 8 * mibBytes
+    static let binaryStep = 1_024
+    static let kibBytes = binaryStep
+    static let mibBytes = binaryStep * kibBytes
+    static let maxBodyMib = 8
+    static let maxBodyBytes = maxBodyMib * mibBytes
     static let limitKey = "upload.limit"
-    static let timeout: Duration = .seconds(30)
+    static let timeoutSeconds = 30
+    static let timeout: Duration = .seconds(timeoutSeconds)
 }
 
 func upload(_ body: Data) {
@@ -103,7 +107,7 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run `swiftlint lint --strict` from the directory with `.swiftlint.yml`.
+- Run the SwiftLint command that Detect found: `swift package plugin swiftlint` for the command plugin, the package or Xcode build for a build tool plugin, or `swiftlint lint --strict` from the directory with `.swiftlint.yml` for a standalone binary.
 - Check each new rule for violations and report every config change.
 - Report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
 - If SwiftLint is absent, ask before installing it; do not claim the lint check passed.

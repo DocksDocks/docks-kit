@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.3: skill examples and recipes follow their own rules
+
+### Fixed
+
+- code-guardrails: an install, a download, or a network step waits for the
+  user's approval through `ask`, and the turn ends without it. Verify uses the
+  local linter (`npx --no`, `bunx --no-install`, `cargo clippy --offline`)
+  and the runner that Detect found.
+- code-guardrails: a request about repeated values maps values only and
+  changes no lint config. A constant is reused only when it has the same
+  meaning.
+- code-guardrails: the scattered-values scan uses `git grep --untracked`,
+  skips ignored files, counts distinct files, and groups quote styles and
+  Rust literal suffixes.
+- code-guardrails: the GOOD examples pass the recommended magic-number rules
+  and keep their behavior. The Bash examples validate their numeric
+  arguments before arithmetic.
+- code-guardrails: the Python recipe edits the Ruff config that Ruff uses,
+  reports an ignore of `PLR2004`, and leaves type checkers alone. The Oxlint,
+  SwiftLint `only_rules`, and Rust workspace recipes add only missing rules.
+- report-skill-issue: every gh command names the host `github.com`, and the
+  account is checked again right before filing. Without gh, the skill gives a
+  browser search link and says when the duplicate search did not run.
+- code-clarity routes constant mapping to code-guardrails at step 2. The
+  refactor planner files `Scattered Values` findings as `duplicate`.
+- ci-speed: the `parity.sh` proof reads only primary error records, checks
+  that its filters succeed, and the concurrency key groups `pull_request`
+  runs only (DocksDocks/docks-kit#215).
+
 ## 2026-11-24 - docks-kit 0.29.2: plan runs keep their repository, branch, and work
 
 ### Fixed

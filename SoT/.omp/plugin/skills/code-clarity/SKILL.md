@@ -4,8 +4,8 @@ description: "Use when code is hard to understand without narration; improving n
 user-invocable: false
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
-  content_hash: "395a2e17cb989d72067dda6b0491ead92851630b31302dcee35455f023585392"
+  updated: "2026-11-24"
+  content_hash: "9b61822752f733391b875619b22e0592f3a3474a4dd692ddc795e8b14785730d"
 ---
 
 # Code Clarity
@@ -75,7 +75,8 @@ Apply the smallest useful level first. Stop when the confusion is gone.
 
 1. Replace vague or overloaded names with domain vocabulary.
 2. Replace invalid optional-field combinations with existing enums, newtypes,
-   constructors, or parsers when the type pressure is real.
+   constructors, or parsers when the type pressure is real. Route a raw number
+   or string that needs one named constant to `code-guardrails`.
 3. Flatten control flow with early returns and exhaustive matching.
 4. Extract a function when it gives one operation a precise name and keeps its
    inputs/outputs narrow; keep tightly coupled state transitions together.

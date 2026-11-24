@@ -4,13 +4,13 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- Check `pyproject.toml` for `[tool.mypy]` or `[tool.pyright]`.
-- Check `pyrightconfig.json` and existing mypy configuration before selecting a type checker.
-- Ask before installing Ruff or a type checker if the project does not have one.
+- Find the file that Ruff uses: run `ruff check --show-settings <file.py>` on one source file and read `Settings path`. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
+- In that file, search `ignore` and `per-file-ignores` for `PLR2004` or a prefix of it, such as `PL`, `PLR`, or `PLR2`.
+- Ask before installing Ruff if the project does not have it.
 
 ## Recommended config
 
-Merge these entries into the existing `pyproject.toml`; do not replace its settings. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it. The mypy section applies only when the project uses mypy.
+Merge these entries into the file that Ruff uses; do not replace its settings. In `ruff.toml` or `.ruff.toml`, drop the `tool.ruff.` prefix: write `[lint]` and `[lint.pylint]`. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
 
 ```toml
 [tool.ruff.lint]
@@ -18,18 +18,15 @@ extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
 
 [tool.ruff.lint.pylint]
 allow-magic-value-types = []
-
-[tool.mypy]
-strict = true
 ```
 
-`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. Ruff omits `[tool.ruff]` prefixes in `ruff.toml` and `.ruff.toml`. With an existing Pyright setup, use `typeCheckingMode = "strict"` in `[tool.pyright]` or `pyrightconfig.json` instead of adding mypy. Do not install an absent checker without asking. Report each new prefix and setting to the user.
+`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. An `ignore` or `per-file-ignores` entry that matches `PLR2004` turns the rule off, even when `extend-select` lists `PL`: Ruff applies the more specific selector, and `ignore` wins over an equally specific selector. Report that entry and ask the user before you remove it; do not report `PLR2004` as on while an entry turns it off. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
 
 ## Rules that catch raw values
 
 | Rule | Catches | Limits |
 | --- | --- | --- |
-| `PLR2004` | Unnamed numerical constants in comparisons. | Comparisons only; it does not find repeated values in assignments, calls, paths, keys, or units. |
+| `PLR2004` | Unnamed constants in comparisons. By default it checks numbers only; with `allow-magic-value-types = []`, it also checks `str` and `bytes` values, such as `state == "ready"`. | Comparisons only; it does not find repeated values in assignments, calls, paths, keys, or units. |
 
 Ruff exempts common comparison values such as `0`, `1`, and `""`. The `allow-magic-value-types = []` setting removes type-based exemptions, including the default string and bytes exemptions; it does not remove the rule's common-value exemptions. Use `SKILL.md` § **Find scattered values** for values beyond comparison checks. Keep `PLR2004` on in tests: a test compares with a named `Final` expected value, not an inline number.
 
@@ -60,15 +57,15 @@ class UploadState(StrEnum):
 # GOOD — consumers import one mapped source instead of copying literals.
 from upload_limits import MAX_PAYLOAD_BYTES, UploadState
 
-def accept_upload(payload_bytes: int, state: UploadState) -> bool:
-    return payload_bytes <= MAX_PAYLOAD_BYTES and state is UploadState.READY
+def accept_upload(payload_bytes: int, state: str) -> bool:
+    return payload_bytes <= MAX_PAYLOAD_BYTES and state == UploadState.READY
 ```
 
-For tests, pass `MAX_PAYLOAD_BYTES` as an input. When the test checks the constant's value, compare it with a named expected value, such as `EXPECTED_MAX_PAYLOAD_BYTES: Final = 8_388_608`.
+A `StrEnum` member is equal to its string value, so callers can still pass `"ready"`. For tests, pass `MAX_PAYLOAD_BYTES` as an input. When the test checks the constant's value, compare it with a named expected value, such as `EXPECTED_MAX_PAYLOAD_BYTES: Final = 8_388_608`.
 
 ## Verify
 
-Run `ruff check .` and the existing type checker: `mypy .` for mypy or `pyright` for Pyright. Review violations, then report the config changes and the remaining findings.
+Run the project's Ruff command, or `ruff check .`. Run `ruff check --show-settings <file.py>` and confirm that `linter.rules.enabled` lists `magic-value-comparison (PLR2004)`. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 
@@ -77,8 +74,5 @@ Run `ruff check .` and the existing type checker: `mypy .` for mypy or `pyright`
 - Ruff rule `PLR2004` and its exemptions: <https://docs.astral.sh/ruff/rules/magic-value-comparison/>
 - Ruff `extend-select`, per-file ignores, and `allow-magic-value-types`: <https://docs.astral.sh/ruff/settings/>
 - Ruff lint command: <https://docs.astral.sh/ruff/linter/>
-- Mypy configuration and `strict`: <https://mypy.readthedocs.io/en/stable/config_file.html>
-- Mypy invocation: <https://mypy.readthedocs.io/en/stable/running_mypy.html>
-- Pyright configuration and `typeCheckingMode`: <https://github.com/microsoft/pyright/blob/main/docs/configuration.md>
 - Python `Final`: <https://docs.python.org/3/library/typing.html#typing.Final>
 - Python `StrEnum` and `IntEnum`: <https://docs.python.org/3/library/enum.html#enum.StrEnum>
