@@ -346,6 +346,30 @@ test('readScope ignores the exclusion parts of a grep path, which read nothing',
     assert.deepEqual(score.readScope(call, { ...scope, cwd: live }), { outside: ['!notes.md'] }, selected);
   }
 });
+// Code review round 4 of plan #216: omp 19.0.0 (grep.ts parsePathSpecs and isExclusionEntry, path-utils.ts
+// splitPathAndSelPreferringLiteral) keeps an existing literal path before it reads a selector, and reads only its own
+// selector forms. The read scope and the exclusion check take the path that this decision gives.
+test('readScope and the exclusion check take the path that omp opens for a target with a selector-like tail', () => {
+  const root = scratch();
+  const caseDir = path.join(root, 'bench;dev', 'plan-3');
+  const scope = { runDir: path.join(caseDir, 'P0-low', 'run-1'), cwd: root, pluginRoots: [LIVE_PLUGIN] };
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  // A file named `plan.md:1-20` exists, so omp searched it, not the input plan.md, and the search is outside.
+  const literal = path.join(caseDir, 'plan.md:1-20');
+  fs.writeFileSync(literal, 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: literal }], scope), { outside: [literal] });
+  // `:notes` is no selector of omp: no file is named `!review.diff:notes`, so the part is an exclusion, also when a
+  // file `!review.diff` exists. A grep of exclusions only searches the working directory.
+  fs.writeFileSync(path.join(root, '!review.diff'), 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: '!review.diff:notes' }], scope), {
+    outside: ['grep without a path'],
+  });
+  // `:1-2` is the selector, and `!notes.md:backup` exists, so omp searched `!notes.md:backup`.
+  fs.writeFileSync(path.join(root, '!notes.md:backup'), 'x\n');
+  assert.deepEqual(score.readScope([{ name: 'grep', path: '!notes.md:backup:1-2' }], scope), {
+    outside: ['!notes.md:backup'],
+  });
+});
 test('readScope refuses every skill:// read of the benchmark skill and every read inside the live benchmark folder', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN], heldSkills: [] };
   const installed = '/home/u/.omp/plugins/node_modules/docks-kit-omp/skills';

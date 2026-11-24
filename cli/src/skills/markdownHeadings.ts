@@ -17,12 +17,14 @@ export interface HeadingScan {
 }
 
 /**
- * The start of a CommonMark raw HTML construct: an open tag, a closing tag, a
- * comment, a processing instruction, a declaration, or a CDATA section
- * (CommonMark 0.31.2, 6.6, https://spec.commonmark.org/0.31.2/#raw-html).
+ * A tag-like `<`: one followed by an ASCII letter, `/`, `!`, or `?`. Every
+ * CommonMark raw HTML construct starts so (an open or closing tag, a comment, a
+ * processing instruction, a declaration, or CDATA; CommonMark 0.31.2, 6.6,
+ * https://spec.commonmark.org/0.31.2/#raw-html). The tag grammar is not parsed,
+ * so a tag that the parser reads in another way still matches, and plain text
+ * such as `a < b` or `<3` does not.
  */
-const RAW_HTML =
-  /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>|<!-->|<!--->|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<![A-Za-z][^>]*>|<!\[CDATA\[[\s\S]*?\]\]>)/;
+const TAG_LIKE = /<[A-Za-z/!?]/;
 
 interface Chunk {
   readonly text: string;
@@ -46,11 +48,11 @@ function trailing(chunks: ReadonlyArray<Chunk>, length: number): ReadonlyArray<C
 
 /**
  * The heading scan of each of `texts`. The parser gives raw inline HTML to the
- * `text` callback as its own chunk, as it gives plain text, so a chunk that
- * starts with a raw HTML construct and is not inside a code span marks its
- * heading. A heading without raw HTML counts when its text, with each run of
- * whitespace as one space, is `title`; the parser has decoded the character
- * references.
+ * `text` callback as its own chunk, as it gives plain text, so a chunk outside
+ * a code span that holds a tag-like `<` marks its heading; a decoded `&lt;`
+ * comes as a chunk of its own and does not match. A heading without such a chunk
+ * counts when its text, with each run of whitespace as one space, is `title`;
+ * the parser has decoded the character references.
  */
 export function scanHeadings(texts: ReadonlyArray<string>, title: string): Array<HeadingScan> {
   return texts.map((text) => {
@@ -70,7 +72,7 @@ export function scanHeadings(texts: ReadonlyArray<string>, title: string): Array
       heading: (children) => {
         headings += 1;
         const own = trailing(chunks, children.length);
-        if (own === null || own.some((chunk) => !chunk.code && RAW_HTML.test(chunk.text))) {
+        if (own === null || own.some((chunk) => !chunk.code && TAG_LIKE.test(chunk.text))) {
           htmlHeadings.push(headings);
         } else if (children.replace(/\s+/g, " ").trim() === title) {
           count += 1;

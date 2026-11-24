@@ -287,6 +287,14 @@ describe("kit plugin skills: report section and shared copies", () => {
       shape: "a hidden-span",
       stale: "## Re<span hidden>draft</span>port a problem with this skill",
     },
+    {
+      shape: "a no-break-space br",
+      stale: "## Report a problem<br data-note=a\u00a0/b>with this skill",
+    },
+    {
+      shape: "a no-break-space link",
+      stale: "## Re<link rel=icon href=/favicon\u00a09.ico>port a problem with this skill",
+    },
   ]) {
     it(`fails ${shape} stale report heading as inline HTML`, () => {
       const root = copyFixture();

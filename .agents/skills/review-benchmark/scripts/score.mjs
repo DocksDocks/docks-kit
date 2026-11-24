@@ -141,8 +141,8 @@ const RESULT_URL = /https?:\/\/[^\s<>()[\]{}"'`]+/g;
 const JSON_QUERY_SELECTOR = /\?q=.*$/s;
 const URI_SCHEME = /^([a-z][a-z0-9+.-]*):\/\//i;
 const WEB_SCHEMES = new Set(['http', 'https']);
-// The selector of a read at the end of a path, for example `:1-260` or `:23-54:raw`. It can also take a tail that omp
-// does not read as a selector, so a list decides on the path with its selectors (see readLists).
+// The selector of a read at the end of an internal URI, for example `:1-260` or `:23-54:raw`. A local path splits its
+// selector as omp splits it (see ompTargetPath).
 const READ_SELECTOR = /(?::[^:/]*)+$/;
 // A read selector as omp parses it (omp://tools/read.md, Selector grammar): `:raw`, `:img`, `:conflicts`, or line
 // ranges (`:N`, `:LN`, `:N-`, `:N..`, `:A-B`, `:A..B`, `:A+C`, `:-N`, and comma lists of these, with or without a
@@ -153,6 +153,19 @@ const OMP_SELECTOR = new RegExp(`:(?:raw|img|conflicts|${LINE_RANGES}(?::raw)?|r
 // A part of a line selector of omp without its `L` prefixes: `-N` (group 1), `A+C` (groups 2 and 3), `A-B` or `A..B`
 // (groups 4 and 5), `A-` or `A..` (group 4 only), and `A` (group 6).
 const LINE_PART = /^(?:-(\d+)|(\d+)\+(\d+)|(\d+)(?:-|\.\.)(\d+)?|(\d+))$/;
+// The read selector grammar of omp 19.0.0 for a local path (splitPathAndSel in packages/tui/src/tools/read.ts and
+// LINE_RANGE_CHUNK_SOURCE in packages/tui/src/tools/line-ranges.ts): line range chunks (`N`, `LN`, `N-`, `N..`, `A-B`,
+// `A..B`, `A+C`) that end in a digit, a dot, or a dash, tails (`-N`), comma lists of these, `raw`, `conflicts`, and
+// `img`.
+const SPLIT_RANGE_CHUNK = String.raw`L?\d+(?:(?:\.\.|[-+])L?(?:\d+)?)?(?<=[\d.-])`;
+const SPLIT_LIST_CHUNK = String.raw`(?:${SPLIT_RANGE_CHUNK}|-\d+)`;
+const SPLIT_RANGE_LIST = `${SPLIT_LIST_CHUNK}(?:,${SPLIT_LIST_CHUNK})*`;
+const SPLIT_SELECTOR = new RegExp(`^(?:${SPLIT_RANGE_LIST}|raw|conflicts|img)$`, 'i');
+const SPLIT_RANGES_ONLY = new RegExp(`^(?:${SPLIT_RANGE_LIST})$`, 'i');
+const SPLIT_RAW_ONLY = /^raw$/i;
+const SPLIT_BARE_LINE = /^\d+$/;
+const SPLIT_RAW_CHUNK = `(?:raw:)?${SPLIT_LIST_CHUNK}(?::raw)?`;
+const SPLIT_PER_CHUNK_RAW = new RegExp(`:(${SPLIT_RAW_CHUNK}(?:,${SPLIT_RAW_CHUNK})+)$`, 'i');
 // The own diff of a reviewer (see ownDiffFile) comes from its name. A self-review lens has the name of its lens after
 // this prefix (see prepare.mjs ARMS).
 const PANEL_LENSES = new Set(['correctness', 'spec-and-tests', 'text-and-safety']);
@@ -3432,19 +3445,116 @@ function targetAllowed(target, cwd, rules, searches = false) {
   return WEB_SCHEMES.has(scheme) && webPageAllowed(target);
 }
 
-// A local path or an internal URI without its read selector, and a local path also without its JSON query selector; a
-// web URL stays as it is.
-const withoutSelector = (target) => {
+// A comma list that repeats its colon (`a:1-30,:-30`) or writes the range dash as a colon (`a:20:40,85:100`) folds into
+// one selector list, as foldListColons of omp 19.0.0 folds it; `clip.mp4:1:30` keeps its colons.
+function foldListColons(basePath, list) {
+  const chunks = list.split(',').reverse();
+  let base = basePath;
+  let dashed = false;
+  for (;;) {
+    const colon = base.lastIndexOf(':');
+    if (colon < 1) break;
+    const head = base.slice(colon + 1);
+    if (head.endsWith(',')) {
+      const repeated = head.slice(0, -1);
+      if (!SPLIT_RANGES_ONLY.test(repeated)) break;
+      chunks.push(...repeated.split(',').reverse());
+    } else {
+      const headChunks = head.split(',');
+      const start = headChunks.pop();
+      const end = chunks.at(-1);
+      if (!SPLIT_BARE_LINE.test(start) || !SPLIT_BARE_LINE.test(end)) break;
+      if (headChunks.length > 0 && !SPLIT_RANGES_ONLY.test(headChunks.join(','))) break;
+      chunks[chunks.length - 1] = `${start}-${end}`;
+      chunks.push(...headChunks.reverse());
+      dashed = true;
+    }
+    base = base.slice(0, colon);
+  }
+  if (dashed && chunks.length === 1) return { basePath, list };
+  return { basePath: base, list: chunks.reverse().join(',') };
+}
+
+// A local path split from its trailing read selector, as splitPathAndSel of omp 19.0.0 splits it: `{ path, sel }`, or
+// `{ path }` when the tail is no selector of omp (SPLIT_SELECTOR), such as `:notes`. `fold: false` keeps a colon inside
+// a list in the path.
+function splitSelector(rawPath, fold = true) {
+  const hoisted = SPLIT_PER_CHUNK_RAW.exec(rawPath);
+  if (hoisted && /raw/i.test(hoisted[1])) {
+    const chunks = hoisted[1].split(',').map((chunk) => chunk.replace(/^raw:|:raw$/gi, ''));
+    rawPath = `${rawPath.slice(0, hoisted.index)}:${chunks.join(',')}:raw`;
+  }
+  const colon = rawPath.lastIndexOf(':');
+  if (colon <= 0) return { path: rawPath };
+  const candidate = rawPath.slice(colon + 1);
+  if (!SPLIT_SELECTOR.test(candidate)) return { path: rawPath };
+  let basePath = rawPath.slice(0, colon);
+  let list;
+  let rawSuffix = '';
+  if (SPLIT_RANGES_ONLY.test(candidate)) list = candidate;
+  else if (SPLIT_RAW_ONLY.test(candidate)) {
+    const innerColon = basePath.lastIndexOf(':');
+    const inner = basePath.slice(innerColon + 1);
+    if (innerColon > 0 && SPLIT_RANGES_ONLY.test(inner)) {
+      list = inner;
+      rawSuffix = `:${candidate}`;
+      basePath = basePath.slice(0, innerColon);
+    }
+  }
+  if (list === undefined) return { path: basePath, sel: candidate };
+  if (fold) ({ basePath, list } = foldListColons(basePath, list));
+  if (!rawSuffix) {
+    const innerColon = basePath.lastIndexOf(':');
+    const inner = basePath.slice(innerColon + 1);
+    if (innerColon > 0 && SPLIT_RAW_ONLY.test(inner)) {
+      return { path: basePath.slice(0, innerColon), sel: `${inner}:${list}` };
+    }
+  }
+  return { path: basePath, sel: `${list}${rawSuffix}` };
+}
+
+// Whether omp finds a local path: `exists`, `missing`, or `unknown` for another error of the check, as
+// probeLiteralPathExists of omp 19.0.0 checks it with `lstat` (a link counts, also a dangling one). A relative path
+// without a working directory is `missing`: the check cannot find it.
+function literalProbe(target, cwd) {
+  const file = ompFile(target, cwd);
+  if (typeof file !== 'string') return 'missing';
+  try {
+    fs.lstatSync(file);
+    return 'exists';
+  } catch (error) {
+    return ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'].includes(error?.code) ? 'missing' : 'unknown';
+  }
+}
+
+// The local path that omp opens for a target of a read or a search, and its selector, as
+// splitPathAndSelPreferringLiteral of omp 19.0.0 decides them (grep.ts parsePathSpecs and isExclusionEntry): a target
+// without a selector of omp is its own path; else a target whose literal path exists (or cannot be checked on POSIX)
+// keeps its whole text, such as a file named `plan.md:1-20`; else the path before a colon inside a list when that path
+// exists; else the path of the selector split. Only a target with a selector of omp checks the file system.
+function ompSplitTarget(target, cwd) {
+  const strict = splitSelector(target);
+  if (strict.sel === undefined) return strict;
+  if (literalProbe(target, cwd) !== 'missing') return { path: target };
+  const unfolded = splitSelector(target, false);
+  if (unfolded.path !== strict.path && literalProbe(unfolded.path, cwd) === 'exists') return unfolded;
+  return strict;
+}
+
+// The path of a target that the read scope checks: a web URL as it is; an internal URI without its read selector; a
+// local path without its JSON query selector (`?q=`, which omp reads after the file) and then the path that omp opens
+// (see ompSplitTarget).
+function ompTargetPath(target, cwd) {
   const scheme = uriScheme(target);
   if (WEB_SCHEMES.has(scheme)) return target;
-  const read = scheme === undefined ? target.replace(JSON_QUERY_SELECTOR, '') : target;
-  return read.replace(READ_SELECTOR, '');
-};
+  if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
+  return ompSplitTarget(target.replace(JSON_QUERY_SELECTOR, ''), cwd).path;
+}
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
 // (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector. A list path
-// that names an existing file or folder as a whole, as written or without its read selector (OMP_SELECTOR, for
-// example `:1-20`), is one target, because omp keeps such a literal path before it splits a list
+// whose path as omp opens it (see ompSplitTarget) exists, such as an existing file or folder as a whole or that path
+// with a selector, is one target, because omp keeps such a literal path before it splits a list
 // (splitDelimitedPathEntry in packages/coding-agent/src/tools/path-utils.ts of omp 19.0.0): for example a snapshot
 // folder under a workspace `bench-gpt;7`. Only a `;` splits such a path, so only a path with a `;` needs this check of
 // the file system; the path of every other tool is one target without it. An exclusion part (see isExclusion) reads
@@ -3452,27 +3562,24 @@ const withoutSelector = (target) => {
 function pathTargets(name, value, cwd) {
   const trimmed = value.trim();
   if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
-  if (trimmed.includes(';')) {
-    const bare = trimmed.replace(OMP_SELECTOR, '');
-    if (ompPathExists(trimmed, cwd) || (bare !== trimmed && ompPathExists(bare, cwd))) return [trimmed];
-  }
+  if (trimmed.includes(';') && ompPathExists(ompSplitTarget(trimmed, cwd).path, cwd)) return [trimmed];
   return value
     .split(';')
     .map((part) => part.trim())
     .filter((part) => part && !isExclusion(name, part, cwd));
 }
 
-// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX and names no existing path, as written
-// or without its read selector, is an exclusion glob, as omp reads it: omp 19.0.0 peels the selector before it looks
-// for the file, and folds a colon-form range list into ranges on that file. So the part loses its whole selector, as
-// a read path does (withoutSelector): `!notes.md:1-2` and `!notes.md:20:40,85:100` of an existing `!notes.md` are
-// search roots. Without a working directory, a relative part cannot be checked, so it stays a target.
+// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob when omp finds
+// no file at the path that it opens for the part (see ompSplitTarget), as isExclusionEntry of omp 19.0.0 decides: so
+// `!notes.md:1-2` and `!notes.md:20:40,85:100` of an existing `!notes.md` are search roots, `!notes.md:backup:1-2` of
+// an existing `!notes.md:backup` is one too, and `!review.diff:notes` is an exclusion when no file has that name,
+// also when `!review.diff` exists. Without a working directory, a relative part cannot be checked, so it stays a
+// target.
 function isExclusion(name, part, cwd) {
   if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
     return false;
   }
-  const bare = withoutSelector(part);
-  return !ompPathExists(part, cwd) && (bare === part || !ompPathExists(bare, cwd));
+  return literalProbe(ompSplitTarget(part, cwd).path, cwd) === 'missing';
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -3586,12 +3693,13 @@ function toolCallResults(entries) {
 }
 
 // The list targets of the tool calls `calls` of a transcript: a map from each target (see pathTargets) that omp read
-// as a list of paths to these paths, each without its read selector. A relative path stays relative, and readScope
-// resolves it against the working directory `cwd` of the session, as omp did. For a `read` call whose tool result (in
-// `results`, see toolCallResults) records a list, the tool result decides, because it shows what omp read (see
-// recordedParts). For every other call, the files decide as they decided for omp (see delimitedParts); readLists
-// checks them when it runs, after the session. Without a record, readLists cannot see which paths omp could not read,
-// so each path of the split counts. When two calls give paths for the same target, the map keeps the paths of both.
+// as a list of paths to these paths, each as the path that omp opens for it (see ompTargetPath). A relative path stays
+// relative, and readScope resolves it against the working directory `cwd` of the session, as omp did. For a `read`
+// call whose tool result (in `results`, see toolCallResults) records a list, the tool result decides, because it
+// shows what omp read (see recordedParts). For every other call, the files decide as they decided for omp (see
+// delimitedParts); readLists checks them when it runs, after the session. Without a record, readLists cannot see which
+// paths omp could not read, so each path of the split counts. When two calls give paths for the same target, the map
+// keeps the paths of both.
 function readLists({ calls, results }, cwd) {
   const lists = new Map();
   for (const call of calls) {
@@ -3600,7 +3708,9 @@ function readLists({ calls, results }, cwd) {
     const recorded = call.name === READ_TOOL ? recordedParts(results.get(call.id)?.details) : null;
     for (const target of pathTargets(call.name, value, cwd)) {
       const parts = recorded ?? delimitedParts(target, cwd);
-      if (parts !== null) lists.set(target, distinct([...(lists.get(target) ?? []), ...parts.map(withoutSelector)]));
+      if (parts === null) continue;
+      const paths = parts.map((part) => ompTargetPath(part, cwd));
+      lists.set(target, distinct([...(lists.get(target) ?? []), ...paths]));
     }
   }
   return lists;
@@ -3894,7 +4004,7 @@ export function readScope(
         if (refused.length) refuse(target, refused);
         continue;
       }
-      const read = withoutSelector(target);
+      const read = ompTargetPath(target, cwd);
       if (!targetAllowed(read, cwd, rules, searches)) refuse(read, [read]);
     }
   }
