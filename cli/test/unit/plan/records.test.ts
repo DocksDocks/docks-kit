@@ -189,6 +189,11 @@ describe("plan records", () => {
       ["*Note* then open `/tmp/log*`", named("/tmp/log*")],
       ["Esc \\``echo **/tmp/cache/**`", []],
       ["Esc \\``/tmp/log*`", named("/tmp/log*")],
+      // Inside a span a backslash is literal, so a backtick after it still closes the span.
+      ["Code `echo **/tmp/cache/** \\`", []],
+      ["Code `/tmp/log* note\\`", named("/tmp/log*")],
+      // An escaped backtick ends a path and puts no mask byte into the advice.
+      ["Bold **/tmp/log\\`draft**", []],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],

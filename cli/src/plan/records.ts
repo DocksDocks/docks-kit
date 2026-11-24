@@ -64,10 +64,39 @@ const EMPHASIZED_MACHINE_PATH = new RegExp(
   String.raw`(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1(?!\*))`,
   "gm",
 );
-// A backtick after an odd run of backslashes is literal (GFM): it is masked before the span scan, so it opens or
-// closes no span, and a backtick right after it can still open one.
-const ESCAPED_BACKTICK = /(?<!\\)((?:\\\\)*\\)`/g;
-const CODE_SPAN = /(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
+// Code spans blanked to spaces, line by line (GFM): outside a span, a backslash escapes the next backtick; a backtick
+// run opens a span that the next run of the same length on the line closes, with no escape inside the span; a run
+// without a closer is literal. Other characters stay, so a path read on the result is the path of the text.
+function blankCodeSpans(text: string): string {
+  let out = "";
+  for (const line of text.split("\n")) {
+    if (out) out += "\n";
+    let index = 0;
+    while (index < line.length) {
+      if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
+        out += line.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+      if (line[index] !== "`") {
+        out += line[index];
+        index += 1;
+        continue;
+      }
+      const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
+      const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
+      if (!close) {
+        out += run;
+        index += run.length;
+        continue;
+      }
+      const end = index + run.length + close.index + run.length;
+      out += " ".repeat(end - index);
+      index = end;
+    }
+  }
+  return out;
+}
 const SECTIONS = [
   "Goal",
   "Research",
@@ -372,9 +401,7 @@ export function normalizePlan(
     ACCEPTANCE_SEPARATOR,
     table(sections.get("Acceptance") ?? "", ACCEPTANCE_HEADER).rows,
   );
-  const withoutCodeSpans = cleaned
-    .replace(ESCAPED_BACKTICK, "$1\u0000")
-    .replace(CODE_SPAN, (span) => " ".repeat(span.length));
+  const withoutCodeSpans = blankCodeSpans(cleaned);
   const machinePaths = new Set(
     [...cleaned.matchAll(MACHINE_PATH), ...withoutCodeSpans.matchAll(EMPHASIZED_MACHINE_PATH)]
       .sort((a, b) => a.index - b.index)
