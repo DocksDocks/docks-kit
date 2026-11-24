@@ -544,9 +544,9 @@ plan #<n> was closed by <closer> before pull request #<pr> merged; reopen it by 
 plan #<n> changed during the settle wait; run reopen again
 plan #<n> changed during the settle wait; run archive again
 GitHub left plan #<n> closed with reason REOPENED and refuses every state change; ask GitHub Support to repair it
-plan #<n> closed again after the reopen; run reopen again
-plan #<n> closed again after the reopen; run archive again
-plan issue state differs after reopen; run status <n> ongoing to repair the phase labels
+plan #<n> closed again after the reopen; no comment was posted; run reopen again
+plan #<n> closed again after the reopen; no comment was posted; run archive again
+plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>
 ```
 
 GitHub call failures exit 1 and print one of these messages on stderr. `edit`,
@@ -923,20 +923,28 @@ a child that is not terminal on every plan, and on a parent archive record also
 a named child that is not linked or no finished named child. The `--pr` retry checks this
 right after the not-merged refusal, before its other refusals. Run the retry
 when `show` advises it (Normalization, advice, and refusals). Each safe reopen,
-by `reopen` or by `archive`, reads the labels right before its write. It adds
-`plan:ongoing` only when that read shows no phase label, and it never replaces
-the label set. After the reopen, it reads the plan again. When that read shows
-a closed plan, someone closed it after the write, and it refuses with
-`plan #<n> closed again after the reopen; run reopen again` or
-`plan #<n> closed again after the reopen; run archive again`, after the command
-that ran. The rerun reads the new close and decides again: `reopen` reopens
-after a new close by the same pull request and refuses a close by another
-closer, and `archive` reopens a plan closed as completed with open work and
-refuses a retired plan. When that read shows an open plan with no phase label
-or with more than one, it refuses with
-`plan issue state differs after reopen; run status <n> ongoing to repair the phase labels`
-and prints no status; `status <n> ongoing` or `status <n> blocked` repairs it.
-Otherwise it prints the status of that read, such as `reopened: blocked`.
+by `reopen` or by `archive`, reads the plan right before its write and refuses
+a change since the settle read: the close, the body, the labels, or the owners.
+It adds `plan:ongoing` only when the plan has no phase label, and it never
+replaces the label set. After the reopen, it reads the plan again, before the
+comment. When that read shows a closed plan, someone closed it after the
+write, and it refuses with
+`plan #<n> closed again after the reopen; no comment was posted; run reopen again`
+or the same text with `run archive again`, after the command that ran. The
+rerun reads the new close and decides again: `reopen` reopens after a new close
+by the same pull request and refuses a close by another closer, and `archive`
+reopens a plan closed as completed with open work and refuses a retired plan.
+The comment is posted only when that read shows an open plan with the `plan`
+label, exactly the expected phase label (the one phase label before the
+reopen, or `plan:ongoing`), and the acting login as its single owner.
+Otherwise the helper refuses with
+`plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>`
+and prints no status. The recovery names, in order, the repairs that block the
+comment: another owner to settle by hand, the `plan` label to add, and
+`status <n> <status>` (with `--reason <reason>` for `blocked`) to set the
+phase label and the claim; then the comment to post as the owner. When the
+comment posts, the helper prints the status of that read, such as
+`reopened: blocked`.
 Known limit: a phase label that someone else adds around the write can leave
 two phase labels. The refusal reports it, and `status` repairs it. The write
 removes no label, so no label is lost.

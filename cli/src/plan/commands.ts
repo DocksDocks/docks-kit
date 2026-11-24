@@ -1237,7 +1237,7 @@ function reopenRecovery(
   const phasesNow = now.labels.map((label) => token(label.name)).filter(isPhaseLabel);
   if (now.assignees.length === 0 || !sameSet(phasesNow, [expectedPhase]))
     repairs.push(
-      `run status ${now.number} ${expectedPhase.slice("plan:".length)} to set the phase label ${expectedPhase} and the claim`,
+      `run status ${now.number} ${expectedPhase.slice("plan:".length)}${expectedPhase === "plan:blocked" ? " --reason <reason>" : ""} to set the phase label ${expectedPhase} and the claim`,
     );
   return [...repairs, `post this comment as the plan owner: ${comment}`].join(", then ");
 }

@@ -505,6 +505,26 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
   );
 
   it(
+    "reopen advises status blocked with a reason when a blocked plan's claim did not land",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("blocked plan, claim dropped");
+      context.updateIssue(plan.number, (entry) => {
+        entry.labels = ["plan", "plan:blocked"];
+      });
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.mutationDropsAssigneesOnce = true;
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} blocked --reason <reason> to set the phase label plan:blocked and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
     "reopen names a foreign owner that appears after the reopen write and posts no comment",
     () => {
       const context = planCliContext();
