@@ -13,7 +13,7 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- The settings probe: when the project has a Ruff command, run `ruff check --show-settings <file.py>` the way that command runs Ruff, with the same runner, environment, working directory, and settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like), before and after the edit. When the context of that existing command cannot be reproduced, report that the active settings could not be verified. When the project has no Ruff command, run `ruff check --show-settings <file.py>` from the project root, the way the standalone fallback in Verify runs. When the probe is a network step, follow the approval gate in `../SKILL.md` first. The probe prints `Settings path` and the effective rules. Choose the probe files from the files that the lint run lints: run `ruff check --show-files` in the same context as the probe (the project's command context, or `ruff check --show-files .` from the project root for the standalone fallback). Ruff lints a file that you name even when a directory scan excludes it, so do not probe a file that this list leaves out. Probe one listed file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
+- The settings probe: run `ruff check --show-settings` with the lint command's exact arguments and context (the same runner, environment, working directory, settings flags, and paths), before and after the edit. For the standalone fallback, run `ruff check --show-settings .` from the project root. The probe reports the `Settings path` and the rules of the first file that this run resolves. Edit only that config, through the cases below. When the run covers folders with their own config, reads standard input (`--stdin-filename`), or has an otherwise unclear target, report the configs that you found and ask the user which to edit; do not edit a guessed config. When the context of the existing command cannot be reproduced, report that the active settings could not be verified. When the probe is a network step, follow the approval gate in `../SKILL.md` first.
 - Read the project's Ruff lint command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
   1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
@@ -46,7 +46,7 @@ extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
 allow-magic-value-types = []
 ```
 
-`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. Ruff resolves rule selection by specificity, and command-line flags win over config files, so do not infer the result from one entry. Use the probe only to report whether `PLR2004` is on for each probed file: it is on when `linter.rules.enabled` lists `magic-value-comparison (PLR2004)` and no matching `linter.per_file_ignores` entry lists it. When it is off, report the active selectors that can affect it (command-line flags, `select`, `extend-select`, `ignore`, `extend-ignore`, and per-file ignores) and ask the user. Do not name one entry as the cause, and do not remove any entry without approval. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
+`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. Ruff resolves rule selection by specificity, and command-line flags win over config files, so do not infer the result from one entry. Use the probe only to report whether `PLR2004` is on: it is on when `linter.rules.enabled` lists `magic-value-comparison (PLR2004)` and no matching `linter.per_file_ignores` entry lists it. When it is off, report the active selectors that can affect it (command-line flags, `select`, `extend-select`, `ignore`, `extend-ignore`, and per-file ignores) and ask the user. Do not name one entry as the cause, and do not remove any entry without approval. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
 
 ## Rules that catch raw values
 
@@ -91,16 +91,15 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. After the edit, repeat the same settings probes from Detect, in the same runner, environment, and working directory, for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
+Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. After the edit, repeat the same settings probe from Detect and report whether `PLR2004` is on. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 
 - Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/#config-file-discovery>
 - Ruff `extend-per-file-ignores` and the deprecated `extend-ignore`: <https://docs.astral.sh/ruff/settings/#lint_extend-per-file-ignores>
 - Ruff `extend` and its expansion of environment variables: <https://docs.astral.sh/ruff/settings/#extend>
-- Ruff `force-exclude` and explicitly named paths: <https://docs.astral.sh/ruff/settings/#force-exclude>
 - Ruff command-line settings and `--config` inline overrides: <https://docs.astral.sh/ruff/configuration/#command-line-interface>
-- Ruff `--isolated`, `--config`, and `--show-files` in the full command-line interface: <https://docs.astral.sh/ruff/configuration/#full-command-line-interface>
+- Ruff `--isolated` and `--config` in the full command-line interface: <https://docs.astral.sh/ruff/configuration/#full-command-line-interface>
 - Ruff `select` and selector specificity: <https://docs.astral.sh/ruff/settings/#lint_select>
 - Ruff rule families `E`, `F`, `B`, `UP`, `SIM`, `PL`, `RUF`, `ERA`, `T20`, `ANN`: <https://docs.astral.sh/ruff/rules/>
 - Ruff rule `PLR2004` and its exemptions: <https://docs.astral.sh/ruff/rules/magic-value-comparison/>
