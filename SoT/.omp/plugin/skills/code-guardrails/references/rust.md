@@ -105,7 +105,7 @@ Do not compare a constant to itself.
 
 ## Verify
 
-Use the Clippy command from the project's CI when it has one, and add `--offline`. Otherwise, run `cargo clippy --offline --all-targets -- -D warnings` for one package, or `cargo clippy --offline --workspace --all-targets -- -D warnings` from a workspace root to cover every member. `--offline` stops Cargo from using the network. If Cargo reports a missing dependency, ask the user and end your turn; do not run `cargo fetch` or an online Cargo command in that turn. Add `--all-features` only when all features can be on together; otherwise, run each feature set that the project checks. The `-D warnings` flag also rejects rustc warnings.
+Use the Clippy command from the project's CI when it has one, and add `--offline`. Otherwise, run `cargo clippy --offline --all-targets -- -D warnings` for one package, or `cargo clippy --offline --workspace --all-targets -- -D warnings` from a workspace root to cover every member. `--offline` stops Cargo from using the network. If Cargo reports a missing dependency, follow the approval gate in `../SKILL.md` before you run `cargo fetch` or an online Cargo command. Add `--all-features` only when all features can be on together; otherwise, run each feature set that the project checks. The `-D warnings` flag also rejects rustc warnings.
 
 ## Sources
 

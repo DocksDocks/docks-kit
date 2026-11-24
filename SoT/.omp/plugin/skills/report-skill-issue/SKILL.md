@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "505ff06b78a1483fbecb3095ff3237fc0007376b723e2c06f135c827aed30d31"
+  content_hash: "92cd44f19899bbebf69194ce639b223865a8d1fbdf843b39932f7b4f8d8febc8"
 ---
 
 # Report a Skill Issue
@@ -94,7 +94,7 @@ If gh is missing, or the gh search fails (gh is not logged in, a network error, 
 
 ### 4. Draft the report
 
-Fill the template below. Put one problem in each issue. If you found two problems, draft two reports and get approval for each. Keep the quote of the instruction exact. Trim command output to the lines that show the failure. Give times in UTC. Then check the draft against the redaction rule and the list in "Check before filing".
+Fill the template below. Put one problem in each issue. If you found two problems, write two drafts. Keep the quote of the instruction exact. Trim command output to the lines that show the failure. Give times in UTC. Then check the draft against the redaction rule and the list in "Check before filing".
 
 #### Decide which repositories are public
 
@@ -120,11 +120,11 @@ On the draft-only route (see "Without gh, or without a way to ask"), skip this s
 - the exact title and body;
 - the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it).
 
-Ask the user to approve or change the text, then end your turn. Approval applies only on the filing route; the draft-only route asks for no approval. A security problem stops before this step: give the private draft instead (see "Security problems").
+Ask the user to approve or change each draft, then end your turn. Approval applies only on the filing route; the draft-only route asks for no approval. A security problem stops before this step: give the private draft instead (see "Security problems").
 
 ### 6. File the approved text
 
-Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. Run `gh api --hostname github.com user --jq .login`. File the text only when that command succeeds and prints exactly the account named in the approved message. On an error, an empty output, or another account, file nothing: tell the user and stop. Then file the text, remove both files, and give the user the URL that gh prints.
+Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. Run `gh api --hostname github.com user --jq .login`. File the text only when that command succeeds and prints exactly the account named in the approved message. On an error, an empty output, or another account, file nothing: remove both files, tell the user, and stop. Then file the text, remove both files, and give the user the URL that gh prints.
 
 ```bash
 title=$(mktemp)
@@ -242,7 +242,7 @@ The good title names the plugin, the skill, and one observable symptom, so a mai
 | A paraphrase in "What the skill says" | Quote the instruction exactly, with its heading |
 | A quote from a checkout of DocksDocks/docks-kit or from a newer copy | Quote the copy that the runtime loaded; a checkout can already hold the fix |
 | The quoted text says the opposite of the claim | Draft no defect report; tell the user what the skill says |
-| Two problems in one issue | One problem per issue, each with its own approval |
+| Two problems in one issue | One problem per issue, each in its own draft |
 | The reproduction needs the user's private project | Reduce it to a generic project, or describe the minimal setup |
 | A guessed version or hash | Read it from the files, or write `unknown` |
 | Local times in the timeline | Convert every time to UTC |

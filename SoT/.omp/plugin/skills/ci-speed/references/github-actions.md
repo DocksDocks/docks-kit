@@ -20,12 +20,12 @@ Snippets pin action majors. The release marked Latest can be an older major. So 
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true # stale pull request runs stop; default-branch runs never share a group
 ```
 
 - Warning: in one group, GitHub replaces an older pending run with the newer one, even with `cancel-in-progress: false`. So never put default-branch runs in a shared group.
-- A `pull_request` run gets one group per pull request number. This also holds for a `closed` event of a merged pull request, whose `github.ref` is the target branch ([`pull_request`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)). Every other run gets its own group through `github.run_id`. Never key the group on the source branch name (`github.head_ref`): two fork pull requests from branches with the same name then cancel each other.
+- A `pull_request` run with a pull request number gets one group per number. This also holds for a `closed` event of a merged pull request, whose `github.ref` is the target branch ([`pull_request`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)). Every other run, including a `pull_request` run whose payload has no number, gets its own group through `github.run_id`. Never key the group on the source branch name (`github.head_ref`): two fork pull requests from branches with the same name then cancel each other.
 - `pull_request_review` and `pull_request_review_comment` payloads also carry `github.event.pull_request.number` ([payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)). The `github.event_name == 'pull_request'` guard keeps those runs in their own run-ID groups, so a review run does not cancel the check of its pull request.
 - Keep `github.workflow` in the group. Without it, two workflows cancel each other. A group can use only the `github`, `inputs`, and `vars` contexts ([concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)).
 

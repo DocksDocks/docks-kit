@@ -59,7 +59,7 @@ Remove an existing test-file override for this rule only after you ask the user.
 
 ### Anti-slop handoff
 
-[anti-slop](https://github.com/dmmulroy/anti-slop) is an MIT-licensed Oxlint JavaScript plugin. It is meant to be copied into the project and maintained there. Its rules include `no-array-filter-map`, `no-chained-type-assertions`, `no-known-value-widening`, and `no-module-mocking`. The install command downloads code. Ask the user for approval and end your turn; do not run the install command in the turn that asks. After the user approves, run `npx skills add dmmulroy/anti-slop --skill install-anti-slop`. Let that skill copy and configure the rules. Do not copy rules by hand.
+[anti-slop](https://github.com/dmmulroy/anti-slop) is an MIT-licensed Oxlint JavaScript plugin. It is meant to be copied into the project and maintained there. Its rules include `no-array-filter-map`, `no-chained-type-assertions`, `no-known-value-widening`, and `no-module-mocking`. The install command downloads code: follow the approval gate in `../SKILL.md` before you run it. After approval, run `npx skills@1.7.0 add dmmulroy/anti-slop --skill install-anti-slop`. Let that skill copy and configure the rules. Do not copy rules by hand.
 
 Oxlint enforces code rules. Oxfmt or Prettier changes layout only; neither replaces these checks.
 
@@ -103,7 +103,7 @@ import { MAX_UPLOAD_BYTES, TIMEOUT_MS, STORAGE_KEY, type State } from "./transfe
 
 ## Verify
 
-Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. When the project has a lint script, pass the same arguments that the script passes. Never run the linter through `npm run`, `npx`, or `bunx`: `npm run` also runs matching `pre` and `post` scripts, and `npx` and `bunx` can contact the registry or download a missing package; npm assumes yes when standard input is not a terminal. If the binary is missing, ask the user and end your turn; do not install or download it in that turn. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
+Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. When the project has a lint script, pass the same arguments that the script passes. Never run the linter through `npm run`, `npx`, or `bunx`: `npm run` also runs matching `pre` and `post` scripts, and `npx` and `bunx` can contact the registry or download a missing package; npm assumes yes when standard input is not a terminal. If the binary is missing, follow the approval gate in `../SKILL.md` before you install or download it. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
 
 ## Sources
 

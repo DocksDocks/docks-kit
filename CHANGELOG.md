@@ -5,9 +5,10 @@
 ### Fixed
 
 - code-guardrails: an install, a download, or a network step waits for the
-  user's approval through `ask`, and the turn ends without it. Verify uses the
-  local linter (`npx --no`, `bunx --no-install`, `cargo clippy --offline`)
-  and the runner that Detect found.
+  user's approval through `ask`, and the turn ends without it. Verify runs the
+  local linter binary (`node_modules/.bin/oxlint` or `eslint`, the local
+  `ruff`, `cargo clippy --offline`), never through `npm run`, `npx`, or
+  `bunx`, and uses the runner that Detect found.
 - code-guardrails: a request about repeated values maps values only and
   changes no lint config. A constant is reused only when it has the same
   meaning.

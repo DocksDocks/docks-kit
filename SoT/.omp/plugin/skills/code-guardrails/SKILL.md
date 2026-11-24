@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "27cc152a44b029236622f76ef802c63505bcefef24edee90808980c3aff485b0"
+  content_hash: "024cff179e1b48ec76872f4ed9796b0ad26c95e866f6eb0be61e96de313d563f"
 ---
 
 # Code Guardrails
@@ -24,8 +24,8 @@ the project for an existing constant, config field, enum, or generated type with
 the same meaning. If one exists, import it. Do not import a constant only because
 its value is equal: two meanings that share a value get two names. If none exists,
 define it once in the module that owns that domain, and build related values from
-it (`MIB = KIB * KIB`, not `1048576`). A second definition drifts: one copy
-changes, the other copy does not, and the bug appears only at run time.
+it (`MIB = BINARY_STEP * KIB`, not `1048576`). A second definition drifts: one
+copy changes, the other copy does not, and the bug appears only at run time.
 </constraint>
 
 <constraint>
@@ -46,7 +46,7 @@ the reference. A silent dependency or tool change is a change the user did not a
 Keep the raw-number lint rule on in test files. In tests, import production
 constants for inputs and configuration. When a test checks a constant or a value
 computed from constants, put the expected result in a named literal constant.
-An assertion such as `expect(MIB).toBe(1024 * KIB)` repeats the code under test,
+An assertion such as `expect(MIB).toBe(BINARY_STEP * KIB)` repeats the code under test,
 so it passes even when the definition is wrong. A test-file exemption lets a copied
 limit such as `fileOfSize(10485761)` pass lint and drift from production.
 </constraint>
@@ -121,7 +121,7 @@ Rules for the map:
 
 - Put the unit in the name: `TIMEOUT_MS`, `MAX_BODY_BYTES`, `RETRY_DELAY_S`. A bare
   `TIMEOUT = 30` makes the reader guess seconds or milliseconds.
-- Build derived values from base values. A reader can check `KIB * KIB` in one look.
+- Build derived values from base values. A reader can check `BINARY_STEP * KIB` in one look.
 - Use a name that states the meaning, not the value. `MAX_RETRIES = 3` is useful;
   `THREE = 3` is not.
 - Group by domain. A single `constants` file for the whole project becomes a second
@@ -137,8 +137,9 @@ setTimeout(retry, 30000);
 
 // GOOD — one owner, derived values, units in the names, imports elsewhere
 // src/limits.ts
-export const KIB = 1024;
-export const MIB = KIB * KIB;
+export const BINARY_STEP = 1024;
+export const KIB = BINARY_STEP;
+export const MIB = BINARY_STEP * KIB;
 const MAX_UPLOAD_MIB = 10;
 export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MIB * MIB;
 const MS_PER_S = 1000;
@@ -174,39 +175,47 @@ and the new files that `.gitignore` does not exclude. They list each value that
 appears in 2 or more files. Each line gives the file count, the value, and each
 `file:line` location. Change `langs` to match the project languages. To skip a
 vendored or generated folder that git tracks, add a pathspec such as `':!vendor/'`.
+The commands turn off column and color output, and `-z` puts a NUL character after
+each file name, so git settings and a colon in a file name do not change the result.
 
 ```bash
 # Print each value that appears in 2 or more files: file count, value, locations.
+# Each match arrives as 3 lines: file name, line number, matched text.
 group() {
-  awk '{
-    file = $0; sub(/:.*/, "", file); rest = substr($0, length(file) + 2)
-    line = rest; sub(/:.*/, "", line); v = substr(rest, length(line) + 2)
-    if (v ~ /^["\047]/) { v = substr(v, 2, length(v) - 2); if (length(v) < 4) next }
-    else {
-      if (v !~ /^0[xXbBoO]/) sub(/_?f(32|64)$/, "", v)
-      sub(/_?[iu](8|16|32|64|128|size)$/, "", v); gsub(/_/, "", v)
+  tr '\0' '\n' | awk '
+    NR % 3 == 1 { file = $0; next }
+    NR % 3 == 2 { line = $0; next }
+    {
+      v = $0
+      if (v ~ /^["\047]/) { v = substr(v, 2, length(v) - 2); if (length(v) < 4) next }
+      else {
+        if (v !~ /^0[xXbBoO]/) sub(/_?f(32|64)$/, "", v)
+        sub(/_?[iu](8|16|32|64|128|size)$/, "", v); gsub(/_/, "", v)
+      }
+      if (!((v, file) in seen)) { seen[v, file] = 1; files[v]++ }
+      where[v] = where[v] " " file ":" line
     }
-    if (!((v, file) in seen)) { seen[v, file] = 1; files[v]++ }
-    where[v] = where[v] " " file ":" line
-  } END { for (v in files) if (files[v] > 1) print files[v] "\t" v "\t" where[v] }' | sort -rn
+    END { for (v in files) if (files[v] > 1) print files[v] "\t" v "\t" where[v] }' | sort -rn
 }
 langs=('*.ts' '*.rs' '*.swift' '*.py' '*.sh')
 
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
 # 2 or more digits, with an optional Rust type suffix such as u64.
 # Single digits are left out because they are mostly counters and indexes.
-git grep --untracked -I -n -o -w -E \
+git grep --untracked --no-column --no-color -z -I -n -o -w -E \
   '(0[xXbBoO][0-9a-fA-F_]+|[0-9][0-9_.]*[0-9])(_?([iu](8|16|32|64|128|size)|f32|f64))?' \
   -- "${langs[@]}" | group
 
-# Quoted strings. The regex matches every whole quoted string, so a short string
-# cannot shift the match; the grouping then drops strings under 4 characters.
-git grep --untracked -I -n -o -E \
+# Quoted strings on one line. The grouping drops strings under 4 characters.
+git grep --untracked --no-column --no-color -z -I -n -o -E \
   "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'" -- "${langs[@]}" | group
 ```
 
-The checks count `'x'` and `"x"` as one string. They count `1_024` and the Rust
-literal `1024u64` as `1024`. A value that repeats in one file only is not listed.
+The checks match candidates on one line only. They count `'cache.key'` and
+`"cache.key"` as one string. They count `1_024` and the Rust literal `1024u64` as
+`1024`. A value that repeats in one file only is not listed. A lone quote can pair
+with a later quote and hide a string, for example a Rust lifetime (`&'static`) or
+an apostrophe in a comment.
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short

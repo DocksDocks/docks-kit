@@ -4,9 +4,9 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- The settings probe: from the project's working directory, run `ruff check --show-settings <file.py>` on one source file with the lint command's settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). It prints `Settings path` and the effective rules.
-- Read the project's Ruff lint command and take the first case that matches:
-  1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override (a value that contains `=`):** report what controls the settings, change no file, and ask the user how to continue.
+- The settings probe: from the project's working directory, run `ruff check --show-settings <file.py>` with the local `ruff` binary and the lint command's settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). It prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`, and edit and verify each distinct `Settings path`.
+- Read the project's Ruff lint command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
+  1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
   3. **No `--config`:** Ruff uses config discovery. Run the settings probe and read `Settings path`. Ruff uses the closest config file up the directory tree and does not merge parent files. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
      - A `Settings path` inside the repository: edit that file.
@@ -82,7 +82,7 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Run the project's Ruff command, or `ruff check .` when the project has none. Run the settings probe from Detect again for a source file and for a test file, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
+Run the local `ruff` binary, from `PATH` or from the project's virtual environment (such as `.venv/bin/ruff`), with the arguments of the project's Ruff command, or `ruff check .` when the project has none. Never run Ruff through `uv run`, `uvx`, `pre-commit`, `hatch run`, or another runner that can install or download. If no local `ruff` exists, follow the approval gate in `../SKILL.md`. Run the settings probes from Detect again, one file for each distinct `Settings path` and one test file, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 

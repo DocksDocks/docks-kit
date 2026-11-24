@@ -58,7 +58,7 @@ Keep them enabled at error severity; report any existing override that weakens o
 `no_magic_numbers` permits `0.0`, `1.0`, and `100.0` by default; the example removes `100.0` from that allowance.
 SwiftLint always skips test code for this rule: `XCTestCase` and `QuickSpec` subclasses, `@Test` functions, and `@Suite` types.
 No setting turns the rule on there, because the rule adds these classes to `test_parent_classes` itself.
-For Swift tests, run [Find scattered values](../SKILL.md#find-scattered-values); it includes test files.
+When the request includes value mapping, run [Find scattered values](../SKILL.md#find-scattered-values) for Swift tests; it includes test files.
 In tests, use production constants for inputs and a named `let` for each expected literal.
 
 ## Rules that catch raw values
@@ -107,10 +107,10 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run the SwiftLint command that Detect found: `swift package plugin swiftlint` for the command plugin, the package or Xcode build for a build tool plugin, or `swiftlint lint --strict` from the directory with `.swiftlint.yml` for a standalone binary.
+- Run the SwiftLint command that Detect found. Run the command plugin (`swift package plugin swiftlint`) or a build tool plugin (the package or Xcode build) only when SwiftPM has already resolved SwiftLint locally: `.build/checkouts` or `.build/artifacts` holds it. Otherwise, follow the approval gate in `../SKILL.md`, because a fresh resolve fetches packages and the SwiftLint binary. For a standalone binary, run `swiftlint lint --strict` from the directory with `.swiftlint.yml`.
 - Check each new rule for violations and report every config change.
-- Report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
-- If SwiftLint is absent, ask before installing it; do not claim the lint check passed.
+- When the request includes value mapping, report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
+- If SwiftLint is absent, follow the approval gate in `../SKILL.md` before you install it; do not claim the lint check passed.
 
 ## Sources
 
