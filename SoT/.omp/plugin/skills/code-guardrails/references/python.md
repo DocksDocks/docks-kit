@@ -5,19 +5,31 @@
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
 - Read the project's Ruff lint command. Create or edit a config only when that command uses config discovery: no `--isolated`, no `--config` file outside the repository, and no inline `--config` override (a value that contains `=`). When the command uses one of these, report what controls the settings, change no file, and ask the user how to continue.
-- With discovery, run the settings probe from the project's working directory with the lint command's other settings flags (`--select`, `--ignore`, `--extend-select`, and the like): `ruff check --show-settings <file.py>` on one source file. Read `Settings path`. A `--config` file inside the repository is the file to edit. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`. If `Settings path` is absent (Ruff uses its defaults) or names a file outside the repository, add the settings to the project: `[tool.ruff.lint]` in `pyproject.toml`, or a new `ruff.toml` when the project has no `pyproject.toml`.
+- With discovery, run the settings probe from the project's working directory with the lint command's other settings flags (`--select`, `--ignore`, `--extend-select`, and the like): `ruff check --show-settings <file.py>` on one source file. Read `Settings path`. A `--config` file inside the repository, or a `Settings path` inside the repository, is the file to edit. Ruff uses the closest config file up the directory tree and does not merge parent files. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
+- Create a new project config only when `Settings path` is absent (Ruff uses its defaults) or names the user-level fallback (`ruff/.ruff.toml`, `ruff/ruff.toml`, or `ruff/pyproject.toml` in the user config directory). Add `[tool.ruff.lint]` to `pyproject.toml`, or create `ruff.toml` when the project has no `pyproject.toml`.
+- When `Settings path` names another config outside the repository, such as a shared parent `ruff.toml` or `pyproject.toml`, report the path, edit nothing, and create nothing: a project file would shadow it. Ask the user how to continue.
 - Note the selectors that can affect `PLR2004`: the lint command's rule flags, and `select`, `extend-select`, `ignore`, `extend-ignore`, `per-file-ignores`, and `extend-per-file-ignores` in the config.
 - Ask before installing Ruff if the project does not have it.
 
 ## Recommended config
 
-Merge these entries into the project file that Detect found; do not replace its settings. In `ruff.toml` or `.ruff.toml`, drop the `tool.ruff.` prefix: write `[lint]` and `[lint.pylint]`. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
+Merge these entries into the project file that Detect found; do not replace its settings. Ruff reads `pyproject.toml` with `tool.ruff` tables and every other config file, including a custom file name given to `--config`, without that prefix. Use `[tool.ruff.lint]` and `[tool.ruff.lint.pylint]` only in `pyproject.toml`; use `[lint]` and `[lint.pylint]` in every other config file. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
 
 ```toml
+# pyproject.toml
 [tool.ruff.lint]
 extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
 
 [tool.ruff.lint.pylint]
+allow-magic-value-types = []
+```
+
+```toml
+# ruff.toml, .ruff.toml, or another file given to --config
+[lint]
+extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
+
+[lint.pylint]
 allow-magic-value-types = []
 ```
 
