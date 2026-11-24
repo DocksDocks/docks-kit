@@ -235,17 +235,20 @@ test('a search result file outside the inputs is outside, also when the file is 
   assert.deepEqual(listReadScope(fixture, calls, spilled), { outside: [] });
 });
 // Plan #216, R67 redesign: the read scope does not rely on one emulation of how omp reads a selector-like tail. Every
-// path that a search target can name and that exists when transcripts runs must be allowed: the whole text, the text
-// before a `;` split, its `;` parts, and the selector splits. A JSON query (`?q=`) belongs to `read` only, so a search
-// path keeps it. Each call below runs in the case folder, the working directory of the session, and matches nothing.
+// path that a target can name and that exists when transcripts runs must be allowed: the whole text, the text before a
+// `;` split and each `;` member (also when the whole path wins now), each member of a grouped read, and the selector
+// splits. A JSON query (`?q=`) belongs to `read` only: a search path keeps it, and a read also checks an existing file
+// whose name holds it. Each call below runs in the case folder, the working directory of the session, and succeeds;
+// each search matches nothing, so its result has `files: []`, as omp writes it.
 test('every existing interpretation of a search path must be allowed, so an ambiguous tail fails closed', () => {
   const fixture = listCase(scratch(), 'bench');
   const { ws, sessions, caseDir, round1 } = fixture;
   put(caseDir, 'plan.md', '# Plan\n');
   put(caseDir, 'review.diff', '');
-  const scopeOf = (target) => {
-    const calls = [['grep', { pattern: 'lock', path: target }]];
-    put(sessions, 'Code7C1LowR1K1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, { cwd: caseDir }));
+  const scopeOf = (target, name = 'grep', details = { cwd: caseDir, files: [] }) => {
+    const calls = [[name, name === 'grep' ? { pattern: 'lock', path: target } : { path: target }]];
+    const options = { cwd: caseDir, results: { 'call-1': details } };
+    put(sessions, 'Code7C1LowR1K1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, options));
     assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
     return readJson(path.join(round1, 'meta.json')).reviewers.full.readScope;
   };
@@ -257,6 +260,22 @@ test('every existing interpretation of a search path must be allowed, so an ambi
   assert.deepEqual(scopeOf('plan.md?q=x;extra:1-20'), { outside: ['plan.md?q=x;extra:1-20'] });
   // Two allowed inputs stay in scope.
   assert.deepEqual(scopeOf('plan.md;review.diff'), { outside: [] });
+  // An allowed snapshot file has the whole path now, but its `;` member `extra.mjs` exists outside the inputs.
+  put(caseDir, 'snapshot/a.mjs;extra.mjs', 'x\n');
+  put(caseDir, 'extra.mjs', 'x\n');
+  assert.deepEqual(scopeOf('snapshot/a.mjs;extra.mjs'), { outside: ['extra.mjs'] });
+  // A grouped read shows the allowed literal `alias.md:1-2`, but `alias.md` is a link out of the inputs.
+  put(caseDir, 'snapshot/alias.md:1-2', 'x\n');
+  put(path.dirname(ws), 'secret.md', 'x\n');
+  fs.symlinkSync(path.join(path.dirname(ws), 'secret.md'), path.join(caseDir, 'snapshot', 'alias.md'));
+  put(caseDir, 'snapshot/b.md', 'x\n');
+  const grouped = { displayReadTargets: ['snapshot/alias.md:1-2', 'snapshot/b.md'] };
+  assert.deepEqual(scopeOf('snapshot/alias.md:1-2,snapshot/b.md', 'read', grouped), {
+    outside: ['snapshot/alias.md'],
+  });
+  // omp opens an existing literal `plan.md?q=x` before it reads a JSON query of plan.md.
+  put(caseDir, 'plan.md?q=x', 'x\n');
+  assert.deepEqual(scopeOf('plan.md?q=x', 'read', {}), { outside: ['plan.md?q=x'] });
 });
 // Plan #216, R68: decoding is bounded. To pick a transcript, the task lookup decodes each record of a candidate up to
 // its first user message; then transcripts decodes the picked transcript one time in full and gives its records to

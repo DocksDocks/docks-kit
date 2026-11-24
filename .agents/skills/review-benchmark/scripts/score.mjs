@@ -3527,47 +3527,64 @@ function literalProbe(target, cwd) {
   }
 }
 
+// literalProbe for the working directory `cwd` that checks each file once: the read scope probes the same path for
+// the pick of omp and for its other interpretations within one call.
+function cachedProbe(cwd) {
+  const seen = new Map();
+  return (target) => {
+    const key = ompFile(target, cwd) ?? target;
+    if (!seen.has(key)) seen.set(key, literalProbe(target, cwd));
+    return seen.get(key);
+  };
+}
+
 // The local path that omp opens for a target of a read or a search, and its selector, as
 // splitPathAndSelPreferringLiteral of omp 19.0.0 decides them (grep.ts parsePathSpecs and isExclusionEntry): a target
 // without a selector of omp is its own path; else a target whose literal path exists (or cannot be checked on POSIX)
 // keeps its whole text, such as a file named `plan.md:1-20`; else the path before a colon inside a list when that path
-// exists; else the path of the selector split. Only a target with a selector of omp checks the file system.
-function ompSplitTarget(target, cwd) {
+// exists; else the path of the selector split. Only a target with a selector of omp checks the file system, through
+// `probe` (see literalProbe and cachedProbe).
+function ompSplitTarget(target, cwd, probe = (item) => literalProbe(item, cwd)) {
   const strict = splitSelector(target);
   if (strict.sel === undefined) return strict;
-  if (literalProbe(target, cwd) !== 'missing') return { path: target };
+  if (probe(target) !== 'missing') return { path: target };
   const unfolded = splitSelector(target, false);
-  if (unfolded.path !== strict.path && literalProbe(unfolded.path, cwd) === 'exists') return unfolded;
+  if (unfolded.path !== strict.path && probe(unfolded.path) === 'exists') return unfolded;
   return strict;
 }
 
 // The path of a target of a call of the tool `name` that the read scope checks first: a web URL as it is; an internal
 // URI without its read selector; a local path, for a `read` call without its JSON query selector (`?q=`, which omp
 // reads after the file; a search path keeps it), and then the path that omp opens (see ompSplitTarget).
-function ompTargetPath(target, cwd, name) {
+function ompTargetPath(target, cwd, name, probe) {
   const scheme = uriScheme(target);
   if (WEB_SCHEMES.has(scheme)) return target;
   if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
-  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd).path;
+  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd, probe).path;
 }
 
-// The paths that the local text `text` can name when it holds a selector-like tail: the whole text and the paths of
-// its selector split, folded and unfolded (see splitSelector). omp picks one of them by the files at the time of the
-// call (see ompSplitTarget), and the files can have changed since, so the read scope does not rely on that one pick
-// alone: each of these paths that exists when transcripts runs must be allowed (see readScope), and a `!` part of a
-// grep path is an exclusion only when none of them exists (see isExclusion). A text without such a tail names only
-// itself, so it needs no check of the file system.
-function pathInterpretations(text) {
+// The paths that the local text `text` of a call of the tool `name` can name when it holds a selector-like tail: the
+// whole text and the paths of its selector split, folded and unfolded (see splitSelector); for a `read` call also the
+// paths of the text without its JSON query selector (`?q=`), because omp opens an existing literal file whose name
+// holds it first. omp picks one of them by the files at the time of the call (see ompSplitTarget), and the files can
+// have changed since, so the read scope does not rely on that one pick alone: each of these paths that exists when
+// transcripts runs must be allowed (see readScope), and a `!` part of a grep path is an exclusion only when none of
+// them exists (see isExclusion). A text without such a tail names only itself.
+function pathInterpretations(text, name) {
   if (uriScheme(text) !== undefined) return [text];
-  return distinct([text, splitSelector(text).path, splitSelector(text, false).path]);
+  const forms = (item) => [item, splitSelector(item).path, splitSelector(item, false).path];
+  const query = name === READ_TOOL ? text.replace(JSON_QUERY_SELECTOR, '') : text;
+  return distinct([...forms(text), ...(query === text ? [] : forms(query))]);
 }
 
 // The interpretations of `text` (see pathInterpretations) that exist now; an inconclusive check counts as existing,
-// so the read scope fails closed. A text with one interpretation gives none: the final check of its target covers it.
-function existingInterpretations(text, cwd) {
-  const paths = pathInterpretations(text);
-  if (paths.length === 1 && !text.includes(';')) return [];
-  return paths.filter((item) => uriScheme(item) === undefined && literalProbe(item, cwd) !== 'missing');
+// so the read scope fails closed. A text with one interpretation gives none unless `always`: the check of its target
+// covers it. A `;` member of a search path that the whole path kept as one target has no check of its own, so it is
+// checked `always`.
+function existingInterpretations(text, name, probe, always = false) {
+  const paths = pathInterpretations(text, name);
+  if (paths.length === 1 && !always) return [];
+  return paths.filter((item) => uriScheme(item) === undefined && probe(item) !== 'missing');
 }
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
@@ -3598,7 +3615,7 @@ function isExclusion(name, part, cwd) {
   if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
     return false;
   }
-  return pathInterpretations(part).every((item) => literalProbe(item, cwd) === 'missing');
+  return pathInterpretations(part, name).every((item) => literalProbe(item, cwd) === 'missing');
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -3713,7 +3730,8 @@ function toolCallResults(entries) {
 }
 
 // The list targets of the tool calls `calls` of a transcript: a map from each target (see pathTargets) that omp read
-// as a list of paths to these paths, each as the path that omp opens for it (see ompTargetPath). A relative path stays
+// as a list of paths to these paths as omp wrote them, with their read selectors; readScope checks the path that omp
+// opens for each (see ompTargetPath) and its other interpretations (see pathInterpretations). A relative path stays
 // relative, and readScope resolves it against the working directory `cwd` of the session, as omp did. For a `read`
 // call whose tool result (in `results`, see toolCallResults) records a list, the tool result decides, because it
 // shows what omp read (see recordedParts). For every other call, the files decide as they decided for omp (see
@@ -3729,8 +3747,7 @@ function readLists({ calls, results }, cwd) {
     for (const target of pathTargets(call.name, value, cwd)) {
       const parts = recorded ?? delimitedParts(target, cwd, call.name);
       if (parts === null) continue;
-      const paths = parts.map((part) => ompTargetPath(part, cwd, call.name));
-      lists.set(target, distinct([...(lists.get(target) ?? []), ...paths]));
+      lists.set(target, distinct([...(lists.get(target) ?? []), ...parts]));
     }
   }
   return lists;
@@ -3947,13 +3964,15 @@ function diffCoverage(tools, file, cwd) {
 // target `<name> without a path`; other calls without a path read no file.
 // The path of a grep, glob, or ast_grep call is a `;`-separated list of targets; the path of every other tool is one
 // target, also when it holds a `;`. When no file or folder has the path of a target, omp can read it as a list of
-// paths. `lists` maps each target that omp read as a list to these paths, each without its read selector
-// (transcriptsCommand gives it, see readLists); a list target is allowed when each of these paths is allowed. Every
-// other target is one path.
+// paths. `lists` maps each target that omp read as a list to these paths as omp wrote them, maybe with read selectors
+// (transcriptsCommand gives it, see readLists); a list target is allowed when the path that omp opens for each of
+// these paths (see ompTargetPath) and each of its other interpretations that exists are allowed. Every other target is
+// one path.
 // A web search has no path: `queries` lists its queries, each once, in call order. A query that targets the benchmark
 // repository (see targetsBenchmark) gives the outside target `web_search: <query>`, and each cited URL of its result
 // that webPageAllowed refuses gives `web_search result: <url>`. A reviewer without a web search gets no `queries`.
-// A local path also loses its JSON query selector (`?q=`), because omp reads the file before it.
+// A local path of a `read` call also loses its JSON query selector (`?q=`), because omp reads the file before it; an
+// existing file whose name holds the query is one of its interpretations (see below). A search path keeps `?q=`.
 // A search call with `resultFiles` (see transcriptFacts) also gives the outside target `<name> result: <file>` for each
 // file of its result that is not allowed. The result shows what the search read, so this rule holds also when the
 // files decide the split of its path in another way after the call (see delimitedParts).
@@ -4021,23 +4040,40 @@ export function readScope(
     const refuse = (target, refused) =>
       (error && refused.every((part) => pathMissing(part, cwd)) ? missing : outside).add(target);
     const searches = SEARCH_TOOLS.has(name);
+    // One call checks each file once: the probes of the pick of omp and of the other interpretations share their
+    // results, and a path that the first pass checked is not checked again.
+    const probe = cachedProbe(cwd);
+    const checked = new Set();
+    const check = (item) => {
+      checked.add(ompFile(item, cwd) ?? item);
+      return targetAllowed(item, cwd, rules, searches);
+    };
+    // Each text whose interpretations that exist now must be allowed too, with `always` for a text that has no check
+    // of its own: the whole path of a list tool and its `;` members, the targets, and the members of each list.
+    const alternatives = [];
+    if (PATH_LIST_TOOLS.has(name) && value.includes(';')) {
+      alternatives.push([value.trim(), true]);
+      for (const member of value.split(';').map((part) => part.trim())) {
+        if (member) alternatives.push([member, !targets.includes(member)]);
+      }
+    }
     for (const target of targets) {
+      alternatives.push([target, false]);
       const parts = lists.get(target);
       if (parts !== undefined) {
-        const refused = parts.filter((part) => !targetAllowed(part, cwd, rules, searches));
+        for (const part of parts) alternatives.push([part, false]);
+        const refused = parts.map((part) => ompTargetPath(part, cwd, name, probe)).filter((part) => !check(part));
         if (refused.length) refuse(target, refused);
         continue;
       }
-      const read = ompTargetPath(target, cwd, name);
-      if (!targetAllowed(read, cwd, rules, searches)) refuse(read, [read]);
+      const read = ompTargetPath(target, cwd, name, probe);
+      if (!check(read)) refuse(read, [read]);
     }
     // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
-    // which of them omp opened (see pathInterpretations): the whole path of a list tool before its `;` split, and
-    // each target.
-    const texts = PATH_LIST_TOOLS.has(name) ? [value.trim(), ...targets] : targets;
-    for (const text of distinct(texts)) {
-      for (const item of existingInterpretations(text, cwd)) {
-        if (!targetAllowed(item, cwd, rules, searches)) outside.add(item);
+    // which of them omp opened (see pathInterpretations). Such a path exists, so it is outside, never missing.
+    for (const [text, always] of alternatives) {
+      for (const item of existingInterpretations(text, name, probe, always)) {
+        if (!checked.has(ompFile(item, cwd) ?? item) && !check(item)) outside.add(item);
       }
     }
   }
