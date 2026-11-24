@@ -2145,18 +2145,23 @@ function pluginCopyOwner(dir) {
   return { role, sha: first };
 }
 
-// The real path of `dir`: the real path of its nearest existing folder, joined with the rest of `dir`. A folder that
-// does not exist yet goes where its existing ancestor really is, also through a symlink.
-function realDestination(dir) {
-  let existing = dir;
-  while (!fs.existsSync(existing)) existing = path.dirname(existing);
-  return path.join(fs.realpathSync(existing), path.relative(existing, dir));
+// The first existing part of the path `dir`, `dir` included, that is a symbolic link, or null. The walk ends at the
+// first part that does not exist.
+function symlinkOnPath(dir) {
+  let current = path.parse(dir).root;
+  for (const part of path.relative(current, dir).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    const stat = fs.lstatSync(current, { throwIfNoEntry: false });
+    if (stat === undefined) return null;
+    if (stat.isSymbolicLink()) return current;
+  }
+  return null;
 }
 
-// The nearest folder above the real path of `dir` that holds a plugin copy, or null.
+// The nearest folder above `dir` that holds a plugin copy, or null. checkPluginCopy refuses a path with a symbolic
+// link first, so the written path is where the copy goes.
 function copyAbove(dir) {
-  const real = realDestination(dir);
-  for (let folder = path.dirname(real); folder !== path.dirname(folder); folder = path.dirname(folder)) {
+  for (let folder = path.dirname(dir); folder !== path.dirname(folder); folder = path.dirname(folder)) {
     if (fs.existsSync(path.join(folder, PLUGIN_COPY_MARKER))) return folder;
   }
   return null;
@@ -2170,13 +2175,16 @@ function copiesBelow(dir) {
     .map((entry) => path.join(dir, path.dirname(entry)));
 }
 
-// Stops before `agents` changes a file when the plugin copy `copy` ({ role, sha, dir }) cannot go to its folder: a
-// folder inside another plugin copy, which a refresh of that copy would delete; a folder with files but no marker; the
-// copy of another role; a variant copy of another commit; or a copy of another commit that holds another plugin copy,
-// which the replacement would delete. The agents of an earlier setup read such a copy, so it stays. A copy of the same
-// role at another commit is replaced (see extractPlugin), except a variant copy, which belongs to its commit (see
-// variantCommit).
+// Stops before `agents` changes a file when the plugin copy `copy` ({ role, sha, dir }) cannot go to its folder: a path
+// that is or passes through a symbolic link, whose real place the checks below cannot see; a folder inside another
+// plugin copy, which a refresh of that copy would delete; a folder with files but no marker; the copy of another role;
+// a variant copy of another commit; or a copy of another commit that holds another plugin copy, which the replacement
+// would delete. The agents of an earlier setup read such a copy, so it stays. A copy of the same role at another
+// commit is replaced (see extractPlugin), except a variant copy, which belongs to its commit (see variantCommit).
 function checkPluginCopy({ role, sha, dir }) {
+  if (symlinkOnPath(dir) !== null) {
+    fail(`${dir} is or passes through a symbolic link; pass a real folder for --out or --baseline-dir`);
+  }
   const above = copyAbove(dir);
   if (above !== null) {
     fail(
@@ -2505,19 +2513,22 @@ function parseVariants(options, repo, baselineDir) {
     const paths = reviewerSkillPaths(body);
     const roots = [...new Set(paths.map((item) => item.root))];
     const skills = [...new Set(paths.map((item) => item.skill))];
-    const namesPlanSkill = skills.length > 0 && skills.every((skill) => PLAN_SKILL.test(skill));
+    // A `.` or `..` segment can name a file outside the skill folder, so a skill path has none.
+    const plain = (skill) => skill.split('/').every((segment) => segment !== '.' && segment !== '..');
+    const namesPlanSkill = skills.length > 0 && skills.every((skill) => plain(skill) && PLAN_SKILL.test(skill));
     if (roots.length !== 1 || roots[0] !== dir || !namesPlanSkill) {
       fail(
         `variant ${name}: ${source} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT_TOKEN}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`,
       );
     }
     // The skill file must be a regular file at the commit: `git cat-file -e` also accepts a folder, and `git cat-file
-    // -t` gives `blob` also for a symlink (mode 120000), so the mode of the tree entry decides.
+    // -t` gives `blob` also for a symlink (mode 120000), so the mode of the tree entry decides. The entry must have the
+    // exact named path (`-z` keeps it unquoted).
     for (const skill of skills) {
       const file = `${reviewerRoot}/${skill}`;
-      const entry = runGit(repo, ['ls-tree', '--full-tree', sha, '--', file]);
-      const mode = entry.status === 0 ? entry.stdout.toString().split(' ')[0] : '';
-      if (!GIT_FILE_MODES.has(mode)) {
+      const entry = runGit(repo, ['ls-tree', '-z', '--full-tree', sha, '--', file]);
+      const [meta = '', entryPath] = entry.status === 0 ? entry.stdout.toString().replace(/\0$/, '').split('\t') : [];
+      if (!GIT_FILE_MODES.has(meta.split(' ')[0]) || entryPath !== file) {
         fail(`variant ${name}: ${source} at ${ref} names ${file}, which is not a file at ${ref}`);
       }
     }

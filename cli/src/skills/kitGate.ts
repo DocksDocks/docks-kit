@@ -16,7 +16,7 @@ import {
   skillCandidateDirs,
   skillsDir,
 } from "./frontmatter";
-import { countHeadings } from "./markdownHeadings";
+import { type HeadingScan, scanHeadings } from "./markdownHeadings";
 import { bodyAfterFrontmatter, scoreSkill, splitLines } from "./rubric";
 
 /**
@@ -202,13 +202,25 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
   return failures;
 }
 
+/** A heading scan as the Bun child writes it: a non-negative count and positive heading positions. */
+function isHeadingScan(value: unknown): value is HeadingScan {
+  if (typeof value !== "object" || value === null) return false;
+  const { count, htmlHeadings } = value as { count?: unknown; htmlHeadings?: unknown };
+  return (
+    Number.isInteger(count) &&
+    (count as number) >= 0 &&
+    Array.isArray(htmlHeadings) &&
+    htmlHeadings.every((position) => Number.isInteger(position) && position >= 1)
+  );
+}
+
 /**
- * The count of real headings with the text `title` in each of `texts`, from
- * Bun's Markdown parser (`markdownHeadings.ts`). Under Node, as in the vitest
- * unit run, the count runs in a Bun child process; a failed child throws.
+ * The heading scan of each of `texts`, from Bun's Markdown parser
+ * (`markdownHeadings.ts`). Under Node, as in the vitest unit run, the scan runs
+ * in a Bun child process; a failed child or bad output throws.
  */
-function headingCounts(texts: ReadonlyArray<string>, title: string): Array<number> {
-  if (process.versions["bun"] !== undefined) return countHeadings(texts, title);
+function headingScans(texts: ReadonlyArray<string>, title: string): Array<HeadingScan> {
+  if (process.versions["bun"] !== undefined) return scanHeadings(texts, title);
   const bun = which("bun");
   if (bun === "") throw new Error("the bun executable is not on PATH");
   const script = fileURLToPath(new URL("./markdownHeadings.ts", import.meta.url));
@@ -222,17 +234,13 @@ function headingCounts(texts: ReadonlyArray<string>, title: string): Array<numbe
       `${bun} ${script} ended with ${String(child.status ?? child.signal)}: ${child.stderr.trim()}`,
     );
   }
-  const counts: unknown = JSON.parse(child.stdout);
-  if (
-    !Array.isArray(counts) ||
-    counts.length !== texts.length ||
-    !counts.every((count) => Number.isInteger(count) && count >= 0)
-  ) {
+  const scans: unknown = JSON.parse(child.stdout);
+  if (!Array.isArray(scans) || scans.length !== texts.length || !scans.every(isHeadingScan)) {
     throw new Error(
-      `${bun} ${script} did not write one non-negative count per text: ${child.stdout}`,
+      `${bun} ${script} did not write one valid heading scan per text: ${child.stdout}`,
     );
   }
-  return counts;
+  return scans;
 }
 
 /** The Markdown body of a SKILL.md text: the text after its YAML frontmatter, or the whole text when it has none. */
@@ -246,13 +254,14 @@ function markdownBody(text: string): string {
  * section is the only Report section; the `reportSection` text of config.json is
  * the one source of the section. The bytes are compared as read, so line endings
  * and the final newline count. The section starts at a line boundary. A
- * CommonMark parser (Bun's `Bun.markdown`) finds the real Report headings in the
+ * CommonMark parser (Bun's `Bun.markdown`) finds the real headings in the
  * Markdown body, after the YAML frontmatter, so a heading line in a code block,
  * an HTML block, or a paragraph does not count, and one in a list item or a
- * block quote does. The whole body must have exactly one real Report heading,
- * and the body text before the canonical section must have none. When the file
- * ends with the canonical bytes but has no real Report heading, a block before
- * the section hides it.
+ * block quote does. A heading that holds raw inline HTML fails, because HTML can
+ * change the text that a reader sees; a code span is not HTML. The whole body
+ * must have exactly one real Report heading, and the body text before the
+ * canonical section must have none. When the file ends with the canonical bytes
+ * but has no real Report heading, a block before the section hides it.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -285,9 +294,9 @@ export function checkReportSection(
       );
     }
   }
-  let counts: Array<number>;
+  let scans: Array<HeadingScan>;
   try {
-    counts = headingCounts(
+    scans = headingScans(
       ended.flatMap(({ text, before }) => [text, before]),
       heading.slice("## ".length),
     );
@@ -298,8 +307,18 @@ export function checkReportSection(
     ];
   }
   ended.forEach(({ file }, index) => {
-    const whole = counts[2 * index] ?? 0;
-    const before = counts[2 * index + 1] ?? 0;
+    const body = scans[2 * index];
+    const whole = body?.count ?? 0;
+    const before = scans[2 * index + 1]?.count ?? 0;
+    const htmlHeadings = body?.htmlHeadings ?? [];
+    if (htmlHeadings.length > 0) {
+      for (const position of htmlHeadings) {
+        failures.push(
+          `${shown(repoRoot, file)}: heading ${position} holds inline HTML; write skill headings as plain Markdown`,
+        );
+      }
+      return;
+    }
     if (whole === 1 && before === 0) return;
     if (before > 0 || whole > 1) {
       failures.push(

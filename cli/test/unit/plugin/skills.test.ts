@@ -66,6 +66,8 @@ const skillFile = (name: string): string => `${SKILLS}/${name}/SKILL.md`;
 const HIDDEN = "the Report section at the end is not a heading: a block before it hides it";
 /** The failure for a file that does not end with the canonical section bytes. */
 const NOT_CANONICAL = "does not end with the canonical Report section";
+/** The failure for a heading that holds raw inline HTML. */
+const INLINE_HTML = "holds inline HTML; write skill headings as plain Markdown";
 
 /** Expect a failure that names `file` and contains `detail`. */
 function expectFailure(failures: ReadonlyArray<string>, file: string, detail: string): void {
@@ -242,10 +244,22 @@ describe("kit plugin skills: report section and shared copies", () => {
     { shape: "a CRLF", stale: "## Report a problem with this skill\r" },
     { shape: "a blockquote", stale: "> ## Report a problem with this skill" },
     { shape: "a list item", stale: "- ## Report a problem with this skill" },
-    {
-      shape: "an inline-comment",
-      stale: "## Report a problem with this skill <!-- draft -->",
-    },
+    { shape: "a character-reference", stale: "## Report&#32;a problem with this skill" },
+  ]) {
+    it(`fails ${shape} stale report heading before the canonical one`, () => {
+      const root = copyFixture();
+      edit(
+        root,
+        skillFile("zoom-out"),
+        (text) =>
+          `${text.replace("## Report a problem with this skill", stale)}\n${config.reportSection}`,
+      );
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+    });
+  }
+
+  for (const { shape, stale } of [
+    { shape: "an inline-comment", stale: "## Report a problem with this skill <!-- draft -->" },
     {
       shape: "an HTML-span",
       stale: '## <span title="a > b">Report a problem with this skill</span>',
@@ -254,7 +268,6 @@ describe("kit plugin skills: report section and shared copies", () => {
       shape: "an empty-comment",
       stale: "## <!-->Report a problem with this skill<!-- draft -->",
     },
-    { shape: "a character-reference", stale: "## Report&#32;a problem with this skill" },
     { shape: "a line-break", stale: "## Report a problem<br>with this skill" },
     {
       shape: "an address-element",
@@ -270,8 +283,12 @@ describe("kit plugin skills: report section and shared copies", () => {
       shape: "a script-text",
       stale: "## Report a problem with this skill<script>draft()</script>",
     },
+    {
+      shape: "a hidden-span",
+      stale: "## Re<span hidden>draft</span>port a problem with this skill",
+    },
   ]) {
-    it(`fails ${shape} stale report heading before the canonical one`, () => {
+    it(`fails ${shape} stale report heading as inline HTML`, () => {
       const root = copyFixture();
       edit(
         root,
@@ -279,9 +296,20 @@ describe("kit plugin skills: report section and shared copies", () => {
         (text) =>
           `${text.replace("## Report a problem with this skill", stale)}\n${config.reportSection}`,
       );
-      expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), INLINE_HTML);
     });
   }
+
+  it("passes a heading with a code span that holds `<x>` before the report section", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "## The `<x>` value\n\nText.\n\n## Report a problem with this skill",
+      ),
+    );
+    expect(checkReportSection(root)).toEqual([]);
+  });
 
   it("fails a stale report section that a `<!--` in a YAML literal would hide", () => {
     const root = copyFixture();
@@ -467,12 +495,17 @@ describe("kit plugin skills: report section and shared copies", () => {
         skillFile("one"),
         minimalSkill("one", "Use when testing.", `# Body\n\n${config.reportSection}`),
       );
-      plant(root, "bin/bun", "#!/bin/sh\nwhile IFS= read -r _; do :; done\nprintf '[-1,-1]'\n");
+      const negative = '{"count":-1,"htmlHeadings":[]}';
+      plant(
+        root,
+        "bin/bun",
+        `#!/bin/sh\nwhile IFS= read -r _; do :; done\nprintf '[${negative},${negative}]'\n`,
+      );
       chmodSync(join(root, "bin", "bun"), 0o755);
       vi.stubEnv("PATH", join(root, "bin"));
       try {
         expect(checkReportSection(root)).toContainEqual(
-          expect.stringContaining("did not write one non-negative count per text"),
+          expect.stringContaining("did not write one valid heading scan per text"),
         );
       } finally {
         vi.unstubAllEnvs();

@@ -1,108 +1,84 @@
 /**
- * The count of real Markdown headings with one text, from Bun's built-in
- * CommonMark parser (`Bun.markdown`, https://bun.sh/docs/runtime/markdown). The
- * parser calls the `heading` callback only for a heading block, so a heading line
- * inside a code block, an HTML block, or a paragraph does not count, and one in a
- * list item or a block quote does. Run as a script, the file reads
- * `{ "texts": [...], "title": "..." }` on stdin and writes the counts as JSON,
- * for a caller that does not run under Bun.
+ * A scan of the real Markdown headings of a text, from Bun's built-in CommonMark
+ * parser (`Bun.markdown`, https://bun.sh/docs/runtime/markdown). The parser calls
+ * the `heading` callback only for a heading block, so a heading line inside a
+ * code block, an HTML block, or a paragraph does not count, and one in a list
+ * item or a block quote does. Run as a script, the file reads
+ * `{ "texts": [...], "title": "..." }` on stdin and writes the scans as JSON, for
+ * a caller that does not run under Bun.
  */
 
-/** The named character references that `decodeReferences` knows. */
-const NAMED_REFERENCES: Readonly<Record<string, string>> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: "\u00a0",
-};
-
-/** Decode the named references above and the decimal and hex numeric references; leave any other `&` text as it is. */
-function decodeReferences(text: string): string {
-  return text.replace(
-    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/g,
-    (reference, decimal?: string, hex?: string, name?: string) => {
-      if (name !== undefined) return NAMED_REFERENCES[name] ?? reference;
-      const code = decimal !== undefined ? Number(decimal) : Number.parseInt(hex ?? "", 16);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "\ufffd";
-    },
-  );
+/** The headings of one text: how many have the text `title`, and which hold raw inline HTML. */
+export interface HeadingScan {
+  /** The number of headings without raw inline HTML whose text is the title. */
+  readonly count: number;
+  /** The 1-based position of each heading that holds raw inline HTML. */
+  readonly htmlHeadings: ReadonlyArray<number>;
 }
 
 /**
- * The elements that HTML renders as a block, a list item, or a table part, and
- * `br`: their start and end break a line (HTML rendering,
- * https://html.spec.whatwg.org/multipage/rendering.html, 15.3). An inline
- * element such as `span` gives no break, so `<span>Re</span>port` stays one word.
+ * The start of a CommonMark raw HTML construct: an open tag, a closing tag, a
+ * comment, a processing instruction, a declaration, or a CDATA section
+ * (CommonMark 0.31.2, 6.6, https://spec.commonmark.org/0.31.2/#raw-html).
  */
-const BREAKING_ELEMENTS = [
-  "html, body, address, blockquote, center, dialog, div, figure, figcaption, footer, form",
-  "header, hr, legend, listing, main, p, plaintext, pre, search, xmp",
-  "article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section",
-  "dir, dd, dl, dt, menu, ol, ul, li, fieldset, details, summary, optgroup, option",
-  "table, caption, colgroup, col, thead, tbody, tfoot, tr, td, th, br",
-].join(", ");
+const RAW_HTML =
+  /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>|<!-->|<!--->|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<![A-Za-z][^>]*>|<!\[CDATA\[[\s\S]*?\]\]>)/;
 
-/**
- * The elements that HTML does not render (`display: none` in the same section):
- * they give no break, and their text does not count.
- */
-const HIDDEN_ELEMENTS =
-  "area, base, basefont, datalist, head, link, meta, noembed, noframes, param, rp, script, style, template, title";
-
-/**
- * The visible text of a heading's rendered content. The parser passes inline
- * HTML through as raw HTML, so Bun's HTML tokenizer (`HTMLRewriter`,
- * https://bun.sh/docs/runtime/html-rewriter) splits it: only its text chunks
- * count, so tags and comments give no text, the text inside a hidden element is
- * dropped, and the start and end of each breaking element give a space, so words
- * on two sides of a `<br>` stay apart. Character references are decoded, and
- * runs of whitespace become one space.
- */
-function visibleText(html: string): string {
-  const chunks: Array<string> = [];
-  let hidden = 0;
-  new HTMLRewriter()
-    .on(BREAKING_ELEMENTS, {
-      element: (element) => {
-        chunks.push(" ");
-        if (element.canHaveContent) {
-          element.onEndTag(() => {
-            chunks.push(" ");
-          });
-        }
-      },
-    })
-    .on(HIDDEN_ELEMENTS, {
-      element: (element) => {
-        if (!element.canHaveContent) return;
-        hidden += 1;
-        element.onEndTag(() => {
-          hidden -= 1;
-        });
-      },
-    })
-    .onDocument({
-      text: (chunk) => {
-        if (hidden === 0) chunks.push(chunk.text);
-      },
-    })
-    .transform(html);
-  return decodeReferences(chunks.join("")).replace(/\s+/g, " ").trim();
+interface Chunk {
+  readonly text: string;
+  code: boolean;
 }
 
-/** The number of real headings whose visible text is `title`, for each of `texts`. */
-export function countHeadings(texts: ReadonlyArray<string>, title: string): Array<number> {
+/**
+ * The chunks at the end of `chunks` whose texts join to `length` characters, or
+ * null when no such run exists. The parser emits an element's text chunks just
+ * before its callback, and the callback's `children` is their join.
+ */
+function trailing(chunks: ReadonlyArray<Chunk>, length: number): ReadonlyArray<Chunk> | null {
+  let total = 0;
+  let start = chunks.length;
+  while (start > 0 && total < length) {
+    start -= 1;
+    total += chunks[start]?.text.length ?? 0;
+  }
+  return total === length ? chunks.slice(start) : null;
+}
+
+/**
+ * The heading scan of each of `texts`. The parser gives raw inline HTML to the
+ * `text` callback as its own chunk, as it gives plain text, so a chunk that
+ * starts with a raw HTML construct and is not inside a code span marks its
+ * heading. A heading without raw HTML counts when its text, with each run of
+ * whitespace as one space, is `title`; the parser has decoded the character
+ * references.
+ */
+export function scanHeadings(texts: ReadonlyArray<string>, title: string): Array<HeadingScan> {
   return texts.map((text) => {
+    const chunks: Array<Chunk> = [];
+    const htmlHeadings: Array<number> = [];
+    let headings = 0;
     let count = 0;
     Bun.markdown.render(text, {
+      text: (chunk) => {
+        chunks.push({ text: chunk, code: false });
+        return chunk;
+      },
+      codespan: (children) => {
+        for (const chunk of trailing(chunks, children.length) ?? []) chunk.code = true;
+        return children;
+      },
       heading: (children) => {
-        if (visibleText(children) === title) count += 1;
+        headings += 1;
+        const own = trailing(chunks, children.length);
+        if (own === null || own.some((chunk) => !chunk.code && RAW_HTML.test(chunk.text))) {
+          htmlHeadings.push(headings);
+        } else if (children.replace(/\s+/g, " ").trim() === title) {
+          count += 1;
+        }
         return children;
       },
     });
-    return count;
+    return { count, htmlHeadings };
   });
 }
 
@@ -111,5 +87,5 @@ if (import.meta.main) {
     readonly texts: ReadonlyArray<string>;
     readonly title: string;
   };
-  process.stdout.write(JSON.stringify(countHeadings(texts, title)));
+  process.stdout.write(JSON.stringify(scanHeadings(texts, title)));
 }

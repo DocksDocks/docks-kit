@@ -338,8 +338,10 @@ test('readScope ignores the exclusion parts of a grep path, which read nothing',
   const rooted = [{ name: 'grep', path: `${SCOPE_CASE}/snapshot;!notes.md` }];
   assert.deepEqual(score.readScope(rooted, { ...scope, cwd: live }), { outside: ['!notes.md'] });
   // Code review round 2 of plan #216: omp peels a line selector before it looks for the file, so a part with a
-  // selector that names an existing file is a search root too, not an exclusion.
-  for (const selected of ['!notes.md:1-2', `${SCOPE_CASE}/snapshot;!notes.md:1-2`]) {
+  // selector that names an existing file is a search root too, not an exclusion. Round 3: omp folds a colon-form
+  // range list such as `:20:40,85:100` into ranges on the file, so the whole list is the selector.
+  const selectors = ['!notes.md:1-2', `${SCOPE_CASE}/snapshot;!notes.md:1-2`, '!notes.md:20:40,85:100'];
+  for (const selected of selectors) {
     const call = [{ name: 'grep', path: selected }];
     assert.deepEqual(score.readScope(call, { ...scope, cwd: live }), { outside: ['!notes.md'] }, selected);
   }
@@ -1083,4 +1085,27 @@ test('transcripts refuses a prompt without an agent header and a transcript with
     message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3P0LowR1Plan (${file}): agent none, not review-bench-candidate-plan-low; dispatch them again with the agent of the prompt`,
   });
   assert.equal(readText(path.join(run, 'meta.json')), before);
+});
+// Code review round 3 of plan #216: transcripts checks the header of every saved prompt before it looks for any
+// transcript, so a damaged prompt without a transcript stops the command before it writes the meta.json of another
+// dispatch. A well-formed prompt without a transcript keeps the partial write (see the tests above).
+test('transcripts checks every prompt header first and writes nothing when one is damaged', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = (n) => path.join(caseDir, 'P0-low', `run-${n}`);
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  // run-1 has a damaged prompt and no transcript; run-2 has a well-formed prompt and its transcript.
+  put(run(1), 'prompts/plan.txt', 'Review.\n');
+  put(run(2), 'prompts/plan.txt', 'agent: review-bench-candidate-plan-low\n\nReview.\n');
+  for (const n of [1, 2]) put(run(n), 'meta.json', { config: CONFIGS.low });
+  const calls = [['read', { path: path.join(caseDir, 'plan.md') }]];
+  put(sessions, 'Plan3P0LowR2Plan.jsonl', toolTranscript(caseDir, 30, calls, 'review-bench-candidate-plan-low'));
+  const before = readText(path.join(run(2), 'meta.json'));
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 prompts have no agent header: ${path.join(run(1), 'prompts', 'plan.txt')}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+  });
+  assert.equal(readText(path.join(run(2), 'meta.json')), before);
 });
