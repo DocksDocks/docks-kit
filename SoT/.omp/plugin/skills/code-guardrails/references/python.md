@@ -4,13 +4,14 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- Find the file that Ruff uses: run `ruff check --show-settings <file.py>` on one source file and read `Settings path`. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
-- In that file, search `ignore` and `per-file-ignores` for `PLR2004` or a prefix of it, such as `PL`, `PLR`, or `PLR2`.
+- Find the config from the project's own Ruff command: if it passes `--config`, use that file. Otherwise, run `ruff check --show-settings <file.py>` on one source file from the project root and read `Settings path`. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
+- Merge only into a project file inside the repository. If `Settings path` is absent (Ruff uses its defaults) or names a user-level file, add the settings to the project: `[tool.ruff.lint]` in `pyproject.toml`, or a new `ruff.toml` when the project has no `pyproject.toml`.
+- In that file, search `ignore`, `extend-ignore`, `per-file-ignores`, and `extend-per-file-ignores` for `PLR2004` or a prefix of it, such as `PL`, `PLR`, or `PLR2`.
 - Ask before installing Ruff if the project does not have it.
 
 ## Recommended config
 
-Merge these entries into the file that Ruff uses; do not replace its settings. In `ruff.toml` or `.ruff.toml`, drop the `tool.ruff.` prefix: write `[lint]` and `[lint.pylint]`. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
+Merge these entries into the project file that Detect found; do not replace its settings. In `ruff.toml` or `.ruff.toml`, drop the `tool.ruff.` prefix: write `[lint]` and `[lint.pylint]`. Keep existing rule selections and add missing prefixes to `extend-select`. If `extend-select` exists, append missing prefixes to its list. Keep any stricter settings. Do not add `PLR2004` to `per-file-ignores` for test files. Ask the user before you remove an existing test exception for it.
 
 ```toml
 [tool.ruff.lint]
@@ -20,7 +21,7 @@ extend-select = ["E", "F", "B", "UP", "SIM", "PL", "RUF", "ERA", "T20", "ANN"]
 allow-magic-value-types = []
 ```
 
-`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. An `ignore` or `per-file-ignores` entry that matches `PLR2004` turns the rule off, even when `extend-select` lists `PL`: Ruff applies the more specific selector, and `ignore` wins over an equally specific selector. Report that entry and ask the user before you remove it; do not report `PLR2004` as on while an entry turns it off. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
+`select` replaces the default rule set; `extend-select` adds to it. Keep an existing `select` list instead of replacing it. An entry in `ignore`, `extend-ignore`, `per-file-ignores`, or `extend-per-file-ignores` that matches `PLR2004` turns the rule off, even when `extend-select` lists `PL`: Ruff applies the more specific selector, and `ignore` wins over an equally specific selector. Report that entry and ask the user before you remove it; do not report `PLR2004` as on while an entry turns it off. This setup changes Ruff only: do not install a type checker or change its settings. Report each new prefix and setting to the user.
 
 ## Rules that catch raw values
 
@@ -65,11 +66,12 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Run the project's Ruff command, or `ruff check .`. Run `ruff check --show-settings <file.py>` and confirm that `linter.rules.enabled` lists `magic-value-comparison (PLR2004)`. Review violations, then report the config changes and the remaining findings.
+Run the project's Ruff command, or `ruff check .`. Run `ruff check --show-settings <file.py>` with the project's `--config`, if it uses one, for a source file and for a test file. Confirm that `linter.rules.enabled` lists `magic-value-comparison (PLR2004)`, and that no `linter.per_file_ignores` entry whose pattern matches that file lists it. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 
-- Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/>
+- Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/#config-file-discovery>
+- Ruff `extend-per-file-ignores` and the deprecated `extend-ignore`: <https://docs.astral.sh/ruff/settings/#lint_extend-per-file-ignores>
 - Ruff rule families `E`, `F`, `B`, `UP`, `SIM`, `PL`, `RUF`, `ERA`, `T20`, `ANN`: <https://docs.astral.sh/ruff/rules/>
 - Ruff rule `PLR2004` and its exemptions: <https://docs.astral.sh/ruff/rules/magic-value-comparison/>
 - Ruff `extend-select`, per-file ignores, and `allow-magic-value-types`: <https://docs.astral.sh/ruff/settings/>

@@ -103,7 +103,7 @@ import { MAX_UPLOAD_BYTES, TIMEOUT_MS, STORAGE_KEY, type State } from "./transfe
 
 ## Verify
 
-Run the lint command that Detect found: the project's lint script, or the installed linter through a runner that does not download, such as `npx --no oxlint` or `bunx --no-install oxlint` (`npx --no eslint` when ESLint owns linting). Plain `npx` and `bunx` download a missing package, and npm assumes yes when standard input is not a terminal. If the linter is not installed, ask the user and end your turn; do not install or download it in that turn. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
+Run the local binary: `node_modules/.bin/oxlint`, or `node_modules/.bin/eslint` when ESLint owns linting. Use the project's lint script only after you read it and see that it calls the local binary and installs or downloads nothing. Do not use `npx` or `bunx`: they can contact the registry or download a missing package, and npm assumes yes when standard input is not a terminal. If the binary is missing, ask the user and end your turn; do not install or download it in that turn. Confirm that the linter loads the existing config and that the new rules report source violations. List each config change and explain every remaining finding.
 
 ## Sources
 
@@ -115,5 +115,5 @@ Run the lint command that Detect found: the project's lint script, or the instal
 - Oxlint CLI commands and category behavior: <https://oxc.rs/docs/guide/usage/linter/cli.html>
 - anti-slop install, ownership, and rule names: <https://github.com/dmmulroy/anti-slop>
 - anti-slop MIT license: <https://github.com/dmmulroy/anti-slop/blob/main/LICENSE>
-- npm `npx --no` and the implied `--yes` without a terminal: <https://docs.npmjs.com/cli/v11/commands/npm-exec>
-- Bun `bunx --no-install`: <https://bun.com/docs/pm/bunx>
+- npm `npx` install of a missing package and the implied `--yes` without a terminal: <https://docs.npmjs.com/cli/v11/commands/npm-exec>
+- Bun `bunx` auto-install of a missing package: <https://bun.com/docs/pm/bunx>

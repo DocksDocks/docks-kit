@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "a54fcad30b35f5ecebd33d6c28d5c28e9522d66f9d5d6282e6f0556a2120789b"
+  content_hash: "4b6150826cd1459b88caa5c282d0b41842b1469f350254e26eef6ffca9a32f25"
 ---
 
 # Report a Skill Issue
@@ -90,7 +90,7 @@ gh issue view <n> --repo github.com/DocksDocks/docks-kit --comments
 | A closed issue matches, and the problem is still in the latest version | Draft a new issue that links the closed one |
 | No match | Draft a new issue |
 
-Without gh, search in a browser at `https://github.com/search?q=repo%3ADocksDocks%2Fdocks-kit+is%3Aissue+<url-encoded key words>&type=issues`. A query without `state:` matches open and closed issues. If the runtime can run neither gh nor a web search, write the draft anyway. In the message that shows it, say that the duplicate search did not run, and give the search URL for the user to open before filing. Do not write that no report exists.
+If gh is missing, or the gh search fails (gh is not logged in, a network error, or a rate limit), search in a browser at `https://github.com/search?q=repo%3ADocksDocks%2Fdocks-kit+is%3Aissue+<url-encoded key words>&type=issues`. A query without `state:` matches open and closed issues. If neither the gh search nor a web search works, write the draft anyway. In the message that shows it, say that the duplicate search did not run, and give the search URL for the user to open before filing. Do not write that no report exists.
 
 ### 4. Draft the report
 
@@ -118,13 +118,13 @@ Show the user, as the final message of your turn:
 
 - the target: a new issue in DocksDocks/docks-kit, or a comment on issue #n there;
 - the exact title and body;
-- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it).
+- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it). Without gh, give the link or the text from "Without gh, or without a way to ask" instead.
 
 Ask the user to approve or change the text, then end your turn. A security problem stops before this step: give the private draft instead (see "Security problems").
 
 ### 6. File the approved text
 
-Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. Run `gh api --hostname github.com user --jq .login`. If it prints an account other than the one in the approved message, file nothing: tell the user and get approval again. Otherwise file the text, remove both files, and give the user the URL that gh prints.
+Write the approved title and body, unchanged, to two new temporary files. Run the scans from "Check before filing" on them. Run `gh api --hostname github.com user --jq .login`. File the text only when that command succeeds and prints exactly the account named in the approved message. On an error, an empty output, or another account, file nothing: tell the user and stop. Then file the text, remove both files, and give the user the URL that gh prints.
 
 ```bash
 title=$(mktemp)
@@ -257,7 +257,7 @@ Check the draft before you show it, and again before you file it:
 - "What the skill says" quotes the instruction exactly, with its heading.
 - The quote comes from the copy that the runtime loaded, and it shows the problem.
 - You searched for an existing report (stage 3), or your message says that the search did not run and gives the search URL. A draft that adds to an existing issue is a comment on that issue.
-- Your message names the target, the command that you will run, and the GitHub account (stage 5). In a run where you cannot ask, it gives the link from "Without gh, or without a way to ask" instead.
+- Your message names the target, the command that you will run, and the GitHub account (stage 5). Without gh, or in a run where you cannot ask, it names the target and gives the link from "Without gh, or without a way to ask" instead. When no script can run, the title and the body as text replace the link; the message then needs no command, no account, and no link.
 - The title and the body contain no secret value or token, no private repository, organization, customer, or person name, no internal hostname, no absolute machine path, no proprietary code or data, and no private plan or issue title. The second and third scans below check the repository names.
 - For a private project, the title and the body contain no owner or name of its remotes and no branch name, also in quoted output, and no `#` before its issue and pull request numbers in prose (stage 4).
 - The problem is not a security problem. If it is, give a private draft only.

@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "febdfc715a3b6b6e5e1a848f07ef825181e8de499a6e465eb4c68c74aeca560e"
+  content_hash: "ce170cc5e8e3515e8d50bd56243e74a15a7dde1b68509911ae49f3d55ca57e16"
 ---
 
 # Code Guardrails
@@ -181,7 +181,7 @@ group() {
   awk '{
     file = $0; sub(/:.*/, "", file); rest = substr($0, length(file) + 2)
     line = rest; sub(/:.*/, "", line); v = substr(rest, length(line) + 2)
-    if (v ~ /^["\047]/) v = substr(v, 2, length(v) - 2)
+    if (v ~ /^["\047]/) { v = substr(v, 2, length(v) - 2); if (length(v) < 4) next }
     else {
       if (v !~ /^0[xXbBoO]/) sub(/_?f(32|64)$/, "", v)
       sub(/_?[iu](8|16|32|64|128|size)$/, "", v); gsub(/_/, "", v)
@@ -199,9 +199,10 @@ git grep --untracked -I -n -o -w -E \
   '(0[xXbBoO][0-9a-fA-F_]+|[0-9][0-9_.]*[0-9])(_?([iu](8|16|32|64|128|size)|f32|f64))?' \
   -- "${langs[@]}" | group
 
-# Quoted strings with 4 or more characters between the quotes.
+# Quoted strings. The regex matches every whole quoted string, so a short string
+# cannot shift the match; the grouping then drops strings under 4 characters.
 git grep --untracked -I -n -o -E \
-  "\"([^\"\\\\]|\\\\.){4,}\"|'([^'\\\\]|\\\\.){4,}'" -- "${langs[@]}" | group
+  "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'" -- "${langs[@]}" | group
 ```
 
 The checks count `'x'` and `"x"` as one string. They count `1_024` and the Rust
