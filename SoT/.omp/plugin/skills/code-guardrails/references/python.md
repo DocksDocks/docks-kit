@@ -1,5 +1,14 @@
 # Python guardrails
 
+## Contents
+
+- [Detect](#detect)
+- [Recommended config](#recommended-config)
+- [Rules that catch raw values](#rules-that-catch-raw-values)
+- [Constant map](#constant-map)
+- [Verify](#verify)
+- [Sources](#sources)
+
 ## Detect
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
