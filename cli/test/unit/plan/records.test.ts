@@ -112,6 +112,30 @@ describe("plan records", () => {
     SPAWN_TIMEOUT_MS,
   );
 
+  it.skipIf(!PLAN_CLI_HOST_SUPPORTED)(
+    "show names a machine path in bold and in an unpadded table cell",
+    () => {
+      const context = planCliContext();
+      const plan = context.createPlan("machine paths in emphasis");
+      context.updateIssue(plan, (entry) => {
+        entry.body = body().replace(
+          "The parser loses mixed-case records.",
+          "Bold **/tmp/cache/x** and a cell |/home/u/x|",
+        );
+      });
+      const shown = context.run("show", String(plan));
+      expectSuccess(shown, "show the plan");
+      // #213, R7: the delimiters are not part of the reported path.
+      expect(
+        shown.stdout.split("\n").filter((line) => line.startsWith("advice: body contains")),
+      ).toStrictEqual([
+        "advice: body contains an absolute machine path: /tmp/cache/x",
+        "advice: body contains an absolute machine path: /home/u/x",
+      ]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
   it("machine path advice names each distinct machine path and skips routes, portable paths, and slash text", () => {
     // Machine path advice names each distinct path into a home, a mount, a named temporary or runtime directory,
     // a Windows drive, or a network share. URL routes, portable system paths, and slash text get none (#71).
