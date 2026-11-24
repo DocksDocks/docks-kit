@@ -868,24 +868,22 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
   );
 
   it(
-    "a reopen keeps the one phase label of its label read and every other label",
+    "a reopen refuses before any write when the phase labels changed after the settle read",
     () => {
       const context = planCliContext();
       const { parent, child } = closableParent(context);
-      context.updateState((state) => {
-        state.labels["area:docs"] = { color: "ededed" };
-      });
       expectSuccess(archive(context, String(parent)), "archive the parent");
       context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
       // The retry reads the plan twice (the first read and the settle read); the labels change before the read of the labels.
       context.schedule(parent, {
         afterReads: reads(context, parent) + 2,
-        labels: ["plan", "area:docs", "plan:blocked"],
+        labels: ["plan", "plan:blocked"],
       });
+      const writes = context.writes().length;
       const result = archive(context, String(parent));
-      refuse(result, `archive refused: child #${child} is ongoing`);
-      expect(result.stdout).toBe(`plan #${parent} reopened: blocked\n`);
-      expect(context.issue(parent).labels).toStrictEqual(["plan", "area:docs", "plan:blocked"]);
+      refuse(result, `plan #${parent} changed during the settle wait; run archive again`);
+      expect(context.issue(parent).state, "the plan stays closed").toBe("CLOSED");
+      expect(context.writes().length, "no reopen and no comment").toBe(writes);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -937,30 +935,6 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       refuse(result, `archive refused: child #${child} is ongoing`);
       expect(result.stdout).toBe(`plan #${parent} reopened: ongoing\n`);
       expect(context.issue(parent).labels).toStrictEqual(["plan", "area:docs", "plan:ongoing"]);
-    },
-    SPAWN_TIMEOUT_MS,
-  );
-
-  it(
-    "a reopen whose label read shows two phase labels adds none and refuses with the repair",
-    () => {
-      const context = planCliContext();
-      const { parent, child } = closableParent(context);
-      expectSuccess(archive(context, String(parent)), "archive the parent");
-      context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
-      context.schedule(parent, {
-        afterReads: reads(context, parent) + 2,
-        labels: ["plan", "plan:blocked", "plan:ongoing"],
-      });
-      const result = archive(context, String(parent));
-      refuse(result, repairHint(parent));
-      expect(phaseLabels(context, parent)).toStrictEqual(["plan:blocked", "plan:ongoing"]);
-      expect(context.issue(parent).state, "the plan is open, so status can repair it").toBe("OPEN");
-      expectSuccess(
-        context.run("status", String(parent), "blocked", "--reason", "Waiting"),
-        "repair to blocked",
-      );
-      expect(phaseLabels(context, parent)).toStrictEqual(["plan:blocked"]);
     },
     SPAWN_TIMEOUT_MS,
   );

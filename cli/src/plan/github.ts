@@ -671,39 +671,42 @@ export interface ExpectedIssue {
 // gh issue view reads the first 100 labels only (cli/cli api/query_builder.go); a full page may hide more.
 const GH_VIEW_LABEL_LIMIT = 100;
 
-const ownerLogins = (current: PreWrite): string =>
-  current.assignees
-    .map((owner) => String(owner.login))
-    .sort()
-    .join("\n");
+const decodeGraphqlPreWrite = malformed(
+  Schema.Struct({
+    id: Schema.NonEmptyString,
+    body: Schema.String,
+    state: Schema.String,
+    stateReason: Schema.NullOr(Schema.String),
+    assignees: Schema.Struct({
+      nodes: Schema.Array(Schema.Struct({ id: Schema.NonEmptyString, login: Schema.String })),
+    }),
+  }),
+  "plan issue",
+);
 
 /**
  * Every label name of the issue, with the pre-write read to compare. A full label page of `gh issue view` may hide
- * more labels, so the labels are paged with GraphQL, and the issue is read again after those requests: the body,
- * state, and owners of the two reads must agree. When the second read shows fewer than 100 labels, it holds every
- * label and wins; otherwise its first 100 labels must be the first 100 of the pages, so no field is older than another.
+ * more labels, so the issue is read again with GraphQL: its body, state, close reason, owners, and first label page
+ * come from that one read, the later label pages follow it, and that read replaces the `gh issue view` read.
  */
 const currentIssue = Effect.fn("plan.currentIssue")(function* (number: number, current: PreWrite) {
   if (current.labels.length < GH_VIEW_LABEL_LIMIT)
     return { names: current.labels.map((label) => label.name), latest: current };
-  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${issueConnectionSelection("labels", "name")}}}}`;
-  const first = field(
-    field(field(yield* graphql(query, { number }), "repository"), "issue"),
-    "labels",
-  );
-  const paged = (yield* decodeStoredLabels(yield* issueNodes(number, first, "labels", "name"))).map(
-    (label) => label.name,
-  );
-  const latest = yield* preWriteIssue(number);
-  const shown = latest.labels.map((label) => label.name);
-  if (
-    latest.body !== current.body ||
-    latest.state !== current.state ||
-    ownerLogins(latest) !== ownerLogins(current) ||
-    (shown.length >= GH_VIEW_LABEL_LIMIT && !sameList(shown, paged.slice(0, shown.length)))
-  )
-    return yield* new PlanRefusal({ message: CHANGED_REMOTELY });
-  return { names: shown.length < GH_VIEW_LABEL_LIMIT ? shown : paged, latest };
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id body state stateReason assignees(first:100){nodes{id login}} ${issueConnectionSelection("labels", "name")}}}}`;
+  const raw = field(field(yield* graphql(query, { number }), "repository"), "issue");
+  const read = yield* decodeGraphqlPreWrite(raw);
+  const names = (yield* decodeStoredLabels(
+    yield* issueNodes(number, field(raw, "labels"), "labels", "name"),
+  )).map((label) => label.name);
+  const latest: PreWrite = {
+    id: read.id,
+    body: read.body,
+    state: read.state,
+    stateReason: read.stateReason,
+    labels: names.map((name) => ({ name })),
+    assignees: read.assignees.nodes,
+  };
+  return { names, latest };
 });
 
 /**

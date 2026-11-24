@@ -494,12 +494,30 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       refuse(
         reopen(context, plan),
-        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to claim it, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to repair the phase label and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
       );
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
         stateReason: "REOPENED",
       });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen names a foreign owner that appears after the reopen write and posts no comment",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("foreign owner after the reopen");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.afterMutationOnce = { issue: plan.number, assignees: ["plan-agent", "other-agent"] };
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but plan #${plan.number} is owned by other-agent; no comment was posted; plan #${plan.number} has another owner (other-agent); settle the ownership by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(context.writes().length, "the reopen only").toBe(1);
     },
     SPAWN_TIMEOUT_MS,
   );
