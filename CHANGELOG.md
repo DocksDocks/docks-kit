@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.1: plan commands check more before they write
+
+### Fixed
+
+- A plan write now refuses a change that it did not see before: a close, a
+  new close reason, a lost `plan` label, a changed phase label, or a new
+  owner. A plan with 100 or more labels is read in full. After a write, the
+  claim and the phase labels must have landed.
+- `archive --pr` accepts only a pull request that landed by its own merge
+  commit.
+- `list` reads the bodies of open plans and lists a plan without a contract
+  marker as `unreadable`. It refuses a repository with issues turned off.
+- A reopen now sends the state change, the claim, and the label first, and
+  the comment after it. When a step fails, the refusal says what landed and
+  what to do next.
+- A plan without the `plan` label is refused with the command that adds it.
+- A fenced example in a review comment no longer counts as a heading, a
+  verdict, or the manager response.
+- The plan record check also finds a machine path after `*` and `|`.
+- Review comments, plan lists, and records past the first page are read in
+  full (DocksDocks/docks-kit#213).
+
 ## 2026-11-23 - docks-kit 0.29.0: agents can clean their own workspace
 
 ### Changed
