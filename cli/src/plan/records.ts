@@ -42,8 +42,68 @@ export const PLAN_LABELS = [
 // A machine path points into a user or root home, a mount, a named temporary or runtime directory,
 // a Windows drive, or a network share. URL routes, slash prose, and portable system paths such as
 // /usr/bin/env or a bare /tmp do not match (#71). The match runs to the next space or delimiter.
-const MACHINE_PATH =
-  /(?<=^|[\s("'`[{=:;,>]|file:\/\/)(?:\/(?:home|Users|root|mnt|media|Volumes|run\/(?:user|media))\/[^\s/`'")]|\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s/`'")]|\/(?:private\/)?var\/folders\/|[A-Za-z]:[\\/]|\\\\[\w.$-]+\\[\w.$-])[^\s`'"()[\]{}|,;]*/gm;
+// Emphasis does not hide a path: a star run before a path counts as a boundary when the same run closes right after the
+// path (`**/tmp/x**`). This reading skips code spans (a backtick run up to the next run of the same length on the same
+// line), so a glob such as `src/**/tmp/x`, `**/tmp/*.log`, or `` `echo **/tmp/cache/**` `` gives no advice. Limits: a
+// path that opens a longer bold phrase, as in `**/tmp/x is stale**`, gives none either, and a code span that runs over
+// two lines is read as text (#213, R7).
+const MACHINE_PATH_BODY =
+  String.raw`(?:\/(?:home|Users|root|mnt|media|Volumes|run\/(?:user|media))\/[^\s/` +
+  "`" +
+  String.raw`'")]|\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s/` +
+  "`" +
+  String.raw`'")]|\/(?:private\/)?var\/folders\/|[A-Za-z]:[\\/]|\\\\[\w.$-]+\\[\w.$-])[^\s` +
+  "`" +
+  String.raw`'"()[\]{}|,;]*`;
+const MACHINE_PATH_BOUNDARY = String.raw`^|[\s("'` + "`" + String.raw`[{=:;,>|]`;
+const MACHINE_PATH = new RegExp(
+  String.raw`(?<=${MACHINE_PATH_BOUNDARY}|file:\/\/)${MACHINE_PATH_BODY}`,
+  "gm",
+);
+const EMPHASIZED_MACHINE_PATH = new RegExp(
+  String.raw`(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1(?!\*))`,
+  "gm",
+);
+// Code spans blanked to spaces, line by line (GFM): outside a span, a backslash escapes the next backtick; a backtick
+// run opens a span that the next run of the same length on the line closes, with no escape inside the span; a run
+// without a closer is literal. Other characters stay, so a path read on the result is the path of the text.
+function blankCodeSpans(text: string): string {
+  if (!text.includes("`")) return text;
+  // The result has the length of `text`, so an offset into it is an offset into `text`.
+  let changed = false;
+  const lines = text.split("\n").map((line) => {
+    if (!line.includes("`")) return line;
+    let parts: Array<string> | undefined;
+    let copied = 0;
+    let index = 0;
+    while (index < line.length) {
+      if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
+        index += 2;
+        continue;
+      }
+      if (line[index] !== "`") {
+        index += 1;
+        continue;
+      }
+      const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
+      const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
+      if (!close) {
+        index += run.length;
+        continue;
+      }
+      const end = index + run.length + close.index + run.length;
+      parts ??= [];
+      parts.push(line.slice(copied, index), " ".repeat(end - index));
+      copied = end;
+      index = end;
+    }
+    if (parts === undefined) return line;
+    changed = true;
+    parts.push(line.slice(copied));
+    return parts.join("");
+  });
+  return changed ? lines.join("\n") : text;
+}
 const SECTIONS = [
   "Goal",
   "Research",
@@ -348,8 +408,18 @@ export function normalizePlan(
     ACCEPTANCE_SEPARATOR,
     table(sections.get("Acceptance") ?? "", ACCEPTANCE_HEADER).rows,
   );
+  const withoutCodeSpans = blankCodeSpans(cleaned);
   const machinePaths = new Set(
-    Array.from(cleaned.matchAll(MACHINE_PATH), ([match]) => match.replace(/[.:]+$/, "")),
+    [...cleaned.matchAll(MACHINE_PATH), ...withoutCodeSpans.matchAll(EMPHASIZED_MACHINE_PATH)]
+      .sort((a, b) => a.index - b.index)
+      // A path ends before trailing sentence marks. Outside a code span, a trailing star run closes emphasis and goes,
+      // as in `**stale /tmp/x**`; inside a code span it is literal and stays, as in `` `/tmp/log*` ``. Limit: a
+      // literal trailing star outside a code span goes too.
+      .map(({ 0: match, index }) => {
+        const path = match.replace(/[.:]+$/, "");
+        const inSpan = withoutCodeSpans[index] !== cleaned[index];
+        return inSpan ? path : path.replace(/\*+$/, "").replace(/[.:]+$/, "");
+      }),
   );
   for (const machinePath of machinePaths)
     advice.push(`body contains an absolute machine path: ${machinePath}`);

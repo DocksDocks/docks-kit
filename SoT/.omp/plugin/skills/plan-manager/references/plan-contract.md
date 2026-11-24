@@ -286,16 +286,33 @@ agents define the exact block they return, and that block follows these rules.
   or `round 2, lens correctness`, is allowed. An archive record (Archive) is
   not a review record.
 - A comment holds one or more review blocks. A block starts at the first line,
-  or at a later Markdown heading line (one or more `#`, indented by at most
-  three spaces) that names the comment's kind. A quoted or list-item heading
-  is prose and starts no block. A panel round comment holds one block per lens.
+  or at a later Markdown heading line (one to six `#` and a space or a tab,
+  indented by at most three spaces) that names the comment's kind. A heading
+  after `>` or a list marker is prose and starts no block, but an indented
+  heading on a continuation line of a list item does: quote an earlier round in
+  a first-column fence. A panel round comment holds one block per lens.
 - A verdict line holds `plan-review:` or `code-review:`, then a verdict word.
-  A space can replace the hyphen.
+  A space can replace the hyphen. After quote and list markers, the line
+  starts with the label, with only `*`, `_`, or backtick runs between its parts
+  and no white space, then white space and the verdict word: the whole token up
+  to white space, without closing punctuation at its end (so `pass.2` is one
+  token), that is a word (letters and digits joined by hyphens)
+  with optional `*` or `_` runs outside and one optional backtick pair right
+  around it, so a code span keeps its content. The runs of the label and of the
+  word must pair up in order, as in `**Code-review:** pass` or
+  `**Code-review: pass**`. Any other line, such as `Code-review:_pass`,
+  `Code-review: pa_ss`, or `Code-review: pass2`, reads as an unknown word.
 - On each line, the helper ignores Markdown emphasis (`*`, `_`), code marks,
-  blockquote markers, and list markers when it reads a kind or a verdict.
-- The helper reads blocks, verdicts, and severities only above the line
-  `#### Manager response to round <k>`, in every contract version. So a finding
-  that the response quotes cannot change the verdict.
+  blockquote markers, and list markers when it reads a kind or a severity. A
+  block heading must match as a raw heading line first; only its title is then
+  read through emphasis and code marks.
+- The helper reads blocks, verdicts, and severities only above the first line
+  `#### Manager response to round <k>` that starts at the first column outside
+  a fenced code block whose opening fence starts at the first column, in every
+  contract version. So a finding that the response quotes cannot change the
+  verdict, and a heading that a block quotes in a quote, a list item, an
+  indent, or such a fence cannot cut off a later block. A fence that opens after
+  spaces is text, so a first-column heading inside it does cut off the rest.
 
 | Verdict input | Plan result | Code result |
 |---|---|---|
@@ -303,13 +320,28 @@ agents define the exact block they return, and that block follows these rules.
 | `repair`, `changes`, `fixes-required` | `repair` | `fixes-required` |
 | `blocked` | `blocked` | `blocked` |
 
-The verdict of a block is its first verdict line of the comment's kind. A later
+The verdict of a block is its first verdict line of the comment's kind. A line
+inside a fenced code block whose opening fence starts at the first column is no
+block heading and no verdict line, but a fenced verdict line of the comment's
+kind that is stricter than the comment's verdict keeps the stricter verdict, as
+a fenced `[high]` does. When every live verdict line is masked, the strictest
+masked verdict line counts, unless it is `pass`. A fence inside a quote or a
+list item, or an indented fence, is text: put a verdict example in a fence at
+the first column. Raw HTML changes where a fence opens and closes and can hold
+a line that looks like the response heading, so review text above the manager
+response that holds a line that can open raw HTML (`<` and a letter, `/`, `!`,
+or `?`, after at most three spaces) reads as `blocked` when it also holds a
+first-column fence line or when the comment has a manager response; post it
+again without the HTML. A later
 verdict line in the same block is prose, such as a quoted verdict of an earlier
-round. A verdict line of the other kind does not count. A later block without a
-verdict line is part of the block before it. The first block needs a verdict
-line; without one, the comment is not a review record. A block verdict line
-with a word outside the table makes the comment unreadable as a review, so it
-is not a review record. The most severe block verdict wins: `blocked`, then
+round. A verdict line of the other kind does not count. A block without a
+verdict line is part of the block before it, and the verdict lines of the other
+blocks still count when the first block has none. A comment with no verdict
+line of its kind is not a review record. A verdict word outside the table, such
+as `pass2`, reads as `blocked`, so no block can make the comment unreadable and
+keep an older pass. A
+block heading has one to six `#`
+and then a space or a tab. The most severe block verdict wins: `blocked`, then
 `repair` or `fixes-required`, then `pass`.
 
 A code pass derives as fixes-required when any line contains `[critical]` or
@@ -541,9 +573,16 @@ plan #<n> was closed by <closer> before pull request #<pr> merged; reopen it by 
 plan #<n> changed during the settle wait; run reopen again
 plan #<n> changed during the settle wait; run archive again
 GitHub left plan #<n> closed with reason REOPENED and refuses every state change; ask GitHub Support to repair it
-plan #<n> closed again after the reopen; run reopen again
-plan #<n> closed again after the reopen; run archive again
-plan issue state differs after reopen; run status <n> ongoing to repair the phase labels
+plan #<n> lacks the plan label; add it with `gh issue edit <n> --add-label plan`
+plan #<n> closed again after the reopen; no comment was posted; run reopen again
+plan #<n> closed again after the reopen; no comment was posted; run archive again
+plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> reopened, but its claim did not land; no comment was posted; <recovery>
+the reopen request of plan #<n> failed (<error>); it reads closed with phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> reopened, but its request failed (<error>); it reads open with phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> is open again, but its reopen comment did not post (<error>); <recovery>
+plan #<n> closed again after the reopen, but its reopen comment did not post (<error>); <recovery>
+pull request #<pr> did not land by its own merge: its merge commit is missing, is its head commit, or belongs to another pull request
 ```
 
 GitHub call failures exit 1 and print one of these messages on stderr. `edit`,
@@ -684,11 +723,12 @@ merge into the default branch closes the issue. For a partial pull request:
    plan issue is listed, say in the merge question that the merge closes the
    issue and that you will reopen it.
 2. After the merge, run `reopen <n> --pr <pr>`. The helper waits until GitHub
-   records the close by that pull request, then waits 10 s more. It reopens the
-   plan with the comment
-   `Reopened: partial pull request #<pr> closed this plan through its linked branch. Work continues.`,
-   claims an unassigned plan and restores `plan:ongoing` when the plan has no
-   phase label, in the same write, and prints the status. Never
+   records the close by that pull request, then waits 10 s more. One write
+   reopens the plan, claims an unassigned plan, and restores `plan:ongoing` when
+   the plan has no phase label; a second write posts the comment
+   `Reopened: partial pull request #<pr> closed this plan through its linked branch. Work continues.`.
+   When the second write fails, the helper names the comment to post. It
+   prints the status. Never
    reopen the issue by hand right after the merge.
 3. Run `show <n>` again. Continue only when the status is `ongoing`.
 
@@ -843,10 +883,13 @@ two targets.
 Run `archive <n> --pr <pr>` after the landing merge, when every step is
 terminal. `<pr>` is the landing pull request. Archive requires terminal steps
 and a trusted latest Code-review pass. It also requires proof from that pull
-request. The pull request merged into the default branch of this repository,
-and its description carries a GitHub closing keyword for this issue. A title
+request. The pull request merged into the default branch of this repository
+through its own merge: its merge commit is not its head commit, and GitHub
+associates that commit with the pull request, so an indirect merge is no proof.
+Its description carries a GitHub closing keyword for this issue. A title
 or sidebar link is not proof. A merge into another branch is not proof. Archive
-checks the base branch first, then the description, and names the failed check.
+checks the merge, then the base branch, then the description, and names the
+failed check.
 For a description without the keyword, ask the repository owner before you edit
 the merged pull request. If the owner approves, add `Closes #<n>` to its
 description, then run archive again. Otherwise, stop and report.
@@ -914,22 +957,30 @@ A retry of `archive <n>` or `archive <n> --pr` on a plan that is closed as
 completed does the same safe reopen for the open work that `show` advises on:
 a child that is not terminal on every plan, and on a parent archive record also
 a named child that is not linked or no finished named child. The `--pr` retry checks this
-right after the not-merged refusal, before its other refusals. Run the retry
+right after the not-merged and own-merge refusals, before its other refusals. Run the retry
 when `show` advises it (Normalization, advice, and refusals). Each safe reopen,
-by `reopen` or by `archive`, reads the labels right before its write. It adds
-`plan:ongoing` only when that read shows no phase label, and it never replaces
-the label set. After the reopen, it reads the plan again. When that read shows
-a closed plan, someone closed it after the write, and it refuses with
-`plan #<n> closed again after the reopen; run reopen again` or
-`plan #<n> closed again after the reopen; run archive again`, after the command
-that ran. The rerun reads the new close and decides again: `reopen` reopens
-after a new close by the same pull request and refuses a close by another
-closer, and `archive` reopens a plan closed as completed with open work and
-refuses a retired plan. When that read shows an open plan with no phase label
-or with more than one, it refuses with
-`plan issue state differs after reopen; run status <n> ongoing to repair the phase labels`
-and prints no status; `status <n> ongoing` or `status <n> blocked` repairs it.
-Otherwise it prints the status of that read, such as `reopened: blocked`.
+by `reopen` or by `archive`, reads the plan right before its write and refuses
+a change since the settle read: the close, the body, the labels, or the owners.
+It adds `plan:ongoing` only when the plan has no phase label, and it never
+replaces the label set. After the reopen, it reads the plan again, before the
+comment. When that read shows a closed plan, someone closed it after the
+write, and it refuses with
+`plan #<n> closed again after the reopen; no comment was posted; run reopen again`
+or the same text with `run archive again`, after the command that ran. The
+rerun reads the new close and decides again: `reopen` reopens after a new close
+by the same pull request and refuses a close by another closer, and `archive`
+reopens a plan closed as completed with open work and refuses a retired plan.
+The comment is posted only when that read shows an open plan with the `plan`
+label, exactly the expected phase label (the one phase label before the
+reopen, or `plan:ongoing`), and the acting login as its single owner.
+Otherwise the helper refuses with
+`plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>`
+and prints no status. The recovery names, in order, the repairs that block the
+comment: another owner to settle by hand, the `plan` label to add, and
+`status <n> <status>` (with `--reason <reason>` for `blocked`) to set the
+phase label and the claim; then the comment to post as the owner. When the
+comment posts, the helper prints the status of that read, such as
+`reopened: blocked`.
 Known limit: a phase label that someone else adds around the write can leave
 two phase labels. The refusal reports it, and `status` repairs it. The write
 removes no label, so no label is lost.

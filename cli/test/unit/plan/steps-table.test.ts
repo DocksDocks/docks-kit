@@ -79,7 +79,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan Steps table", () => {
     "a Steps row that does not parse to eight cells blocks edit and step instead of vanishing",
     () => {
       const { run, issue, updateIssue, createPlan, edit } = planCliContext();
-      // A row that does not parse to eight cells blocks every write instead of vanishing.
+      // A row that does not parse to eight cells does not vanish: `edit` and `step` refuse it, and `status` keeps it.
       const malformed = createPlan("malformed row");
       refuse(
         edit(malformed, (text) =>

@@ -325,9 +325,9 @@ function expectedReview({ kind, blocks }: ReviewModel): { kind: ReviewKind; verd
 }
 
 // The manager's response to round k follows the review blocks of round k+1 in the same comment (E5). From its heading
-// line to the end, no line can open a block, set a verdict, or add a severity.
+// line, which starts at the first column, to the end, no line can open a block, set a verdict, or add a severity.
 const managerResponse = fc.record({
-  indent: fc.constantFrom("", " ", "   "),
+  indent: fc.constant(""),
   round: fc.integer({ min: 1, max: 300 }),
   trailing: fc.constantFrom("", " ", "\t"),
   lines: fc.array(

@@ -52,7 +52,7 @@ describe("plan records", () => {
   it.skipIf(!PLAN_CLI_HOST_SUPPORTED)(
     "edit writes the normalized body to the remote issue and to the export provenance",
     () => {
-      const { issue, createPlan, exported, edit } = planCliContext();
+      const { run, issue, createPlan, exported } = planCliContext();
       // Normalization must reach the remote body, not just the local export.
       const irregular = body("Done")
         .replace("## Goal", "## goal")
@@ -68,11 +68,13 @@ describe("plan records", () => {
       expect(normalized.body.includes("—")).toBe(false);
       expect(normalized.body).toMatch(/Fix the parser - preserve records\./);
       const normalization = createPlan("normalization", irregular);
-      const normalizedEdit = edit(normalization);
+      // One export, one edit of that file, and the same `.origin` read afterward: only `edit` can have refreshed it
+      // (#213, R22).
+      const normalizedFile = exported(normalization);
+      const normalizedEdit = run("edit", String(normalization), "--file", normalizedFile);
       expectSuccess(normalizedEdit, "normalize edit");
       expect(issue(normalization).body).toBe(normalized.body);
       expect(normalizedEdit.stdout).toMatch(/^advice: .*mode/im);
-      const normalizedFile = exported(normalization);
       expect(readFileSync(`${normalizedFile}.origin`, "utf8")).toBe(
         `${createHash("sha256").update(normalized.body).digest("hex")}\n`,
       );
@@ -106,6 +108,30 @@ describe("plan records", () => {
       const shown = run("show", String(quoting), "--body");
       expectSuccess(shown, "show the body that quotes placeholder tokens");
       expect(shown.stdout, "show reads the stored body back unchanged").toBe(issue(quoting).body);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it.skipIf(!PLAN_CLI_HOST_SUPPORTED)(
+    "show names a machine path in bold and in an unpadded table cell",
+    () => {
+      const context = planCliContext();
+      const plan = context.createPlan("machine paths in emphasis");
+      context.updateIssue(plan, (entry) => {
+        entry.body = body().replace(
+          "The parser loses mixed-case records.",
+          "Bold **/tmp/cache/x** and a cell |/home/u/x|",
+        );
+      });
+      const shown = context.run("show", String(plan));
+      expectSuccess(shown, "show the plan");
+      // #213, R7: the delimiters are not part of the reported path.
+      expect(
+        shown.stdout.split("\n").filter((line) => line.startsWith("advice: body contains")),
+      ).toStrictEqual([
+        "advice: body contains an absolute machine path: /tmp/cache/x",
+        "advice: body contains an absolute machine path: /home/u/x",
+      ]);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -145,6 +171,30 @@ describe("plan records", () => {
         named("/home/<user>/log.txt", "/home/<user>/y"),
       ],
       ["Twice /home/a/x, /home/a/x then /tmp/y;", named("/home/a/x", "/tmp/y")],
+      // Markdown emphasis and an unpadded table cell do not hide a path (#213, R7).
+      ["Bold **/tmp/cache/x** and a cell |/home/u/x|", named("/tmp/cache/x", "/home/u/x")],
+      // Emphasis needs the same star run on both sides; a glob is no emphasis (#213, R7).
+      ["Glob src/**/tmp/x.ts", []],
+      ["Glob `**/tmp/cache/**`", []],
+      ["ignore **/tmp/*.log files", []],
+      ["Italic */home/a/b*", named("/home/a/b")],
+      ["Bold **stale /tmp/x**", named("/tmp/x")],
+      ["Ignore **/tmp/*.log when running **check**.", []],
+      ["Code `echo **/tmp/cache/**` and ``echo `a` **/tmp/cache/**``", []],
+      // A fence that closes with four backticks pairs with no later fence as a code span.
+      ["```\na\n````\nBold **/tmp/x**\n```\nb\n```", named("/tmp/x")],
+      ["Log `/tmp/log*` here", named("/tmp/log*")],
+      ["Esc \\` then `echo **/tmp/cache/**`", []],
+      ["Esc \\\\`echo **/tmp/cache/**`", []],
+      ["*Note* then open `/tmp/log*`", named("/tmp/log*")],
+      ["Esc \\``echo **/tmp/cache/**`", []],
+      ["Esc \\``/tmp/log*`", named("/tmp/log*")],
+      // Inside a span a backslash is literal, so a backtick after it still closes the span.
+      ["Code `echo **/tmp/cache/** \\`", []],
+      ["Code `/tmp/log* note\\`", named("/tmp/log*")],
+      // An escaped backtick ends a path and puts no mask byte into the advice.
+      ["Bold **/tmp/log\\`draft**", []],
+      ["Log `/tmp/log*` /tmp/x and Bold **stale /tmp/y**", named("/tmp/log*", "/tmp/x", "/tmp/y")],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],
@@ -153,6 +203,11 @@ describe("plan records", () => {
       ["Regex `'\\\\d+\\\\.'`", []],
     ] as const)
       expect(machinePathAdvice(text), text).toStrictEqual(expected);
+    // Blank lines before the whole body keep the offsets of the code span mask.
+    const shifted = normalizePlan(
+      `${"\n".repeat(11)}${body().replace("The parser loses mixed-case records.", "Log `/tmp/log*` /tmp/x and Bold **stale /tmp/y**")}`,
+    ).advice.filter((message) => message.startsWith("body contains an absolute machine path"));
+    expect(shifted).toStrictEqual(named("/tmp/log*", "/tmp/x", "/tmp/y"));
   });
 
   it.skipIf(!PLAN_CLI_HOST_SUPPORTED)(

@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.1: plan commands check more before they write
+
+### Fixed
+
+- A plan write now refuses a change that it did not see before: a close, a
+  new close reason, a lost `plan` label, a changed phase label, or a new
+  owner. A plan with 100 or more labels is read in full. After a write, the
+  claim and the phase labels must have landed.
+- `archive --pr` accepts only a pull request that landed by its own merge
+  commit.
+- `list` reads the bodies of open plans and lists a plan without a contract
+  marker as `unreadable`. It refuses a repository with issues turned off.
+- A reopen now sends the state change, the claim, and the label first, and
+  the comment after it. When a step fails, the refusal says what landed and
+  what to do next.
+- A plan without the `plan` label is refused with the command that adds it.
+- A fenced example in a review comment, in a fence that starts at the first
+  column, no longer counts as a heading or a verdict; a fenced verdict that is
+  stricter still counts. The manager response starts only at a first-column
+  heading outside a fence. A review comment that holds raw HTML and a fence
+  above the manager response reads as `blocked`.
+- The plan record check also finds a machine path after `*` and `|`.
+- `new` works when GitHub answers the viewer and the plan labels without node
+  ids.
+- For a plan closed as completed with an unfinished step, `show` now advises
+  `step <n> <id> done` when the merged work finished the step, and for the
+  remaining work `reopen <n> --pr <pr>` or a new plan.
+- `archive` claims an unassigned plan that is already closed before it posts
+  the archive record. Tests now cover review comments, plan lists, and records
+  past the first page (DocksDocks/docks-kit#213).
+
 ## 2026-11-23 - docks-kit 0.29.0: agents can clean their own workspace
 
 ### Changed

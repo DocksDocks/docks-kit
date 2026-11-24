@@ -39,7 +39,7 @@ function settleRefusal(number: number): string {
 }
 
 function closedAgainRefusal(number: number): string {
-  return `plan #${number} closed again after the reopen; run reopen again`;
+  return `plan #${number} closed again after the reopen; no comment was posted; run reopen again`;
 }
 
 function childPlanRefusal(number: number): string {
@@ -87,8 +87,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       expect(
         context.writes().length,
-        "the reopen, the comment, and the claim land in one request",
-      ).toBe(1);
+        "the reopen and the claim land in one request, and the comment in a second",
+      ).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -110,8 +110,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       expect(stored(context, plan.number).labels).toStrictEqual(["plan", "plan:ongoing"]);
       expect(
         context.writes().length,
-        "the reopen, the label, and the comment land in one request",
-      ).toBe(1);
+        "the reopen and the label land in one request, and the comment in a second",
+      ).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -139,7 +139,9 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
         assignees: ["plan-agent"],
         comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
-      expect(context.writes().length).toBe(1);
+      expect(context.writes().length).toBe(2);
+      // An owned plan gets no claim, not even one that leaves the owner list as it is.
+      expect(context.issue(plan.number).assigneeWrites ?? 0).toBe(0);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -346,15 +348,41 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
         state.reopenLeavesClosed = true;
       });
       refuse(reopen(context, plan), stuckRefusal(plan.number));
-      // The one request ran every field: the comment and the claim landed, and only the state stuck.
+      // The reopen request ran every field: the claim landed and only the state stuck. The comment, a second request,
+      // is not posted, so no "Reopened:" comment claims work that cannot continue.
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
         state: "CLOSED",
         stateReason: "REOPENED",
         assignees: ["plan-agent"],
-        comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
       expect(context.writes().length).toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen names the comment to post when the comment request fails after the reopen landed",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("comment request fails");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.addCommentErrorOnce = "Something went wrong while executing your query.";
+      });
+      const result = reopen(context, plan);
+      refuse(
+        result,
+        `plan #${plan.number} is open again, but its reopen comment did not post (gh api graphql failed: gh: Something went wrong while executing your query.); post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(result.stdout, "no reopened status is reported").toBe("");
+      // The reopen and the claim landed in the first request; the comment did not.
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+        assignees: ["plan-agent"],
+      });
+      expect(context.writes().length).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -407,16 +435,14 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       const result = reopen(context, plan);
       expectSuccess(result, "reopen after the new close");
       expect(result.stdout).toBe(`plan #${plan.number} reopened: ongoing\n`);
+      // The first attempt refused before its comment, so only the rerun's comment is posted.
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
         stateReason: "REOPENED",
         assignees: ["plan-agent"],
-        comments: [
-          { author: "plan-agent", body: reopenComment(plan.pr) },
-          { author: "plan-agent", body: reopenComment(plan.pr) },
-        ],
+        comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
-      expect(context.writes().length).toBe(2);
+      expect(context.writes().length).toBe(3);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -426,16 +452,92 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
     () => {
       const context = planCliContext();
       const plan = context.partialMerge("reopen answered with an error");
-      // Another reopen races GitHub's close after the helper's second read, so the issue is stuck at the write.
-      context.schedule(
-        plan.number,
-        { afterReads: 0, ...closedBy(plan.closer) },
-        { afterReads: 2, stateReason: "REOPENED" },
-      );
+      // Another reopen races GitHub's close after the helper's last read, so the issue is stuck at the write.
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.beforeMutationOnce = { issue: plan.number, stateReason: "REOPENED" };
+      });
       refuse(reopen(context, plan), stuckRefusal(plan.number));
       const { state, stateReason } = context.issue(plan.number);
       expect([state, stateReason]).toStrictEqual(["CLOSED", "REOPENED"]);
       expect(context.writes().length, "the helper does not retry the reopen").toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen refuses before any write when the plan changed after the settle read",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("reclosed as not planned before the reopen");
+      // A close as not planned lands after the settle read and before the read right before the reopen.
+      context.schedule(
+        plan.number,
+        { afterReads: 0, ...closedBy(plan.closer) },
+        { afterReads: 2, stateReason: "NOT_PLANNED" },
+      );
+      refuse(reopen(context, plan), "plan issue changed remotely; re-read and retry");
+      expect(context.issue(plan.number).state).toBe("CLOSED");
+      expect(context.writes(), "no reopen and no comment").toStrictEqual([]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen posts no comment when its claim did not land",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("claim dropped by the reopen write");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.mutationDropsAssigneesOnce = true;
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to set the phase label plan:ongoing and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen advises status blocked with a reason when a blocked plan's claim did not land",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("blocked plan, claim dropped");
+      context.updateIssue(plan.number, (entry) => {
+        entry.labels = ["plan", "plan:blocked"];
+      });
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.mutationDropsAssigneesOnce = true;
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} blocked --reason <reason> to set the phase label plan:blocked and the claim, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen names a foreign owner that appears after the reopen write and posts no comment",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("foreign owner after the reopen");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.afterMutationOnce = { issue: plan.number, assignees: ["plan-agent", "other-agent"] };
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but it reads phase labels plan:ongoing and owners plan-agent, other-agent; no comment was posted; settle the ownership with other-agent by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(context.writes().length, "the reopen only").toBe(1);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -663,6 +765,163 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
         state: "CLOSED",
         stateReason: "COMPLETED",
         assignees: ["other-agent"],
+      });
+      expect(context.writes()).toStrictEqual([]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  // The poll read and the settle read come before the pre-write read (`gh issue view`); each change lands right after
+  // that read, so only the last GraphQL read before the reopen can see it (#213).
+  for (const [name, change] of [
+    ["a new close time", (plan) => closedBy(plan.closer, LATER_CLOSE)],
+    ["a new closer", () => closedBy(null)],
+    ["a body change", () => ({ body: "<!-- plan-contract: v4 -->\n\nChanged remotely.\n" })],
+    ["a phase label change", () => ({ labels: ["plan", "plan:blocked"] })],
+  ] as const satisfies ReadonlyArray<readonly [string, (plan: PartialMerge) => StubChange]>) {
+    it(
+      `reopen refuses ${name} that lands after its pre-write read and writes nothing`,
+      () => {
+        const context = planCliContext();
+        const plan = context.partialMerge(`${name} after the pre-write read`);
+        context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+        context.updateState((state) => {
+          state.afterIssueViewOnce = { issue: plan.number, afterReads: 2, ...change(plan) };
+        });
+        refuse(reopen(context, plan), settleRefusal(plan.number));
+        expect(context.issue(plan.number).state).toBe("CLOSED");
+        expect(context.writes()).toStrictEqual([]);
+      },
+      SPAWN_TIMEOUT_MS,
+    );
+  }
+
+  it(
+    "reopen refuses a foreign owner that only its last read before the write shows",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("claimed after the pre-write read");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.afterIssueViewOnce = {
+          issue: plan.number,
+          afterReads: 2,
+          assignees: ["other-agent"],
+        };
+      });
+      refuse(reopen(context, plan), `plan #${plan.number} is owned by other-agent`);
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        assignees: ["other-agent"],
+      });
+      expect(context.writes()).toStrictEqual([]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen reports a failed first request with the state that the plan reads after it",
+    () => {
+      // The request fails before any field runs, so the plan reads closed and the rerun is the next step.
+      const failed = planCliContext();
+      const closed = failed.partialMerge("reopen request fails before its fields");
+      failed.schedule(closed.number, { afterReads: 0, ...closedBy(closed.closer) });
+      failed.updateState((state) => {
+        state.issueEditError = "write request unavailable";
+      });
+      refuse(
+        reopen(failed, closed),
+        `the reopen request of plan #${closed.number} failed (gh api graphql failed: write request unavailable); it reads closed with phase labels plan:ongoing and owners none; no comment was posted; run reopen again`,
+      );
+      expect(stored(failed, closed.number)).toStrictEqual({
+        ...ONGOING,
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+      });
+
+      // The fields ran and the response holds an error, so the plan reads open and only the comment is left.
+      const landed = planCliContext();
+      const open = landed.partialMerge("reopen request lands with an error");
+      landed.schedule(open.number, { afterReads: 0, ...closedBy(open.closer) });
+      landed.updateState((state) => {
+        state.graphqlError = { on: "mutation", message: "Something went wrong." };
+      });
+      refuse(
+        reopen(landed, open),
+        `plan #${open.number} reopened, but its request failed (gh api graphql returned errors: Something went wrong.); it reads open with phase labels plan:ongoing and owners plan-agent; no comment was posted; post this comment as the plan owner: ${reopenComment(open.pr)}`,
+      );
+      expect(stored(landed, open.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+        assignees: ["plan-agent"],
+      });
+      expect(landed.writes().length, "the reopen only").toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen counts a comment request that fails after the comment posted as posted",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("comment posted, then its request fails");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        // The clock of the fake gh runs past the close, so the posted comment is newer than the close.
+        state.clock = 20_000;
+        state.addCommentErrorAfterPostOnce = "Something went wrong while executing your query.";
+      });
+      const result = reopen(context, plan);
+      expectSuccess(result, "reopen with a comment that posted before its request failed");
+      expect(result.stdout).toBe(`plan #${plan.number} reopened: ongoing\n`);
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+        assignees: ["plan-agent"],
+        comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen names the plan label repair when the plan loses its base label right after the reopen write",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("base label goes after the reopen");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.afterMutationOnce = { issue: plan.number, labels: ["plan:ongoing"] };
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but it reads phase labels plan:ongoing and owners plan-agent; no comment was posted; add the plan label with \`gh issue edit ${plan.number} --add-label plan\`, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(context.writes().length, "the reopen only").toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen refuses a closed plan without the plan label, names the label repair, and writes nothing",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("closed without the base label");
+      context.updateIssue(plan.number, (entry) => {
+        entry.labels = ["plan:ongoing"];
+      });
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} lacks the plan label; add it with \`gh issue edit ${plan.number} --add-label plan\``,
+      );
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        labels: ["plan:ongoing"],
       });
       expect(context.writes()).toStrictEqual([]);
     },

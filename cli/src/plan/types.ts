@@ -154,6 +154,10 @@ export interface PlanIssue {
   readonly parent: ParentLink | null | undefined;
   /** The viewer id that a write claims an unassigned plan for. */
   claimantId: string | undefined;
+  /** The acting login of a write read, which a write accepts as an owner of the plan. */
+  actingLogin?: string;
+  /** The owner that a write of the command claimed and confirmed; a later write requires it. */
+  confirmedOwner?: string;
 }
 
 /** The fields that the status derivation reads; a plan issue and an issue summary both have them. */

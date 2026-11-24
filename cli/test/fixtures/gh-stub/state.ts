@@ -70,6 +70,8 @@ export type StubIssue = {
   readError?: string;
   /** A parent in another repository. */
   foreignParent?: { number: number; nameWithOwner: string };
+  /** How many write fields set the assignees of the issue, also when the list did not change. */
+  assigneeWrites?: number;
 };
 
 /**
@@ -95,6 +97,10 @@ export type StubPullRequest = {
   body?: string | null;
   repository: string;
   closingIssuesReferences?: Array<number>;
+  /** The head commit; `head<number>` when unset. */
+  headRefOid?: string;
+  /** The merge commit and the pull request numbers that GitHub associates with it; null when unset. */
+  mergeCommit?: { oid: string; associatedPullRequests?: Array<number> } | null;
 };
 
 export type StubCommit = {
@@ -125,6 +131,8 @@ export type StubState = {
   repo: {
     nameWithOwner: string;
     visibility: string;
+    /** False for a repository with issues turned off; true when unset. */
+    hasIssuesEnabled?: boolean;
     defaultBranchRef?: { name: string } | null;
   };
   repositoryDefaults?: Record<string, string>;
@@ -149,6 +157,27 @@ export type StubState = {
   subIssueErrorOnce?: string;
   reopenLeavesClosed?: boolean;
   afterMutationOnce?: StubChange & { issue: number };
+  /** The label fields of the next write request succeed without adding or removing a label. */
+  mutationKeepsLabelsOnce?: boolean;
+  /** The next field that sets assignees (updateIssue or addAssigneesToAssignable) succeeds without changing them. */
+  mutationDropsAssigneesOnce?: boolean;
+  /** A change, in the form of a scheduled change, that lands right after one `gh label create`. */
+  afterLabelCreateOnce?: StubChange & { issue: number };
+  /** The viewer and the repository labels answer without node ids. */
+  nodeIdsMissing?: boolean;
+  /** A change, in the form of a scheduled change, that lands right before the fields of one write request run. */
+  beforeMutationOnce?: StubChange & { issue: number };
+  /** The next addComment field fails with this message and posts nothing. */
+  addCommentErrorOnce?: string;
+  /** The next addComment field posts its comment and then fails with this message. */
+  addCommentErrorAfterPostOnce?: string;
+  /**
+   * A change, in the form of a scheduled change, that lands right after one `gh issue view` of the issue: the first
+   * view once the issue has served `afterReads` GraphQL reads. The view shows the issue before the change.
+   */
+  afterIssueViewOnce?: StubChange & { issue: number };
+  /** A change, in the form of a scheduled change, that lands right after one GraphQL request that lists issues. */
+  afterListOnce?: StubChange & { issue: number };
   ghLacksParentFlag?: boolean;
   dropCreateAssignee?: boolean;
   issueCloseErrorBeforeWriteOnce?: string;

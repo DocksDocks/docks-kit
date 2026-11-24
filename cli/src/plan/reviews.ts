@@ -14,7 +14,8 @@ export interface CommentSource {
   readonly comments: ReadonlyArray<IssueComment>;
 }
 
-// Reviewers write Markdown: read review keywords through emphasis, code marks, quotes, and list markers (#49).
+// Reviewers write Markdown: read review keywords through emphasis, code marks, quotes, and list markers (#49). The
+// verdict word itself is read on the raw line (`verdictWord`), so this reading may drop every mark.
 function reviewText(line: string): string {
   return line
     .replace(/[*_`]/g, "")
@@ -24,7 +25,37 @@ function reviewText(line: string): string {
     .trim();
 }
 const REVIEW_HEADING = /^(?:#+\s*)?(plan|code) review/i;
-const REVIEW_VERDICT = /^(plan|code)[- ]review:\s*([a-z]+(?:-[a-z]+)*)/i;
+// A verdict line is found on the review text of a line; its word is read on the raw line by one anchored grammar.
+// After quote and list markers, the line must start with the label, `plan` or `code`, `-` or a space, `review`, `:`,
+// with only `*`, `_`, or backtick runs between those parts and no white space; then white space and the token. The
+// token, without closing punctuation, is a word (letters and digits joined by single hyphens), a word inside a run
+// on both sides, or a word with a closing run. The runs of the label and of the token must pair up in order, each with
+// the next run of the same marks. Any other line has no verdict word and reads as `blocked`: `Code-review:_pass`,
+// `Code-review:_ pass`, `** Code-review: pass**`, `pass2`, `pa_ss`, `` `pass_` ``, `` `pass`2 ``, and `_`.
+const REVIEW_VERDICT = /^(plan|code)[- ]review:/i;
+const LINE_PREFIX = /^\s*(?:>\s*)*(?:(?:[-+*]|\d+[.)])\s+)?/;
+const MARKS = "([*_`]*)";
+const VERDICT_GRAMMAR = new RegExp(
+  String.raw`^${MARKS}(?:plan|code)${MARKS}[- ]${MARKS}review${MARKS}:${MARKS}[ \t]+(\S*)`,
+  "i",
+);
+const CLOSING_PUNCTUATION = /[.,;:!?)\]]+$/;
+const WORD = String.raw`[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*`;
+// Emphasis runs outside, one backtick pair right around the word: a code span keeps its content, so `` _`pass_` `` has
+// no verdict word.
+const TOKEN = new RegExp(
+  String.raw`^([*_]*)(` + "`?" + String.raw`)(${WORD})(` + "`?" + String.raw`)([*_]*)$`,
+  "u",
+);
+function verdictWord(rawLine: string): string {
+  const line = VERDICT_GRAMMAR.exec(rawLine.replace(LINE_PREFIX, ""));
+  const token = line ? TOKEN.exec(line[6].replace(CLOSING_PUNCTUATION, "")) : null;
+  if (!line || !token || token[2] !== token[4]) return "";
+  const runs = [...line.slice(1, 6), token[1], token[5]].filter(Boolean);
+  for (let index = 0; index < runs.length; index += 2)
+    if (runs[index] !== runs[index + 1]) return "";
+  return token[3].toLowerCase();
+}
 const severeFinding = (text: string): boolean =>
   /\[(?:critical|high)\]/i.test(text) ||
   /^(?:critical|high)\s*:/i.test(text) ||
@@ -37,9 +68,12 @@ const severeFinding = (text: string): boolean =>
 // A heading line has `#` after at most three spaces, so a `*` list marker is not emphasis here; only the title after
 // the `#` markers is read through emphasis and code marks.
 function blockHeadingKind(rawLine: string): string | undefined {
-  const heading = /^ {0,3}#+(.*)$/.exec(rawLine);
+  // GFM: one to six `#`, then a space, a tab, or the line end; `[\s\S]` keeps U+2028 and U+2029 in the title.
+  const heading = /^ {0,3}#{1,6}(?:[ \t]([\s\S]*))?$/.exec(rawLine);
   if (!heading) return undefined;
-  return /^\s*(plan|code) review/i.exec(heading[1].replace(/[*_`]/g, ""))?.[1].toLowerCase();
+  return /^\s*(plan|code) review/i
+    .exec((heading[1] ?? "").replace(/[*_`]/g, ""))?.[1]
+    .toLowerCase();
 }
 const VERDICT_SEVERITY: Readonly<Record<Verdict, number>> = {
   pass: 0,
@@ -54,45 +88,99 @@ function verdictFor(kind: ReviewKind, alias: string): Verdict | undefined {
   return alias === "blocked" ? "blocked" : undefined;
 }
 // The manager's response to round k follows the review blocks of round k+1 in the same comment (E5). The response
-// quotes findings, so the parser reads no block heading, verdict, or severity from its heading line to the end.
-const MANAGER_RESPONSE_HEADING = /^ {0,3}#### Manager response to round \d+[ \t]*$/;
+// quotes findings, so the parser reads no block heading, verdict, or severity from its heading line to the end. The
+// manager writes the heading at the first column, outside a fence: so only such a line counts, and a heading that a
+// block quotes in a quote, in a list item, indented, or in a first-column fence cannot cut off a later block.
+const MANAGER_RESPONSE_HEADING = /^#### Manager response to round \d+[ \t]*$/;
+
+// A fence that opens at the first column of a line is top-level, so the GFM rules for it are short: it opens with three
+// or more backticks or tildes (a backtick fence has no backtick in its info string), and it closes at a line of at
+// least as many of the same character after at most three spaces, with nothing after them. The lines from the opening
+// fence to the closing fence are examples. A fence inside a quote or a list item, or indented, is read as text. The
+// mask can still misread a fence, for example a fence line inside raw HTML; the reading stays safe because a masked
+// verdict that is stricter keeps the stricter verdict, and raw HTML with a fence reads as `blocked`. Lines end at `\n`,
+// `\r\n`, or `\r`, as in GFM; the info string is the rest of the line, also with U+2028 or U+2029 in it.
+const FENCE_OPEN = /^(`{3,}|~{3,})([\s\S]*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// A line that can open a raw HTML block in GFM: `<` at the first four columns, then a tag name, `/`, `!`, or `?`.
+const RAW_HTML_START = /^ {0,3}<[A-Za-z/!?]/;
+function fencedLines(rawLines: ReadonlyArray<string>): Array<boolean> {
+  let open: { readonly char: string; readonly length: number } | undefined;
+  return rawLines.map((line) => {
+    if (open !== undefined) {
+      const close = FENCE_CLOSE.exec(line);
+      if (close && close[1][0] === open.char && close[1].length >= open.length) open = undefined;
+      return true;
+    }
+    const fence = FENCE_OPEN.exec(line);
+    if (!fence || (fence[1][0] === "`" && fence[2].includes("`"))) return false;
+    open = { char: fence[1][0], length: fence[1].length };
+    return true;
+  });
+}
 
 export function parseReviewComment(
   body: unknown,
 ): { kind: ReviewKind; verdict: Verdict } | undefined {
   if (typeof body !== "string") return undefined;
-  const commentLines = body.trim().split(/\r?\n/);
+  const commentLines = body.trim().split(/\r\n|\r|\n/);
+  // A fenced example holds no heading or verdict. Severity still reads every line, as the contract says.
+  const fencedComment = fencedLines(commentLines);
   const response = commentLines.findIndex(
-    (line, index) => index > 0 && MANAGER_RESPONSE_HEADING.test(line),
+    (line, index) => index > 0 && !fencedComment[index] && MANAGER_RESPONSE_HEADING.test(line),
   );
   const rawLines = response < 0 ? commentLines : commentLines.slice(0, response);
-  const lines = rawLines.map(reviewText);
+  const fenced = fencedComment.slice(0, rawLines.length);
+  const allLines = rawLines.map(reviewText);
+  const lines = allLines.map((line, index) => (fenced[index] ? "" : line));
   const heading = REVIEW_HEADING.exec(lines[0]);
   if (!heading) return undefined;
   const kind: ReviewKind = heading[1].toLowerCase() === "plan" ? "plan" : "code";
-  const blocks: Array<Array<string>> = [[]];
-  for (const [index, line] of lines.entries()) {
+  // Raw HTML changes where a fence opens and closes and can hold a line that looks like the response heading (GFM), and
+  // this parser reads no HTML. So review text above the response cut that holds a line that can open raw HTML reads as
+  // `blocked` when it also holds a first-column fence that the mask opened, or when the comment has a response cut: no
+  // misread fence or cut can then produce a pass, and the reviewer posts the record again without the HTML. The mask
+  // and the cut of a line depend only on the lines above it, so review text without raw HTML has a certain cut.
+  if (rawLines.some((line) => RAW_HTML_START.test(line)) && (response >= 0 || fenced.some(Boolean)))
+    return { kind, verdict: "blocked" };
+  const blocks: Array<Array<number>> = [[]];
+  for (const index of lines.keys()) {
     if (index === 0) continue;
-    if (blockHeadingKind(rawLines[index]) === kind) blocks.push([]);
-    else blocks[blocks.length - 1].push(line);
+    if (!fenced[index] && blockHeadingKind(rawLines[index]) === kind) blocks.push([]);
+    else blocks[blocks.length - 1].push(index);
   }
-  const firstVerdict = (block: ReadonlyArray<string>): RegExpExecArray | undefined =>
-    block
-      .map((line) => REVIEW_VERDICT.exec(line))
-      .find((match) => match?.[1].toLowerCase() === kind) ?? undefined;
-  // A later block without a verdict line is a heading inside the previous block; the first block needs a verdict.
-  const matches = blocks.map(firstVerdict).filter((match, index) => match || index === 0);
-  const verdicts: Array<Verdict> = [];
-  for (const match of matches) {
-    if (!match) return undefined;
-    const verdict = verdictFor(kind, match[2].toLowerCase());
-    if (verdict === undefined) return undefined;
-    verdicts.push(verdict);
+  const isVerdictLine = (index: number): boolean =>
+    REVIEW_VERDICT.exec(allLines[index])?.[1].toLowerCase() === kind;
+  // A word outside the verdict table reads as `blocked`, in a block and in a fence alike: a block, or prose that the
+  // scan takes for a block, can then not make the comment unreadable and keep an older pass.
+  const verdictOf = (index: number): Verdict =>
+    verdictFor(kind, verdictWord(rawLines[index])) ?? "blocked";
+  // Like the severity scan, a fenced verdict line of the comment's kind that is stricter keeps the stricter verdict. So
+  // a fence that the mask misreads, such as a fence line inside raw HTML, can hide no live `blocked` or
+  // `fixes-required`, also when it hides every live verdict line; a fenced example of a stricter verdict only makes the
+  // reading stricter. A comment whose only verdict lines are fenced passes is no review record.
+  let masked: Verdict | undefined;
+  for (const index of allLines.keys()) {
+    if (!fenced[index] || !isVerdictLine(index)) continue;
+    const example = verdictOf(index);
+    if (masked === undefined || VERDICT_SEVERITY[example] > VERDICT_SEVERITY[masked])
+      masked = example;
   }
-  let verdict = verdicts.reduce((worst, next) =>
-    VERDICT_SEVERITY[next] > VERDICT_SEVERITY[worst] ? next : worst,
-  );
-  if (kind === "code" && verdict === "pass" && lines.some(severeFinding))
+  // A block without a verdict line is a heading inside the block before it, also the first block when a heading that
+  // the scan takes for a block split it off: the verdict lines of the other blocks still count. A comment with no live
+  // verdict line keeps a stricter masked one, and otherwise is no review record.
+  const firsts = blocks
+    .map((block) => block.find((index) => !fenced[index] && isVerdictLine(index)))
+    .filter((index): index is number => index !== undefined);
+  if (firsts.length === 0)
+    return masked === undefined || masked === "pass" ? undefined : { kind, verdict: masked };
+  let verdict = firsts
+    .map(verdictOf)
+    .reduce((worst, next) => (VERDICT_SEVERITY[next] > VERDICT_SEVERITY[worst] ? next : worst));
+  if (masked !== undefined && VERDICT_SEVERITY[masked] > VERDICT_SEVERITY[verdict])
+    verdict = masked;
+  if (kind === "code" && verdict === "pass" && allLines.some(severeFinding))
     verdict = "fixes-required";
   return { kind, verdict };
 }
