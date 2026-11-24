@@ -732,17 +732,22 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    says. Never delete, stash, or move those files. Do not run the command from
    another worktree to avoid them. A new worktree can run other hooks than the
    checkout (Worktree hooks).
-3. Otherwise, read the commit of the default branch with
-   `gh api repos/<owner/repo>/commits/refs/heads/<default> --jq .sha`. Run
-   `git fetch origin <sha>`, then run the hook's check on `<sha>` in a clean
-   worktree. The hash names the commit of the plan repository, so a mirror, a
-   tag, or another fetch cannot change what the check runs on. When it fails
-   the same way there, it is a baseline failure. When the read or the fetch
-   fails, the baseline is unknown; record that, and continue as for a
-   baseline failure. Record the hook, the check, and both results in
-   Verification Results. Block the plan with that reason. Then ask the user
-   how to continue. A yolo run uses the hook row in Yolo runs instead of the
-   question.
+3. Otherwise, read the commit of the default branch of the plan repository:
+
+   ```bash
+   gh api graphql -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid}}}}' \
+     -f owner=<owner> -f name=<repo> --jq .data.repository.defaultBranchRef.target.oid
+   ```
+
+   Run `git fetch origin <sha>`, then run the hook's check on `<sha>` in a
+   clean worktree. The hash names the commit of the plan repository, so a
+   branch name, a mirror, a tag, or another fetch cannot change what the check
+   runs on. When it fails the same way there, it is a baseline failure. When
+   the read prints no hash, or the read or the fetch fails, the baseline is
+   unknown; record that, and continue as for a baseline failure. Record the
+   hook, the check, and both results in Verification Results. Block the plan
+   with that reason. Then ask the user how to continue. A yolo run uses the
+   hook row in Yolo runs instead of the question.
 4. When the check passes on `<sha>`, this plan causes the failure. Fix it as
    item 1 says.
 
