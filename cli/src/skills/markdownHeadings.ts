@@ -8,22 +8,54 @@
  * for a caller that does not run under Bun.
  */
 
+/** The named character references that `decodeReferences` knows. */
+const NAMED_REFERENCES: Readonly<Record<string, string>> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: "\u00a0",
+};
+
+/** Decode the named references above and the decimal and hex numeric references; leave any other `&` text as it is. */
+function decodeReferences(text: string): string {
+  return text.replace(
+    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/g,
+    (reference, decimal?: string, hex?: string, name?: string) => {
+      if (name !== undefined) return NAMED_REFERENCES[name] ?? reference;
+      const code = decimal !== undefined ? Number(decimal) : Number.parseInt(hex ?? "", 16);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "\ufffd";
+    },
+  );
+}
+
 /**
- * The number of real headings whose text is `title`, for each of `texts`. The
- * parser passes inline HTML through as raw text, so HTML comments and tags are
- * removed, and runs of whitespace become one space, before the comparison.
+ * The visible text of a heading's rendered content. The parser passes inline
+ * HTML through as raw HTML, so Bun's HTML tokenizer (`HTMLRewriter`,
+ * https://bun.sh/docs/runtime/html-rewriter) splits it: only its text chunks
+ * count, so tags and comments give no text. Character references are decoded,
+ * and runs of whitespace become one space.
  */
+function visibleText(html: string): string {
+  const chunks: Array<string> = [];
+  new HTMLRewriter()
+    .onDocument({
+      text: (chunk) => {
+        chunks.push(chunk.text);
+      },
+    })
+    .transform(html);
+  return decodeReferences(chunks.join("")).replace(/\s+/g, " ").trim();
+}
+
+/** The number of real headings whose visible text is `title`, for each of `texts`. */
 export function countHeadings(texts: ReadonlyArray<string>, title: string): Array<number> {
   return texts.map((text) => {
     let count = 0;
     Bun.markdown.render(text, {
       heading: (children) => {
-        const plain = children
-          .replace(/<!--[\s\S]*?-->/g, "")
-          .replace(/<[^>]*>/g, "")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (plain === title) count += 1;
+        if (visibleText(children) === title) count += 1;
         return children;
       },
     });
