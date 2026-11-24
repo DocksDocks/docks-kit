@@ -17,11 +17,11 @@
   1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
   3. **No `--config`:** Ruff uses config discovery. Each file gets the closest config file up the directory tree, and Ruff does not merge parent files. In one directory, `.ruff.toml` takes precedence over `ruff.toml`, and `ruff.toml` takes precedence over `pyproject.toml`.
-     - Exactly one Ruff config file in the repository applies to the whole lint scope: edit that file.
-     - The whole lint scope uses Ruff's built-in defaults: no Ruff config file in the repository applies, and no user-level Ruff config (`ruff/ruff.toml`, `ruff/.ruff.toml`, or `ruff/pyproject.toml` in the user config directory) exists. Create the project config: add `[tool.ruff.lint]` to `pyproject.toml`, or create `ruff.toml` when the project has no `pyproject.toml`.
-     - Any other coverage, such as more than one config, some files under a config and some under the defaults, a user-level config, or a config in a parent folder outside the repository: report the configs that you found and ask the user which to edit. Do not edit a guessed config.
+     - Exactly one Ruff config file in the repository applies to every file in the lint scope: edit that file.
+     - Create a project config only after you rule out every config that can apply: no Ruff config file in the repository, no Ruff config file in any folder above the checkout (Ruff checks those folders before the user-level fallback), and no user-level Ruff config (`ruff/ruff.toml`, `ruff/.ruff.toml`, or `ruff/pyproject.toml` in the user config directory). Then the whole lint scope uses Ruff's built-in defaults: add `[tool.ruff.lint]` to `pyproject.toml`, or create `ruff.toml` when the project has no `pyproject.toml`.
+     - Any other coverage, such as more than one config, some files under a config and some under the defaults, a Ruff config in a folder above the checkout, or a user-level config: report the configs that you found and ask the user which to edit. Do not edit a guessed config.
 - When you read a config, follow its `extend` chain without changing it, and report the suppressions that you find anywhere in that chain. Report a chain that you cannot resolve without guessing.
-- Report every ignore selector that can match `PLR2004`: the code, its prefixes (such as `PLR2`, `PLR`, and `PL`), `ALL`, and the rule name `magic-value-comparison`, in `ignore`, `extend-ignore`, `per-file-ignores`, `extend-per-file-ignores`, and on the command line. Also report a command `--select` that replaces the rule selection. Ask the user before you remove any of them. Do not claim a per-file rule state.
+- Report every ignore selector that can match `PLR2004`: the code, its prefixes (such as `PLR2`, `PLR`, and `PL`), `ALL`, the rule name `magic-value-comparison`, and its preview category `pedantic`, in `ignore`, `extend-ignore`, `per-file-ignores`, `extend-per-file-ignores`, and on the command line. Also report a command `--select` that replaces the rule selection. Ask the user before you remove any of them. Do not claim a per-file rule state.
 - Ask before installing Ruff if the project does not have it.
 
 ## Recommended config
@@ -105,5 +105,6 @@ Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchange
 - Ruff rule `PLR2004` and its exemptions: <https://docs.astral.sh/ruff/rules/magic-value-comparison/>
 - Ruff `extend-select`, per-file ignores, and `allow-magic-value-types`: <https://docs.astral.sh/ruff/settings/>
 - Ruff lint command, rule selection, and rule-name selectors in preview: <https://docs.astral.sh/ruff/linter/#rule-selection>
+- Ruff preview rule categories, such as `pedantic` for `PLR2004`: <https://docs.astral.sh/ruff/linter/#rule-categories>
 - Python `Final`: <https://docs.python.org/3/library/typing.html#typing.Final>
 - Python `StrEnum` and `IntEnum`: <https://docs.python.org/3/library/enum.html#enum.StrEnum>
