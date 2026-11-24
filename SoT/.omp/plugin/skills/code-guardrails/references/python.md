@@ -90,7 +90,7 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. That run is the only run. Report its findings and the config changes, and do not claim that `PLR2004` is on for files that the run did not report.
+Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. Do not run Ruff only to learn its settings; no settings probes. After you fix findings, run the same command again, unchanged and subject to the approval gate in `../SKILL.md`. Report its findings and the config changes, and do not claim that `PLR2004` is on for files that the run did not report.
 
 ## Sources
 

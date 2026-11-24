@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "b9b594ba8ffb4ce80073adba524c2e23582f6eaee9888dad8e747b9e2a7106da"
+  content_hash: "fb9a50749a59bca43fda1bb3e4528150eb0cd4590058c40afb46f5109055243e"
 ---
 
 # Code Guardrails
@@ -236,19 +236,24 @@ matches() {
 
 # git grep exits with 1 when nothing matches; a higher status is a failed scan.
 # git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
+# The matches go to a temporary file, and the grouping runs only after these checks pass.
 scan() {
-  local found status=0 errors
-  errors=$(mktemp) || return 2
-  # `>|` writes the file even with noclobber set. A file that cannot be written fails the scan.
-  if ! true 2>| "$errors"; then echo "scan failed: cannot write $errors" >&2; return 2; fi
-  found=$(matches "$@" 2>| "$errors") || status=$?
+  local found errors status=0
+  found=$(mktemp) || return 2
+  errors=$(mktemp) || { rm -f "$found"; return 2; }
+  # `>|` writes the files even with noclobber set. A file that cannot be written fails the scan.
+  if ! true >| "$found" 2>| "$errors"; then
+    echo "scan failed: cannot write $found or $errors" >&2; rm -f "$found" "$errors"; return 2
+  fi
+  matches "$@" >| "$found" 2>| "$errors" || status=$?
   if [ "$status" -le 1 ] && [ -s "$errors" ]; then status=2; fi
   if [ "$status" -gt 1 ]; then
-    echo "scan failed with status $status" >&2; cat "$errors" >&2; rm -f "$errors"; return "$status"
+    echo "scan failed with status $status" >&2; cat "$errors" >&2; rm -f "$found" "$errors"; return "$status"
   fi
-  rm -f "$errors"
-  if [ -z "$found" ]; then return 0; fi
-  printf '%s\n' "$found" | group || { echo "scan failed: grouping failed" >&2; return 1; }
+  # Status 1 (no match) passed the checks above; from here, status reports the grouping.
+  status=0; group < "$found" || status=1
+  rm -f "$found" "$errors"
+  if [ "$status" -ne 0 ]; then echo "scan failed: grouping failed" >&2; return 1; fi
 }
 
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
@@ -268,9 +273,10 @@ an apostrophe in a comment.
 
 When git grep exits with 1, no file matched, and the scan succeeds. A higher git grep
 status, any error output from git grep or `tr` (such as a file that git cannot read),
-a failure to write the file that collects that error output, or a failure of `awk` or
-`sort` means that the scan failed: the block prints an error, stops, and returns a
-nonzero status. Do not read the empty output of a failed scan as "no repeated values".
+a failure of `tr`, `awk`, or `sort`, or a failure to write the temporary files that
+hold the matches and the error output means that the scan failed: the block prints an
+error, stops, and returns a nonzero status. The scan removes its temporary files before
+it returns. Do not read the empty output of a failed scan as "no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short

@@ -82,7 +82,7 @@ TypeScript 7.0 has no programmatic application programming interface (API). Tool
 - If `package.json` has a `check` script, `bun check` runs that script. Pass `--no-script`, or name the script `typecheck`. Do not define `"check": "bun check"`: a Bun version without the checker runs it in an endless loop.
 - Inside GitHub Actions, it prints `::error` annotations. Add `--threads <n>` on shared runners.
 
-Before you switch checkers, prove parity on the same commit. The script `parity.sh` below compares error codes and counts, because the output formats differ. Run `bash parity.sh` on the commit. Then run `bash parity.sh <code>` on a commit with one planted error of that code, for example `TS2322`. Exit 1 means that the counts differ. Exit 2 means that a checker did not start, one checker passed while the other found errors, a code filter failed, a failing checker printed no error record, or an output lacks the planted code.
+Before you switch checkers, prove parity on the same commit. The script `parity.sh` below compares error codes and counts, because the output formats differ. Run `bash parity.sh` on the commit. Then run `bash parity.sh <code>` on a commit with one planted error of that code, for example `TS2322`. Exit 1 means that the counts differ. Exit 2 means that a checker did not start, one checker passed while the other found errors, a code filter failed or found an indented error header, a failing checker printed no error record, or an output lacks the planted code.
 
 ```bash
 set -o pipefail   # a failed filter fails its pipeline
@@ -92,8 +92,8 @@ if bun check --no-script --no-pretty > new.txt 2>&1; then new=0; else new=$?; fi
 if [ "$old" = 127 ] || [ "$new" = 127 ] || grep -qE '^error: (Script not found|Could not find an existing)' old.txt new.txt; then echo 'a checker did not start'; exit 2; fi   # Bun exits 1, not 127, for a missing script or binary
 class() { case $1 in 0) echo clean ;; 1|2) echo errors ;; *) echo failed ;; esac; }   # tsc exits 1 or 2 on diagnostics, depending on emit; bun check exits 1
 if [ "$(class "$old")" = failed ] || [ "$(class "$new")" = failed ]; then echo "a checker failed to run: $old and $new"; exit 2; elif [ "$(class "$old")" != "$(class "$new")" ]; then echo "one checker passed and one found errors: $old and $new"; exit 2; fi
-codes() { awk '/^(::| )/ { next } match($0, /^error TS[0-9]+: |\([0-9]+,[0-9]+\): error TS[0-9]+: /) { s = substr($0, RSTART, RLENGTH); match(s, /TS[0-9]+/); print substr(s, RSTART, RLENGTH) }' "$1" | sort | uniq -c; }   # the code of the first location-and-error header of each record, whatever the path holds; skips ::error annotations, indented lines, and codes inside messages
-old_codes=$(codes old.txt) && new_codes=$(codes new.txt) || { echo 'a code filter failed'; exit 2; }
+codes() { awk '/^::/ { next } match($0, /^error TS[0-9]+: |\([0-9]+,[0-9]+\): error TS[0-9]+: /) { if (/^ /) exit 3; s = substr($0, RSTART, RLENGTH); match(s, /TS[0-9]+/); print substr(s, RSTART, RLENGTH) }' "$1" | sort | uniq -c; }   # the code of the first location-and-error header of each record, whatever the path holds; skips ::error annotations and codes inside messages; fails on an indented header, which is a path that starts with a space or a header quoted in a continuation line
+old_codes=$(codes old.txt) && new_codes=$(codes new.txt) || { echo 'a code filter failed or found an indented error header'; exit 2; }
 if [ "$old" != 0 ] && { [ -z "$old_codes" ] || [ -z "$new_codes" ]; }; then echo 'a checker found errors but printed no error record'; exit 2; fi
 if [ -n "$planted" ] && { [ "$old" = 0 ] || ! grep -qE " $planted\$" <<< "$old_codes" || ! grep -qE " $planted\$" <<< "$new_codes"; }; then echo "both checkers must fail and list $planted"; exit 2; fi
 diff <(printf '%s\n' "$old_codes") <(printf '%s\n' "$new_codes")
