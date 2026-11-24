@@ -740,9 +740,11 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    ```
 
    Run `git fetch origin <sha>`, then run the hook's check on `<sha>` in a
-   clean worktree. The hash names the commit of the plan repository, so a
-   branch name, a mirror, a tag, or another fetch cannot change what the check
-   runs on. When it fails the same way there, it is a baseline failure. When
+   clean worktree. Set `GIT_NO_REPLACE_OBJECTS=1` for the worktree creation
+   and for the check, so a local `refs/replace/` entry cannot change the tree.
+   The hash names the commit of the plan repository, so a branch name, a
+   mirror, a tag, or another fetch cannot change what the check runs on. When
+   it fails the same way there, it is a baseline failure. When
    the read prints no hash, or the read or the fetch fails, the baseline is
    unknown; record that, and continue as for a baseline failure. Record the
    hook, the check, and both results in Verification Results. Block the plan
