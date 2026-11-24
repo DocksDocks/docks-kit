@@ -46,17 +46,17 @@
     "check": "bun run --parallel lint lint:effect format:check typecheck check:generated test"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.1.2",
-    "@effect/platform-node-shared": "4.1.2",
-    "effect": "4.1.2",
+    "@effect/platform-bun": "4.1.5",
+    "@effect/platform-node-shared": "4.1.5",
+    "effect": "4.1.5",
     "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@effect/tsgo": "0.64.1",
+    "@effect/tsgo": "0.73.4",
     "@types/bun": "1.4.5",
-    "fast-check": "4.10.2",
-    "oxlint": "1.91.0",
+    "fast-check": "4.11.0",
+    "oxlint": "1.95.0",
     "typescript": "7.0.2",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   }
 }
