@@ -661,15 +661,17 @@ The plan's branch is a branch of `<owner/repo>` that one of two sources names:
 the branch that `gh issue develop <n> --list --repo <owner/repo>` lists, whose
 URL must start with `https://github.com/<owner/repo>/tree/`; or, after the pull
 request opens and GitHub drops that link, the head of the plan's pull request.
+When the issue lists more than one such branch, use the branch that this run
+already verified; without one, stop and report the branches.
 The plan's pull request is the open pull request whose URL, from
 `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences --jq '.closedByPullRequestsReferences[].url'`,
-starts with `https://github.com/<owner/repo>/pull/`. Read its head with
-`gh pr view <url> --json state,headRepositoryOwner,headRepository,headRefName`,
-whose head repository must be `<owner/repo>`. When the issue still lists a
-branch, the head must be that branch. When more than one open pull request
-qualifies, stop and report them. Carry that pull request URL, not a bare
-number, through recovery and landing. A branch or a pull request of another
-repository is not the plan's.
+starts with `https://github.com/<owner/repo>/pull/`. Read it with
+`gh pr view <url> --json state,baseRefName,headRepositoryOwner,headRepository,headRefName`.
+Its base must be the default branch, and its head repository must be
+`<owner/repo>`. When the issue still lists a branch, the head must be that
+branch. When more than one open pull request qualifies, stop and report them.
+Carry that pull request URL, not a bare number, through recovery and landing.
+A branch or a pull request of another repository is not the plan's.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
@@ -679,17 +681,19 @@ When a lookup fails, stop. The check passes when all of these hold:
 - The branch differs from the default branch.
 - Each URL that `git remote get-url --push --all origin` prints names
   `<owner/repo>`, because a push goes to every push URL of the remote.
-- `git config --get-all remotes.origin` exits 1 with no output, because a
-  remote group named `origin` takes precedence over the remote in a push.
-  Another exit code is a failed lookup.
+- `env -u GIT_CONFIG git config --get-all remotes.origin` exits 1 with no
+  output, because a remote group named `origin` takes precedence over the
+  remote in a push. `GIT_CONFIG` changes only what `git config` reads, so
+  unset it to read the configuration that the push uses. Another exit code is
+  a failed lookup.
 
 Run it for every branch that a run selects: here, in Linked branch timing,
 when a run adopts a plan and reuses its branch, and right before each push,
 for the current branch. When it fails, push nothing, keep the commits local,
-and change no status yet. Return the failure to the calling rule. That rule
-records its step state, then blocks the plan with that reason, or keeps the
-status (a stall question or an ended grant), reports the failure, and lists
-the branch under Kept resources as `not pushed`.
+and change no status yet. Report the failure, and list the branch under Kept
+resources as `not pushed`. Then return the failure to the calling rule. That
+rule records its step state, then blocks the plan with that reason, or keeps
+the status (a stall question or an ended grant).
 
 Push only with
 `git push -u origin HEAD --no-follow-tags --recurse-submodules=check` from the
@@ -736,11 +740,13 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
 
 Work preservation (above) needs a commit and a push of the plan's own changes
 before a block, a stall exit, or an ended grant. When a hook refuses that
-commit or push, fix a failure that this plan causes as item 1 says.
-Otherwise, instead of items 2 and 3, keep the work where it is, change no
-status, record the hook and the failure, and list the branch under Kept
-resources as `not pushed`. Then continue with the rule that called Work
-preservation.
+commit or push, diagnose it with items 1 to 4, but change no status there.
+Fix a failure that this plan causes. Otherwise keep the work where it is,
+record the hook, the check, and the results, and list the branch under Kept
+resources as `not pushed`. Then return to the rule that called Work
+preservation. That rule records its step state. A block then blocks the plan
+and asks as item 3 says; a stall question or an ended grant keeps the status
+and reports the hook.
 
 A step after the landing merge, such as a release, can also meet a failing
 hook. Then leave that step `planned`, and keep the plan status. Record the
@@ -954,7 +960,9 @@ and stacks to stop, the worktree to remove, the local branch to delete with
 `git branch -d <branch>`, and each remote non-production resource to clean up.
 A `Merge now` answer confirms that teardown, including the branch delete.
 Without `Merge now`, leave the issue and the pull request open, and run
-Teardown's exit without a merge. Merge with
+Teardown's exit without a merge. Right before the merge, confirm with
+`gh pr view <url> --json headRefOid,baseRefName` that the head is the reviewed
+head and the base is the default branch. Merge with
 `gh pr merge <pr> --repo <owner/repo> --match-head-commit <reviewed-head-sha>`
 and the merge-method flag that the repository allows. A prior plan approval
 never authorizes a merge.

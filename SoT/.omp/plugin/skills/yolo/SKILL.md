@@ -6,7 +6,7 @@ disable-model-invocation: true
 metadata:
   pattern: pipeline
   updated: "2026-11-24"
-  content_hash: "cfb2027f590801bf14392a1d5d798cab82bb14cbd7307c95bb3ef74b044ccc8d"
+  content_hash: "1f5115a03e22aa9c93e8fb34fa4a587640d4766eb6c4b37a2322b974b4f570c7"
 ---
 
 # Yolo
@@ -249,11 +249,11 @@ without a merge. The contract's Round ceiling also says this.
    again. When the same check still fails after the third fix attempt, stop
    fixing it. That is a stall: apply the Stall rule of the contract's Delegated
    decisions, then the contract's Round ceiling, as its Checks and merge says.
-7. Confirm that `gh pr view <pr> --repo <owner/repo> --json headRefOid` shows
-   the reviewed head. Write the pull request URL and the check result into the
-   summary file, as the practices Run summary says. Run the landing self-check
-   in the contract's Checks and merge: untick each item without evidence, add
-   its reason, and update the body again.
+7. Confirm that `gh pr view <url> --json headRefOid,baseRefName` shows the
+   reviewed head and the default branch. Write the pull request URL and the
+   check result into the summary file, as the practices Run summary says. Run
+   the landing self-check in the contract's Checks and merge: untick each item
+   without evidence, add its reason, and update the body again.
 8. Print the run summary. In the same response, state
    `<k> of <n> checklist items ticked` and `<d> delegated decisions`, point to
    Delegated decisions in the run summary, list each unticked item with its
