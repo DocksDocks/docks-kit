@@ -4,7 +4,7 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- The settings probe: run `ruff check --show-settings <file.py>` the way the project's lint command runs Ruff, with the same executable, working directory, and settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). When that command is a network step, follow the approval gate in `../SKILL.md` first. The probe prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
+- The settings probe: run `ruff check --show-settings <file.py>` the way the project's lint command runs Ruff, with the same runner, environment, working directory, and settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like), before and after the edit. When that context cannot be reproduced, report that the active settings could not be verified. When that command is a network step, follow the approval gate in `../SKILL.md` first. The probe prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
 - Read the project's Ruff lint command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
   1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.
@@ -82,12 +82,13 @@ A `StrEnum` member is equal to its string value, so callers can still pass `"rea
 
 ## Verify
 
-Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. After the edit, repeat the same settings probes from Detect for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
+Follow the verify rule in `../SKILL.md`: run the project's Ruff command unchanged, or `ruff check .` when the project has no Ruff command. After the edit, repeat the same settings probes from Detect, in the same runner, environment, and working directory, for every file that Detect probed, and report whether `PLR2004` is on for each. Review violations, then report the config changes and the remaining findings.
 
 ## Sources
 
 - Ruff configuration and file discovery: <https://docs.astral.sh/ruff/configuration/#config-file-discovery>
 - Ruff `extend-per-file-ignores` and the deprecated `extend-ignore`: <https://docs.astral.sh/ruff/settings/#lint_extend-per-file-ignores>
+- Ruff `extend` and its expansion of environment variables: <https://docs.astral.sh/ruff/settings/#extend>
 - Ruff command-line settings and `--config` inline overrides: <https://docs.astral.sh/ruff/configuration/#command-line-interface>
 - Ruff `--isolated` and `--config` in the full command-line interface: <https://docs.astral.sh/ruff/configuration/#full-command-line-interface>
 - Ruff `select` and selector specificity: <https://docs.astral.sh/ruff/settings/#lint_select>

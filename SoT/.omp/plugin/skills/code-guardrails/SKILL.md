@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "193a25f837fecbc08553faed214f2fcc23553b105d15b75e3894577827be5512"
+  content_hash: "61f1e709db775ea54f42e243cd9159c18ce1ec32b0c0152695172c4bc5bd5bfb"
 ---
 
 # Code Guardrails
@@ -225,10 +225,16 @@ matches() {
 }
 
 # git grep exits with 1 when nothing matches; a higher status is a failed scan.
+# git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
 scan() {
-  local found status=0
-  found=$(matches "$@") || status=$?
-  if [ "$status" -gt 1 ]; then echo "scan failed with status $status" >&2; return "$status"; fi
+  local found status=0 errors
+  errors=$(mktemp) || return 2
+  found=$(matches "$@" 2> "$errors") || status=$?
+  if [ "$status" -le 1 ] && [ -s "$errors" ]; then status=2; fi
+  if [ "$status" -gt 1 ]; then
+    echo "scan failed with status $status" >&2; cat "$errors" >&2; rm -f "$errors"; return "$status"
+  fi
+  rm -f "$errors"
   if [ -z "$found" ]; then return 0; fi
   printf '%s\n' "$found" | group || { echo "scan failed: grouping failed" >&2; return 1; }
 }
@@ -249,9 +255,10 @@ with a later quote and hide a string, for example a Rust lifetime (`&'static`) o
 an apostrophe in a comment.
 
 When git grep exits with 1, no file matched, and the scan succeeds. A higher git grep
-status, or a failure of `tr`, `awk`, or `sort`, means that the scan failed: the block
-prints an error, stops, and returns a nonzero status. Do not read the empty output of
-a failed scan as "no repeated values".
+status, any error output from git grep or `tr` (such as a file that git cannot read),
+or a failure of `awk` or `sort` means that the scan failed: the block prints an error,
+stops, and returns a nonzero status. Do not read the empty output of a failed scan as
+"no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
