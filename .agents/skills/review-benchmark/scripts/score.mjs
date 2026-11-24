@@ -3541,14 +3541,33 @@ function ompSplitTarget(target, cwd) {
   return strict;
 }
 
-// The path of a target that the read scope checks: a web URL as it is; an internal URI without its read selector; a
-// local path without its JSON query selector (`?q=`, which omp reads after the file) and then the path that omp opens
-// (see ompSplitTarget).
-function ompTargetPath(target, cwd) {
+// The path of a target of a call of the tool `name` that the read scope checks first: a web URL as it is; an internal
+// URI without its read selector; a local path, for a `read` call without its JSON query selector (`?q=`, which omp
+// reads after the file; a search path keeps it), and then the path that omp opens (see ompSplitTarget).
+function ompTargetPath(target, cwd, name) {
   const scheme = uriScheme(target);
   if (WEB_SCHEMES.has(scheme)) return target;
   if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
-  return ompSplitTarget(target.replace(JSON_QUERY_SELECTOR, ''), cwd).path;
+  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd).path;
+}
+
+// The paths that the local text `text` can name when it holds a selector-like tail: the whole text and the paths of
+// its selector split, folded and unfolded (see splitSelector). omp picks one of them by the files at the time of the
+// call (see ompSplitTarget), and the files can have changed since, so the read scope does not rely on that one pick
+// alone: each of these paths that exists when transcripts runs must be allowed (see readScope), and a `!` part of a
+// grep path is an exclusion only when none of them exists (see isExclusion). A text without such a tail names only
+// itself, so it needs no check of the file system.
+function pathInterpretations(text) {
+  if (uriScheme(text) !== undefined) return [text];
+  return distinct([text, splitSelector(text).path, splitSelector(text, false).path]);
+}
+
+// The interpretations of `text` (see pathInterpretations) that exist now; an inconclusive check counts as existing,
+// so the read scope fails closed. A text with one interpretation gives none: the final check of its target covers it.
+function existingInterpretations(text, cwd) {
+  const paths = pathInterpretations(text);
+  if (paths.length === 1 && !text.includes(';')) return [];
+  return paths.filter((item) => uriScheme(item) === undefined && literalProbe(item, cwd) !== 'missing');
 }
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
@@ -3569,17 +3588,17 @@ function pathTargets(name, value, cwd) {
     .filter((part) => part && !isExclusion(name, part, cwd));
 }
 
-// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob when omp finds
-// no file at the path that it opens for the part (see ompSplitTarget), as isExclusionEntry of omp 19.0.0 decides: so
+// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob only when no path
+// that it can name exists (see pathInterpretations; omp 19.0.0 isExclusionEntry decides by the path that it opens): so
 // `!notes.md:1-2` and `!notes.md:20:40,85:100` of an existing `!notes.md` are search roots, `!notes.md:backup:1-2` of
 // an existing `!notes.md:backup` is one too, and `!review.diff:notes` is an exclusion when no file has that name,
-// also when `!review.diff` exists. Without a working directory, a relative part cannot be checked, so it stays a
-// target.
+// also when `!review.diff` exists (`:notes` is no selector of omp). Without a working directory, a relative part cannot
+// be checked, so it stays a target.
 function isExclusion(name, part, cwd) {
   if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
     return false;
   }
-  return literalProbe(ompSplitTarget(part, cwd).path, cwd) === 'missing';
+  return pathInterpretations(part).every((item) => literalProbe(item, cwd) === 'missing');
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -3631,15 +3650,16 @@ function pathMissing(target, cwd) {
 // the target as a list of paths (see LIST_SPLITS), each with its read selector, or null when omp reads the target as
 // one path. A target whose whole path exists, as written or without its read selector, is one path, also when it
 // holds a delimiter: for example a file whose name holds a space or a `;`, or a workspace folder with a space.
-function delimitedParts(target, cwd) {
+function delimitedParts(target, cwd, name) {
   if (splitPathList(target, ANY_DELIMITER) === null) return null;
   if (uriScheme(target) !== undefined) {
     const parts = splitPathList(target, URI_DELIMITER);
     return parts !== null && parts.length > 1 && parts.every((part) => uriScheme(part) !== undefined) ? parts : null;
   }
   if (ompPathExists(target, cwd) || ompPathExists(target.replace(OMP_SELECTOR, ''), cwd)) return null;
-  // omp reads `<file>?q=<filter>` as one file with a JSON query, also when the filter holds a delimiter.
-  if (ompPathExists(target.replace(JSON_QUERY_SELECTOR, ''), cwd)) return null;
+  // omp reads `<file>?q=<filter>` of a `read` call as one file with a JSON query, also when the filter holds a
+  // delimiter; a search path has no JSON query.
+  if (name === READ_TOOL && ompPathExists(target.replace(JSON_QUERY_SELECTOR, ''), cwd)) return null;
   const exists = (part) => {
     const scheme = uriScheme(part);
     if (scheme !== undefined) return !WEB_SCHEMES.has(scheme);
@@ -3707,9 +3727,9 @@ function readLists({ calls, results }, cwd) {
     if (typeof value !== 'string') continue;
     const recorded = call.name === READ_TOOL ? recordedParts(results.get(call.id)?.details) : null;
     for (const target of pathTargets(call.name, value, cwd)) {
-      const parts = recorded ?? delimitedParts(target, cwd);
+      const parts = recorded ?? delimitedParts(target, cwd, call.name);
       if (parts === null) continue;
-      const paths = parts.map((part) => ompTargetPath(part, cwd));
+      const paths = parts.map((part) => ompTargetPath(part, cwd, call.name));
       lists.set(target, distinct([...(lists.get(target) ?? []), ...paths]));
     }
   }
@@ -3820,7 +3840,7 @@ function shownLines({ calls, results }, file, lines, cwd) {
     const result = results.get(call.id);
     if (result === undefined || result.isError === true) continue;
     const target = value.trim();
-    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd)) !== null) continue;
+    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd, READ_TOOL)) !== null) continue;
     const selector = selectorOfRead(target, file, cwd);
     if (selector !== null) for (const line of resultLines(result.details, selector, lines)) shown.add(line);
   }
@@ -3937,6 +3957,10 @@ function diffCoverage(tools, file, cwd) {
 // A search call with `resultFiles` (see transcriptFacts) also gives the outside target `<name> result: <file>` for each
 // file of its result that is not allowed. The result shows what the search read, so this rule holds also when the
 // files decide the split of its path in another way after the call (see delimitedParts).
+// A target with a selector-like tail, and the whole path of a list tool before its `;` split, can name more than one
+// path (see pathInterpretations). The read scope checks the path that omp opens (see ompTargetPath) and also each of
+// these paths that exists when transcripts runs, so the scope fails closed when omp could have opened another one: such
+// a path that is not allowed is outside, as written.
 // The reviewer setup is newer than the cases. When a case changes the file of an optional instruction read, that read
 // shows a later version of a file under review, which can show the fix. `changedFiles` are the repository paths that
 // the case changes (transcriptsCommand reads them). The rule compares keys, the paths from the skill folder name on:
@@ -4004,8 +4028,17 @@ export function readScope(
         if (refused.length) refuse(target, refused);
         continue;
       }
-      const read = ompTargetPath(target, cwd);
+      const read = ompTargetPath(target, cwd, name);
       if (!targetAllowed(read, cwd, rules, searches)) refuse(read, [read]);
+    }
+    // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
+    // which of them omp opened (see pathInterpretations): the whole path of a list tool before its `;` split, and
+    // each target.
+    const texts = PATH_LIST_TOOLS.has(name) ? [value.trim(), ...targets] : targets;
+    for (const text of distinct(texts)) {
+      for (const item of existingInterpretations(text, cwd)) {
+        if (!targetAllowed(item, cwd, rules, searches)) outside.add(item);
+      }
     }
   }
   const scope = { outside: [...outside] };

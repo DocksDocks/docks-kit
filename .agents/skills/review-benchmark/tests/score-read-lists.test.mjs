@@ -234,6 +234,30 @@ test('a search result file outside the inputs is outside, also when the file is 
   const spilled = { 'call-1': { cwd: live, files: [a, 'local://3.log'] } };
   assert.deepEqual(listReadScope(fixture, calls, spilled), { outside: [] });
 });
+// Plan #216, R67 redesign: the read scope does not rely on one emulation of how omp reads a selector-like tail. Every
+// path that a search target can name and that exists when transcripts runs must be allowed: the whole text, the text
+// before a `;` split, its `;` parts, and the selector splits. A JSON query (`?q=`) belongs to `read` only, so a search
+// path keeps it. Each call below runs in the case folder, the working directory of the session, and matches nothing.
+test('every existing interpretation of a search path must be allowed, so an ambiguous tail fails closed', () => {
+  const fixture = listCase(scratch(), 'bench');
+  const { ws, sessions, caseDir, round1 } = fixture;
+  put(caseDir, 'plan.md', '# Plan\n');
+  put(caseDir, 'review.diff', '');
+  const scopeOf = (target) => {
+    const calls = [['grep', { pattern: 'lock', path: target }]];
+    put(sessions, 'Code7C1LowR1K1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, { cwd: caseDir }));
+    assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
+    return readJson(path.join(round1, 'meta.json')).reviewers.full.readScope;
+  };
+  // A file `plan.md;plan.md` exists, and the selector split of the whole path names it.
+  put(caseDir, 'plan.md;plan.md', 'x\n');
+  assert.deepEqual(scopeOf('plan.md;plan.md:20:40,85:100'), { outside: ['plan.md;plan.md'] });
+  // A file named with the whole text exists; `?q=x` is no JSON query of a search.
+  put(caseDir, 'plan.md?q=x;extra:1-20', 'x\n');
+  assert.deepEqual(scopeOf('plan.md?q=x;extra:1-20'), { outside: ['plan.md?q=x;extra:1-20'] });
+  // Two allowed inputs stay in scope.
+  assert.deepEqual(scopeOf('plan.md;review.diff'), { outside: [] });
+});
 // Plan #216, R68: decoding is bounded. To pick a transcript, the task lookup decodes each record of a candidate up to
 // its first user message; then transcripts decodes the picked transcript one time in full and gives its records to
 // every reader. So each record up to the task is decoded twice and each later record once; a reader that decoded the
