@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "e2b3789f364ea2682b10fa681c78a6536fabcf5c12e9c22575e46d52aaf26263"
+  content_hash: "8abc87847c17fed8a1c9d0ea5be7191765c9b9727265c859255f20d97acc2fef"
 ---
 
 # Code Guardrails
@@ -45,6 +45,9 @@ and end the turn. If `ask` is not available, put the question in your final
 message and end the turn. An approval covers only the action that the user approved:
 an install approval installs the tool, and it does not create or change a config.
 To create or change a config, follow the Detect rules of the matching reference.
+When those Detect rules find no config for the linter, show the config that the reference
+gives, and ask the user before you create it, as this gate says.
+For Python, follow the Detect rules of `references/python.md` instead.
 A silent dependency or tool change is a change the user did not approve.
 
 **Verify rule.** Verify with the project's own lint command, unchanged: the same
