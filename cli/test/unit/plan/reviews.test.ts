@@ -138,6 +138,9 @@ describe("plan reviews", () => {
         { kind: "code", verdict: "pass" },
       ],
       ["### Code review round 2\n\n```\n    ```\nCode-review: pass\n```", undefined],
+      // A fence after a quote marker or a list marker is text, so the only pass after it stays live.
+      ["### Code review round 2\n\n> ```\nCode-review: pass", { kind: "code", verdict: "pass" }],
+      ["### Code review round 2\n\n- ```\nCode-review: pass", { kind: "code", verdict: "pass" }],
       // A backtick in the info string makes the line inline code, not a fence.
       ["### Code review round 2\n\n```x```\nCode-review: pass", { kind: "code", verdict: "pass" }],
       // Raw HTML with inline code that starts with three backticks, and no fence, reads as written.

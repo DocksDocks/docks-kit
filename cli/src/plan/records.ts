@@ -64,8 +64,10 @@ const EMPHASIZED_MACHINE_PATH = new RegExp(
   String.raw`(?<=(?:^|[\s("'[{=:;,>|])(\*{1,3}))${MACHINE_PATH_BODY}(?=\1(?!\*))`,
   "gm",
 );
-// A backtick after an odd run of backslashes is literal (GFM), so it opens no span; after an even run it does.
-const CODE_SPAN = /(?<!`)(?<!(?:^|[^\\])(?:\\\\)*\\)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
+// A backtick after an odd run of backslashes is literal (GFM): it is masked before the span scan, so it opens or
+// closes no span, and a backtick right after it can still open one.
+const ESCAPED_BACKTICK = /(?<!\\)((?:\\\\)*\\)`/g;
+const CODE_SPAN = /(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g;
 const SECTIONS = [
   "Goal",
   "Research",
@@ -370,7 +372,9 @@ export function normalizePlan(
     ACCEPTANCE_SEPARATOR,
     table(sections.get("Acceptance") ?? "", ACCEPTANCE_HEADER).rows,
   );
-  const withoutCodeSpans = cleaned.replace(CODE_SPAN, (span) => " ".repeat(span.length));
+  const withoutCodeSpans = cleaned
+    .replace(ESCAPED_BACKTICK, "$1\u0000")
+    .replace(CODE_SPAN, (span) => " ".repeat(span.length));
   const machinePaths = new Set(
     [...cleaned.matchAll(MACHINE_PATH), ...withoutCodeSpans.matchAll(EMPHASIZED_MACHINE_PATH)]
       .sort((a, b) => a.index - b.index)
