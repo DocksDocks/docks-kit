@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "2bf204728b6e6c883924e9f9f6b3c1f1550c437f4400f8ad4618628d45575cb9"
+  content_hash: "505ff06b78a1483fbecb3095ff3237fc0007376b723e2c06f135c827aed30d31"
 ---
 
 # Report a Skill Issue
@@ -13,7 +13,7 @@ metadata:
 The docks-kit kit plugin (`docks-kit-omp`) comes from the public GitHub repository DocksDocks/docks-kit. It holds the docks and plan-lifecycle skills, the reviewer agents, and the omp extensions. When one of its skills, reviewer agents, omp extensions, or scripts gives a wrong, outdated, or unsafe instruction, or a shipped script fails, this skill turns what you saw into one issue there. A useful report lets a maintainer reproduce the problem without access to the user's project. It identifies the exact skill text, quotes the instruction, and shows what happened. It contains nothing private, because anyone can read it.
 
 <constraint>
-DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. In a run where you cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user), print the draft-only result from "Without gh, or without a way to ask" as your final message and stop. That result files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing in that run.
+DocksDocks/docks-kit is a public repository. Anyone can read its issues and comments, and search engines index them. File no issue and post no comment until the user has read and approved the exact title and body that you will send. Show the draft, ask for approval, and end your turn. Do not run `gh issue create` or `gh issue comment` in the turn that shows the draft. If the user changes the draft, show the new text and get approval again. An approval that the user gave before they saw the final text does not count. On the draft-only route (see "Without gh, or without a way to ask"), print the draft-only result as your final message and stop, and ask for no approval. That result files nothing by itself: the user reads the draft and files it from the form. Give no prefilled URL for a security problem. File nothing on that route.
 </constraint>
 
 <constraint>
@@ -114,13 +114,13 @@ Look up every other repository that the draft names in the same way. It keeps it
 
 ### 5. Get approval
 
-Show the user, as the final message of your turn:
+On the draft-only route (see "Without gh, or without a way to ask"), skip this stage. Otherwise show the user, as the final message of your turn:
 
 - the target: a new issue in DocksDocks/docks-kit, or a comment on issue #n there;
 - the exact title and body;
-- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it). On the draft-only route (see "Without gh, or without a way to ask"), give no command and no account: give the link, or the title and the body as text when no script can run.
+- the command that you will run, and the GitHub account that it files under (`gh auth status --hostname github.com --active` shows it).
 
-Ask the user to approve or change the text, then end your turn. A security problem stops before this step: give the private draft instead (see "Security problems").
+Ask the user to approve or change the text, then end your turn. Approval applies only on the filing route; the draft-only route asks for no approval. A security problem stops before this step: give the private draft instead (see "Security problems").
 
 ### 6. File the approved text
 
@@ -142,7 +142,7 @@ If a filed issue or comment names a private repository or holds other private da
 
 ### Without gh, or without a way to ask
 
-Use the draft-only route when gh is missing, gh is not logged in to `github.com`, the runtime cannot run gh, or the run cannot ask the user. On this route you file nothing; the user files the text. Do not install gh, and do not ask for a token. Give the draft with a prefilled link, which opens the new-issue form with the text filled in:
+Use the draft-only route when gh is missing, gh is not logged in to `github.com`, the runtime cannot run gh, or the run cannot ask the user (a headless run, a scheduled job, or a subagent with no way to reach the user). On this route you file nothing; the user files the text. Do not install gh, and do not ask for a token. On this route, give the draft-only result as your final message and stop; ask for no approval, because you file nothing. The result is the draft with a prefilled link, which opens the new-issue form with the text filled in:
 
 `https://github.com/DocksDocks/docks-kit/issues/new?title=<url-encoded title>&body=<url-encoded body>`
 
