@@ -1,7 +1,7 @@
 {
   "cases": {
     "fixture=home-drift cmd=sync replay=2nd": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
       "command": ["sync"],
       "exitCode": 0,
       "output": "\u001b[1;32m[ok]\u001b[0m omp plugins synced: pi-intercom, docks-kit-omp linked\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 2 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n",
@@ -25,7 +25,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -255,7 +255,7 @@
       }
     },
     "fixture=home-fresh cmd=sync": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
       "command": ["sync"],
       "exitCode": 0,
       "output": "\u001b[1;32m[ok]\u001b[0m omp AGENTS.md synced\n\u001b[1;32m[ok]\u001b[0m omp mcp.json synced\n\u001b[1;32m[ok]\u001b[0m omp config.yml installed\n\u001b[1;32m[ok]\u001b[0m omp models.yml installed\n\u001b[1;32m[ok]\u001b[0m omp intercom configuration synced\n\u001b[1;32m[ok]\u001b[0m omp kit plugin files synced\n\u001b[1;32m[ok]\u001b[0m omp plugins synced: pi-intercom, docks-kit-omp linked\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 2 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n",
@@ -277,7 +277,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -506,7 +506,7 @@
       }
     },
     "fixture=home-fresh cmd=sync --verbose replay=2nd": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
       "command": ["sync", "--verbose"],
       "exitCode": 0,
       "output": "\u001b[1;32m[ok]\u001b[0m omp AGENTS.md already in sync\n\u001b[1;32m[ok]\u001b[0m omp mcp.json already in sync\n\u001b[1;32m[ok]\u001b[0m omp config.yml already in sync\n\u001b[1;32m[ok]\u001b[0m omp config.yml carries no retired entries\n\u001b[1;32m[ok]\u001b[0m omp models.yml already in sync\n\u001b[1;32m[ok]\u001b[0m omp models.yml carries no retired entries\n\u001b[1;32m[ok]\u001b[0m omp intercom configuration already in sync\n\u001b[1;32m[ok]\u001b[0m omp kit plugin files already in sync\n\u001b[1;32m[ok]\u001b[0m omp plugins synced: pi-intercom, docks-kit-omp linked\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 2 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n",
@@ -528,7 +528,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -757,7 +757,7 @@
       }
     },
     "fixture=home-fresh cmd=sync replay=2nd": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
       "command": ["sync"],
       "exitCode": 0,
       "output": "\u001b[1;32m[ok]\u001b[0m omp plugins synced: pi-intercom, docks-kit-omp linked\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 2 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n",
@@ -779,7 +779,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -1030,7 +1030,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -1259,7 +1259,7 @@
       }
     },
     "fixture=home-fresh cmd=sync stubs=jq variant=jq-absent-native-sync": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\nomp\tplugin list --json\n",
       "command": ["sync"],
       "exitCode": 0,
       "output": "\u001b[1;32m[ok]\u001b[0m omp AGENTS.md synced\n\u001b[1;32m[ok]\u001b[0m omp mcp.json synced\n\u001b[1;32m[ok]\u001b[0m omp config.yml installed\n\u001b[1;32m[ok]\u001b[0m omp models.yml installed\n\u001b[1;32m[ok]\u001b[0m omp intercom configuration synced\n\u001b[1;32m[ok]\u001b[0m omp kit plugin files synced\n\u001b[1;32m[ok]\u001b[0m omp plugins synced: pi-intercom, docks-kit-omp linked\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 2 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n",
@@ -1281,7 +1281,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -1532,7 +1532,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -1761,10 +1761,10 @@
       }
     },
     "fixture=home-fresh cmd=sync stubs=omp variant=plugin-failure": {
-      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.14.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\n",
+      "argvLog": "omp\tplugin list --json\nomp\tinstall pi-intercom@0.19.0\nomp\tplugin link <HOME>/.docks-kit/omp-plugin\n",
       "command": ["sync"],
       "exitCode": 1,
-      "output": "\u001b[1;32m[ok]\u001b[0m omp AGENTS.md synced\n\u001b[1;32m[ok]\u001b[0m omp mcp.json synced\n\u001b[1;32m[ok]\u001b[0m omp config.yml installed\n\u001b[1;32m[ok]\u001b[0m omp models.yml installed\n\u001b[1;32m[ok]\u001b[0m omp intercom configuration synced\n\u001b[1;32m[ok]\u001b[0m omp kit plugin files synced\n\u001b[1;33m[warn]\u001b[0m omp plugin operation failed for pi-intercom: stub omp operation failure; run manually: omp install pi-intercom@0.14.0\n\u001b[1;33m[warn]\u001b[0m omp plugin operation failed for docks-kit-omp: stub omp operation failure; run manually: omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 0 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n\n--- Failures ---\n- omp plugin operation failed for pi-intercom: stub omp operation failure; run manually: omp install pi-intercom@0.14.0\n- omp plugin operation failed for docks-kit-omp: stub omp operation failure; run manually: omp plugin link <HOME>/.docks-kit/omp-plugin\n",
+      "output": "\u001b[1;32m[ok]\u001b[0m omp AGENTS.md synced\n\u001b[1;32m[ok]\u001b[0m omp mcp.json synced\n\u001b[1;32m[ok]\u001b[0m omp config.yml installed\n\u001b[1;32m[ok]\u001b[0m omp models.yml installed\n\u001b[1;32m[ok]\u001b[0m omp intercom configuration synced\n\u001b[1;32m[ok]\u001b[0m omp kit plugin files synced\n\u001b[1;33m[warn]\u001b[0m omp plugin operation failed for pi-intercom: stub omp operation failure; run manually: omp install pi-intercom@0.19.0\n\u001b[1;33m[warn]\u001b[0m omp plugin operation failed for docks-kit-omp: stub omp operation failure; run manually: omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\nomp plugins: 0 installed\n\nRestart omp to load any refreshed plugins, skills, or tools.\n\n--- Failures ---\n- omp plugin operation failed for pi-intercom: stub omp operation failure; run manually: omp install pi-intercom@0.19.0\n- omp plugin operation failed for docks-kit-omp: stub omp operation failure; run manually: omp plugin link <HOME>/.docks-kit/omp-plugin\n",
       "tree": {
         ".bashrc": "sha256:5461960202d63cb2b4eb32e0c26c061954d832f1cc33d4016d071b49584ceabb",
         ".cache/": "dir",
@@ -1783,7 +1783,7 @@
         ".docks-kit/omp-plugin/extensions/hygiene.ts": "sha256:d68c456986c705c69129e64738db538990a4b089a5b451a948d982079632f6b0",
         ".docks-kit/omp-plugin/extensions/verify-gate-core.ts": "sha256:cb23960decee72336c8c38165bfde2cb5ba329e78a5b972e3a763925a745dd2e",
         ".docks-kit/omp-plugin/extensions/verify-gate.ts": "sha256:bb35f55cb8e1782808ba2cae9cf313a820eb4ddbf25ed2273efbda5659d873f4",
-        ".docks-kit/omp-plugin/package.json": "sha256:2a05594d75d8eb507bf2c97c34e505568227dd8f4de9292927b103b1eae020c2",
+        ".docks-kit/omp-plugin/package.json": "sha256:0a40bc5aa1614ba0c6ccf3da4cbf51897947de3f1df9bb5b85d07d0c2dd40074",
         ".docks-kit/omp-plugin/rules/": "dir",
         ".docks-kit/omp-plugin/rules/file-removal.md": "sha256:e9814a84739e9dc2007a7598ed8559b32c914c832512a093af23b47cae2df2e9",
         ".docks-kit/omp-plugin/rules/git-safety.md": "sha256:855c7400f415e684f3ae3a7d64c15b6c6c6ff6dc2e4163cbc91c9a009c2011d9",
@@ -2015,7 +2015,7 @@
       "argvLog": "bun\t--version\ncurl\t--version\ngit\t--version\njq\t--version\nnpm\t--version\nomp\t--version\n",
       "command": ["toolchain", "check"],
       "exitCode": 0,
-      "output": "TOOL                         KIND      INSTALLED      FLOOR     VERIFIED  STATUS\nbun                          managed   1.4.5          1.4.5     1.4.5     ok\ncurl                         check     ?              -         -         unknown\ngit                          check     2.43.0         -         -         ok\njq                           check     1.7.1          -         -         ok\nnpm                          check     ?              -         -         unknown\nomp                          check     19.0.0         19.0.0    19.0.0    ok\npi-intercom                  pin       (omp install)  -         0.14.0    pinned\n",
+      "output": "TOOL                         KIND      INSTALLED      FLOOR     VERIFIED  STATUS\nbun                          managed   1.4.5          1.4.5     1.4.5     ok\ncurl                         check     ?              -         -         unknown\ngit                          check     2.43.0         -         -         ok\njq                           check     1.7.1          -         -         ok\nnpm                          check     ?              -         -         unknown\nomp                          check     19.0.0         19.0.0    19.1.1    ok\npi-intercom                  pin       (omp install)  -         0.19.0    pinned\n",
       "tree": {
         ".bashrc": "sha256:5461960202d63cb2b4eb32e0c26c061954d832f1cc33d4016d071b49584ceabb"
       }

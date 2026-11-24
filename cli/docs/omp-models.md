@@ -113,6 +113,13 @@ the free launcher reads (`ompOverlay.ts parseFreeModels`): a string
 `selector`, a `cost` object with numeric `input` and `output`, a numeric
 `contextWindow`, and a `thinking` ladder array or `null`.
 
+On 2026-11-24, omp 19.1.1 became the verified pin; the floor stays 19.0.0.
+The `omp models --json` catalog of 19.1.1 listed the same 12 selectors as
+exact rows with the same field types, and each role level is in the
+`thinking` ladder of its model. The check read the catalog only. An omp
+19.1.1 without a provider login lists only the `openrouter` rows, so run
+the check on a home with the `openai-codex` and `anthropic` logins.
+
 What omp's settings catalog establishes about these roles:
 
 - `cycleOrder` lists the roles the model switcher cycles. `fable` is the
