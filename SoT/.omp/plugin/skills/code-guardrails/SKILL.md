@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "297ba7eefa36295f147b47783960e9424e2271d291393bf616735e80e3cc1921"
+  content_hash: "e936a9c9720ed406ddb1e4ed0b7a566fa4de050714be6d3d872ac78808bcafa9"
 ---
 
 # Code Guardrails
@@ -179,8 +179,10 @@ and the new files that `.gitignore` does not exclude. They list each value that
 appears in 2 or more files. Each line gives the file count, the value, and each
 `file:line` location. Change `langs` to match the project languages. To skip a
 vendored or generated folder that git tracks, add a pathspec such as `':!vendor/'`.
-The commands turn off column and color output, and `-z` puts a NUL character after
-each file name, so git settings and a colon in a file name do not change the result.
+The commands turn off column output, color, and submodule recursion, and `-z` puts a
+NUL character after each file name, so git settings and a colon in a file name do not
+change the result. A file name that holds a newline breaks the 3-line framing and
+gives wrong results; leave such a file out with a pathspec.
 
 ```bash
 # Print each value that appears in 2 or more files: file count, value, locations.
@@ -203,16 +205,22 @@ group() {
 }
 langs=('*.ts' '*.rs' '*.swift' '*.py' '*.sh')
 
+# Run git grep with fixed output options, then group the matches. git grep exits
+# with 1 when nothing matches; a higher status is a failed scan, so stop and report it.
+scan() {
+  git grep --untracked --no-recurse-submodules --no-column --no-color -z -I -n -o \
+    "$@" -- "${langs[@]}" | group
+  local status=${PIPESTATUS[0]}
+  if [ "$status" -gt 1 ]; then echo "scan failed: git grep exited with $status" >&2; return "$status"; fi
+}
+
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
 # 2 or more digits, with an optional Rust type suffix such as u64.
 # Single digits are left out because they are mostly counters and indexes.
-git grep --untracked --no-column --no-color -z -I -n -o -w -E \
-  '(0[xXbBoO][0-9a-fA-F_]+|[0-9][0-9_.]*[0-9])(_?([iu](8|16|32|64|128|size)|f32|f64))?' \
-  -- "${langs[@]}" | group
+scan -w -E '(0[xXbBoO][0-9a-fA-F_]+|[0-9][0-9_.]*[0-9])(_?([iu](8|16|32|64|128|size)|f32|f64))?' &&
 
 # Quoted strings on one line. The grouping drops strings under 4 characters.
-git grep --untracked --no-column --no-color -z -I -n -o -E \
-  "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'" -- "${langs[@]}" | group
+scan -E "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'"
 ```
 
 The checks match candidates on one line only. They count `'cache.key'` and
@@ -220,6 +228,10 @@ The checks match candidates on one line only. They count `'cache.key'` and
 `1024`. A value that repeats in one file only is not listed. A lone quote can pair
 with a later quote and hide a string, for example a Rust lifetime (`&'static`) or
 an apostrophe in a comment.
+
+When git grep exits with 1, no file matched. A higher exit status means that the scan
+failed: the block prints an error, stops, and returns that status. Do not read the
+empty output of a failed scan as "no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short

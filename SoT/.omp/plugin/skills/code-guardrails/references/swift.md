@@ -11,7 +11,7 @@
 
 ## Detect
 
-- Find `.swiftlint.yml` before changing lint rules.
+- Find the SwiftLint config: the `--config` files that the project's SwiftLint command passes (in CI, a Run Script phase, or a script), or `.swiftlint.yml` when the command passes none.
 - Check `Package.swift` for `SwiftLintBuildToolPlugin` or a SwiftLint package command plugin.
 - Check Xcode targets for a SwiftLint build tool plugin or a Run Script phase.
 - Find `.swift-format` if the project uses `swift-format`. Treat formatting as layout work, not lint coverage.
@@ -19,7 +19,7 @@
 
 ## Recommended config
 
-Merge this `.swiftlint.yml` example into the existing file. Keep existing rules and stricter settings.
+Merge this `.swiftlint.yml` example into the existing config file that Detect found. Keep existing rules and stricter settings.
 Add only missing rules. If the file has `only_rules`, add the missing rule IDs from the example, including `force_cast` and `force_try`, to that list and do not add `opt_in_rules`. SwiftLint rejects `only_rules` together with `opt_in_rules` or `disabled_rules`, and `only_rules` turns off each rule that it does not list. Otherwise, add the missing `opt_in_rules` entries.
 Keep `disabled_rules` untouched and report any conflict before changing it.
 Keep other config keys, including file scope and analyzer settings. Do not replace the file with this example.
@@ -107,7 +107,7 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run a local standalone `swiftlint` binary directly, `swiftlint lint --strict` from the directory with `.swiftlint.yml`, only when `.swiftlint.yml` and each config that it references have no remote `parent_config` or `child_config` URL. SwiftLint fetches a remote config, so a remote URL sends the run through the approval gate in `../SKILL.md` first. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
+- Run the local standalone `swiftlint` binary directly with the same arguments as the project's SwiftLint command, including its `--config` files and paths, or `swiftlint lint --strict` from the directory with `.swiftlint.yml` when the project has no such command. Run it only when each config in that chain has no remote `parent_config` or `child_config` URL. SwiftLint fetches a remote config, so a remote URL sends the run through the approval gate in `../SKILL.md` first. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
 - Check each new rule for violations and report every config change.
 - When the request includes value mapping, report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
 - If SwiftLint is absent, follow the approval gate in `../SKILL.md` before you install it; do not claim the lint check passed.
