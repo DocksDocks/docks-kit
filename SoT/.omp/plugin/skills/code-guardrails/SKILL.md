@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "f0c76f36f9ac1b46b2ba16e1f0d3121067dc20aa658aac27978a2dc36244a390"
+  content_hash: "e2b3789f364ea2682b10fa681c78a6536fabcf5c12e9c22575e46d52aaf26263"
 ---
 
 # Code Guardrails
@@ -42,8 +42,10 @@ network step. Before such a step, ask the user with the omp `ask` tool.
 Do not install, download, or run the step until the user approves.
 An error, a cancel, or a timeout result is not approval: do not run the step,
 and end the turn. If `ask` is not available, put the question in your final
-message and end the turn. After approval, create the config of a new linter from
-the reference. A silent dependency or tool change is a change the user did not approve.
+message and end the turn. An approval covers only the action that the user approved:
+an install approval installs the tool, and it does not create or change a config.
+To create or change a config, follow the Detect rules of the matching reference.
+A silent dependency or tool change is a change the user did not approve.
 
 **Verify rule.** Verify with the project's own lint command, unchanged: the same
 executable, version, arguments, working directory, and environment that the project
