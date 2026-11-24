@@ -169,6 +169,15 @@ export type StubState = {
   beforeMutationOnce?: StubChange & { issue: number };
   /** The next addComment field fails with this message and posts nothing. */
   addCommentErrorOnce?: string;
+  /** The next addComment field posts its comment and then fails with this message. */
+  addCommentErrorAfterPostOnce?: string;
+  /**
+   * A change, in the form of a scheduled change, that lands right after one `gh issue view` of the issue: the first
+   * view once the issue has served `afterReads` GraphQL reads. The view shows the issue before the change.
+   */
+  afterIssueViewOnce?: StubChange & { issue: number };
+  /** A change, in the form of a scheduled change, that lands right after one GraphQL request that lists issues. */
+  afterListOnce?: StubChange & { issue: number };
   ghLacksParentFlag?: boolean;
   dropCreateAssignee?: boolean;
   issueCloseErrorBeforeWriteOnce?: string;

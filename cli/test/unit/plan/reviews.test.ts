@@ -62,6 +62,47 @@ describe("plan reviews", () => {
       expect(parseReviewComment(text), text).toStrictEqual(expected);
   });
 
+  it("a fence closes only after the container prefix of its opening line, and an indented or inline fence is no fence", () => {
+    // GFM fences inside quotes and list items (#213, R4).
+    const cases: ReadonlyArray<ReviewCase> = [
+      // Inside an unquoted fence, a quote marker or a list marker before the backticks does not close it.
+      [
+        "### Code review round 2\n\n```\n> ```\nCode-review: pass\n```\nCode-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n```\n- ```\nCode-review: pass\n```\nCode-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A fence line indented four spaces is code text: it neither opens nor closes a fence.
+      [
+        "### Code review round 2\n\n    ```\nCode-review: blocked\n    ```\nCode-review: pass",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n```\n    ```\nCode-review: pass\n```\nCode-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A backtick in the info string makes the line inline code, not a fence.
+      [
+        "### Code review round 2\n\n```x```\nCode-review: blocked\n```\nCode-review: pass",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A fence inside a quote inside a list item opens, and a quoted fence under the item closes it.
+      [
+        "### Code review round 2\n\n- > ```\n  > Code-review: pass\n  > ```\n  > Code-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+      // A lens block quotes an example inside a markdown fence; the next lens block still counts.
+      [
+        "### Code review round 2, lens correctness\n\nCode-review: pass\n\n```markdown\n> ```\n> Code-review: pass\n> ```\n```\n\n### Code review round 2, lens security\n\nCode-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+    ];
+    for (const [text, expected] of cases)
+      expect(parseReviewComment(text), text).toStrictEqual(expected);
+  });
+
   it("review parsing accepts flexible prose, and a severe finding turns a code pass into fixes-required", () => {
     // Review prose is flexible. Severity still prevents an unsafe code pass.
     const reviewCases: ReadonlyArray<ReviewCase> = [
@@ -98,6 +139,10 @@ describe("plan reviews", () => {
       ],
       [
         "### Code review round 3\nCode-review: pass\n> Severity: High",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      [
+        "### Code review round 3\nCode-review: pass\n\n```\n- [HIGH] src/example.mjs:1 - data loss - fix\n```",
         { kind: "code", verdict: "fixes-required" },
       ],
     ];

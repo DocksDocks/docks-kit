@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { StubReference } from "../../fixtures/gh-stub/state.ts";
+import type { StubChange, StubReference } from "../../fixtures/gh-stub/state.ts";
 import {
   PLAN_CLI_HOST_SUPPORTED,
   type LandedPlan,
@@ -352,6 +352,35 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive closer", () => {
           labels: ["plan"],
           comments: [REVIEW, closed],
         });
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "archive of a plan that reads closed refuses a body change or a foreign owner before it posts the record",
+    () => {
+      const context = planCliContext();
+      for (const [name, change, refusal] of [
+        [
+          "a body change",
+          (plan: LandedPlan) => ({ body: `${context.issue(plan.number).body}\nRemote line.\n` }),
+          () => "plan issue changed remotely; re-read and retry",
+        ],
+        [
+          "a foreign owner",
+          () => ({ assignees: ["plan-agent", "other-agent"] }),
+          (plan: LandedPlan) => `plan #${plan.number} is owned by other-agent`,
+        ],
+      ] satisfies ReadonlyArray<
+        readonly [string, (plan: LandedPlan) => StubChange, (plan: LandedPlan) => string]
+      >) {
+        const plan = context.closedPlan(`${name} before the record`);
+        // The change lands after the archive read and before the read right before the record.
+        context.schedule(plan.number, { afterReads: 1, ...change(plan) });
+        refuse(archive(context, plan), refusal(plan));
+        expect(stored(context, plan.number).comments, name).toStrictEqual([REVIEW]);
+        expect(context.writes(), name).toStrictEqual([]);
       }
     },
     SPAWN_TIMEOUT_MS,

@@ -173,6 +173,11 @@ describe("plan records", () => {
       ["Twice /home/a/x, /home/a/x then /tmp/y;", named("/home/a/x", "/tmp/y")],
       // Markdown emphasis and an unpadded table cell do not hide a path (#213, R7).
       ["Bold **/tmp/cache/x** and a cell |/home/u/x|", named("/tmp/cache/x", "/home/u/x")],
+      // Emphasis needs the same star run on both sides; a glob is no emphasis (#213, R7).
+      ["Glob src/**/tmp/x.ts", []],
+      ["Glob `**/tmp/cache/**`", []],
+      ["ignore **/tmp/*.log files", []],
+      ["Italic */home/a/b*", named("/home/a/b")],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],

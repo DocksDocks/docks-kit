@@ -821,13 +821,12 @@ function respondMutation(query: string, variables: VariableRecord): never {
         if (typeof newBody !== "string") die("UpdateIssueInput.body must be a string");
         issue.body = newBody;
       }
-      if (Object.hasOwn(input, "assigneeIds") && !state.mutationDropsAssigneesOnce) {
-        issue.assignees = [
-          ...new Set(nodeIds(input["assigneeIds"], "assigneeIds").map(loginByNodeId)),
-        ];
+      if (Object.hasOwn(input, "assigneeIds")) {
+        const logins = nodeIds(input["assigneeIds"], "assigneeIds").map(loginByNodeId);
+        if (!state.mutationDropsAssigneesOnce) issue.assignees = [...new Set(logins)];
+        delete state.mutationDropsAssigneesOnce;
         issue.assigneeWrites = (issue.assigneeWrites ?? 0) + 1;
       }
-      delete state.mutationDropsAssigneesOnce;
       touch(issue);
       data[field.key] = mutationPayload(field, { issue: issueObject(issue, variables) });
       continue;
@@ -872,6 +871,13 @@ function respondMutation(query: string, variables: VariableRecord): never {
       };
       issue.comments ??= [];
       issue.comments.push(comment);
+      // `addCommentErrorAfterPostOnce` posts the comment and then fails the field, as a request that landed but errored.
+      if (state.addCommentErrorAfterPostOnce) {
+        data[field.key] = null;
+        errors.push({ path: [field.key], message: state.addCommentErrorAfterPostOnce });
+        delete state.addCommentErrorAfterPostOnce;
+        continue;
+      }
       data[field.key] = mutationPayload(field, {
         subject: issueObject(issue, variables),
         commentEdge: { node: commentJson(comment, issue) },
@@ -1218,6 +1224,12 @@ if (group === "api" && command === "graphql") {
     repository: () => repository,
   };
   const data = selectFields(root, operationSelection(query));
+  // `afterListOnce` lands a change right after one list request, such as a plan that closes while `list` reads.
+  if (stage === "list" && state.afterListOnce) {
+    const { issue: number, ...change } = state.afterListOnce;
+    delete state.afterListOnce;
+    applyChange(issueByNumber(number), change);
+  }
   if (errors.length) failGraphql(data, errors);
   respondGraphql(data, stage);
 }
@@ -1327,6 +1339,14 @@ if (group === "issue" && command === "view") {
   // returns a label past the first 100.
   const view = issueJson(issue);
   emit(JSON.stringify(select({ ...view, labels: view.labels.slice(0, 100) }, value("--json"))));
+  // `afterIssueViewOnce` lands its change right after the view, such as a change between a pre-write read and a later
+  // GraphQL read.
+  const viewChange = state.afterIssueViewOnce;
+  if (viewChange?.issue === number && (issue.graphqlReads ?? 0) >= (viewChange.afterReads ?? 0)) {
+    const { issue: target, ...change } = viewChange;
+    delete state.afterIssueViewOnce;
+    applyChange(issueByNumber(target), change);
+  }
   save();
   process.exit(0);
 }

@@ -19,8 +19,14 @@
 - A fenced example in a review comment no longer counts as a heading, a
   verdict, or the manager response.
 - The plan record check also finds a machine path after `*` and `|`.
-- Review comments, plan lists, and records past the first page are read in
-  full (DocksDocks/docks-kit#213).
+- `new` works when GitHub answers the viewer and the plan labels without node
+  ids.
+- For a plan closed as completed with an unfinished step, `show` now advises
+  `step <n> <id> done` when the merged work finished the step, and for the
+  remaining work `reopen <n> --pr <pr>` or a new plan.
+- `archive` claims an unassigned plan that is already closed before it posts
+  the archive record. Tests now cover review comments, plan lists, and records
+  past the first page (DocksDocks/docks-kit#213).
 
 ## 2026-11-23 - docks-kit 0.29.0: agents can clean their own workspace
 

@@ -874,7 +874,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       const { parent, child } = closableParent(context);
       expectSuccess(archive(context, String(parent)), "archive the parent");
       context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
-      // The retry reads the plan twice (the first read and the settle read); the labels change before the read of the labels.
+      // The retry reads the plan twice (the first read and the settle read); the labels change after the settle read
+      // and before the pre-write read.
       context.schedule(parent, {
         afterReads: reads(context, parent) + 2,
         labels: ["plan", "plan:blocked"],
@@ -955,6 +956,109 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       const result = archive(context, String(parent));
       refuse(result, repairHint(parent, child, "plan:ongoing, plan:blocked"));
       expect(result.stdout, "no reopened status is reported").toBe("");
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "a reopen whose settled read holds two phase labels adds none, refuses with the repair, and status repairs it",
+    () => {
+      const context = planCliContext();
+      const { parent, child } = closableParent(context);
+      expectSuccess(archive(context, String(parent)), "archive the parent");
+      context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
+      // The closed parent holds two phase labels before the retry reads it, so the settled read shows both.
+      context.updateIssue(parent, (entry) => {
+        entry.labels = ["plan", "plan:blocked", "plan:ongoing"];
+      });
+      const before = mutations(context).length;
+      const result = archive(context, String(parent));
+      refuse(result, repairHint(parent, child, "plan:blocked, plan:ongoing"));
+      expect(result.stdout, "no reopened status is reported").toBe("");
+      const reopenWrite = mutations(context).slice(before);
+      expect(reopenWrite, "the reopen only").toHaveLength(1);
+      expect(reopenWrite[0]?.join(" "), "the reopen adds no label").not.toContain(
+        "addLabelsToLabelable",
+      );
+      expect(phaseLabels(context, parent)).toStrictEqual(["plan:blocked", "plan:ongoing"]);
+      expect(context.issue(parent).state, "the plan is open, so status can repair it").toBe("OPEN");
+      expectSuccess(context.run("status", String(parent), "ongoing"), "repair the phase labels");
+      expect(phaseLabels(context, parent)).toStrictEqual(["plan:ongoing"]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "a reopen whose close has no time does not count an older identical comment as its posted comment",
+    () => {
+      const context = planCliContext();
+      const { parent, child } = closableParent(context);
+      expectSuccess(archive(context, String(parent)), "archive the parent");
+      context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
+      // The parent reads closed without a close event, so its close has no time.
+      context.updateIssue(parent, (entry) => {
+        entry.timelineItems = [];
+      });
+      context.addIssueComment(parent, reopenedComment(parent, child));
+      context.updateState((state) => {
+        state.addCommentErrorOnce = "Something went wrong while executing your query.";
+      });
+      const result = archive(context, String(parent));
+      refuse(
+        result,
+        `plan #${parent} is open again, but its reopen comment did not post (gh api graphql failed: gh: Something went wrong while executing your query.); post this comment as the plan owner: ${reopenedComment(parent, child)}`,
+      );
+      expect(result.stdout, "no reopened status is reported").toBe("");
+      expect(parentState(context, parent).comments, "only the older comment").toStrictEqual([
+        parentRecord([child]),
+        reopenedComment(parent, child),
+      ]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "the archive of an unassigned parent that reads closed claims it before it posts the record",
+    () => {
+      const context = planCliContext();
+      const { parent, child } = closableParent(context);
+      context.updateIssue(parent, (entry) => {
+        entry.assignees = [];
+      });
+      closePlan(context, parent);
+      context.updateState((state) => {
+        state.calls = [];
+      });
+      const result = archive(context, String(parent));
+      expectSuccess(result, "archive an unassigned closed parent");
+      expect(result.stdout).toBe(`plan #${parent} finished (all 1 children finished)\n`);
+      expect(context.issue(parent).assignees).toStrictEqual(["plan-agent"]);
+      expect(parentState(context, parent).comments).toStrictEqual([parentRecord([child])]);
+      // A trusted record needs one owner, so the claim is the first write and the record the second.
+      const kinds = mutations(context).map((argv) => {
+        const query = argv.find((argument) => argument.startsWith("query=")) ?? "";
+        if (query.includes("addComment")) return "record";
+        return query.includes("assigneeIds") ? "claim" : "labels";
+      });
+      expect(kinds).toStrictEqual(["claim", "record", "labels"]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "the archive of an unassigned open parent refuses before the close when its claim goes after the claim write",
+    () => {
+      const context = planCliContext();
+      const { parent } = closableParent(context);
+      context.updateIssue(parent, (entry) => {
+        entry.assignees = [];
+      });
+      context.updateState((state) => {
+        state.afterMutationOnce = { issue: parent, assignees: [] };
+      });
+      refuse(archive(context, String(parent)), "plan issue changed remotely; re-read and retry");
+      expect(context.issue(parent).state, "the plan stays open").toBe("OPEN");
+      expect(closes(context)).toStrictEqual([]);
     },
     SPAWN_TIMEOUT_MS,
   );

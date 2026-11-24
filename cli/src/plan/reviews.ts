@@ -57,39 +57,73 @@ function verdictFor(kind: ReviewKind, alias: string): Verdict | undefined {
 // quotes findings, so the parser reads no block heading, verdict, or severity from its heading line to the end.
 const MANAGER_RESPONSE_HEADING = /^ {0,3}#### Manager response to round \d+[ \t]*$/;
 
-// A fence opens with three or more backticks or tildes, also inside a quote or a list item, and closes with at least as
-// many of the same character (GFM). The lines from the opening fence to the closing fence are examples. A fence that
-// opened inside a quote or a list item also ends where that container ends: at a line without `>`, or at a line that is
-// not indented under the list item.
-const FENCE = /^(`{3,}|~{3,})/;
-const QUOTE = /^\s*>/;
-const LIST_ITEM = /^\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+/;
+// A fence opens with three or more backticks or tildes after at most three spaces, also inside a quote or a list item,
+// and closes with at least as many of the same character and nothing after them (GFM). A backtick fence whose info
+// string holds a backtick is no fence. The lines from the opening fence to the closing fence are examples. The closing
+// fence is read after the container prefix of the opening line only: its quote markers, and the indent of its list item.
+// A fence also ends where its container ends: at a line with fewer quote markers, or, in a list item, at a non-blank
+// line that is not indented under the item.
+const QUOTE_MARKER = /^ {0,3}> ?/;
+const LIST_MARKER = /^ {0,3}(?:[-+*]|\d{1,9}[.)]) +/;
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+function withoutQuotes(
+  line: string,
+  most: number,
+): { readonly rest: string; readonly depth: number } {
+  let rest = line;
+  let depth = 0;
+  for (
+    let marker = QUOTE_MARKER.exec(rest);
+    marker && depth < most;
+    marker = QUOTE_MARKER.exec(rest)
+  ) {
+    rest = rest.slice(marker[0].length);
+    depth += 1;
+  }
+  return { rest, depth };
+}
+
 function fencedLines(rawLines: ReadonlyArray<string>): Array<boolean> {
   let open:
-    | { readonly fence: string; readonly quoted: boolean; readonly listed: boolean }
+    | {
+        readonly char: string;
+        readonly length: number;
+        readonly quotes: number;
+        readonly indent: number;
+      }
     | undefined;
   return rawLines.map((line) => {
-    const content = line
-      .trim()
-      .replace(/^(?:>\s*)+/, "")
-      .replace(/^(?:[-+*]|\d+[.)])\s+/, "");
-    const fence = FENCE.exec(content)?.[1];
-    const leftContainer =
-      open !== undefined &&
-      ((open.quoted && !QUOTE.test(line)) ||
-        (open.listed && !open.quoted && line.trim() !== "" && !/^\s/.test(line)));
-    if (leftContainer) open = undefined;
-    if (open === undefined) {
-      if (fence) open = { fence, quoted: QUOTE.test(line), listed: LIST_ITEM.test(line) };
-      return fence !== undefined;
-    }
-    if (
-      fence &&
-      fence[0] === open.fence[0] &&
-      fence.length >= open.fence.length &&
-      !content.slice(fence.length).trim()
-    )
+    if (open !== undefined) {
+      const { rest, depth } = withoutQuotes(line, open.quotes);
+      const indent = /^ */.exec(rest)?.[0].length ?? 0;
+      const leftList = open.indent > 0 && rest.trim() !== "" && indent < open.indent;
+      if (depth === open.quotes && !leftList) {
+        const close = FENCE_CLOSE.exec(rest.slice(Math.min(indent, open.indent)));
+        if (close && close[1][0] === open.char && close[1].length >= open.length) open = undefined;
+        return true;
+      }
       open = undefined;
+    }
+    // The container prefix of the opener: quote markers and list markers in any order. A list indent counts only after
+    // the last quote marker, because the quote marker of a later line already holds the indent before it.
+    let rest = line;
+    let depth = 0;
+    let listIndent = 0;
+    for (;;) {
+      const quote = QUOTE_MARKER.exec(rest)?.[0];
+      const marker = quote === undefined ? LIST_MARKER.exec(rest)?.[0] : undefined;
+      if (quote !== undefined) {
+        depth += 1;
+        listIndent = 0;
+      } else if (marker !== undefined) listIndent += marker.length;
+      else break;
+      rest = rest.slice((quote ?? marker ?? "").length);
+    }
+    const fence = FENCE_OPEN.exec(rest);
+    if (!fence || (fence[1][0] === "`" && fence[2].includes("`"))) return false;
+    open = { char: fence[1][0], length: fence[1].length, quotes: depth, indent: listIndent };
     return true;
   });
 }

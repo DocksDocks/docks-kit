@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { StubChange } from "../../fixtures/gh-stub/state";
 import {
   PLAN_CLI_HOST_SUPPORTED,
   expectSuccess,
@@ -32,6 +33,20 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan write postconditions", () => {
       schedule(shared, { afterReads: 1, assignees: ["plan-agent", "other-agent"] });
       refuse(run("status", String(shared), "planned"), `plan #${shared} is owned by other-agent`);
       expect(issue(shared).labels).toStrictEqual(["plan", "plan:drafting"]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "status refuses when a snapshot owner is gone at the pre-write read",
+    () => {
+      const { run, issue, createPlan, schedule } = planCliContext();
+      // The owner goes after the snapshot read and before the pre-write read.
+      const plan = createPlan("owner goes meanwhile");
+      schedule(plan, { afterReads: 1, assignees: [] });
+      refuse(run("status", String(plan), "planned"), CHANGED);
+      expect(issue(plan).labels).toStrictEqual(["plan", "plan:drafting"]);
+      expect(issue(plan).assignees).toStrictEqual([]);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -153,6 +168,26 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan write postconditions", () => {
       schedule(plan, { afterReads: 1, labels: ["plan", "plan:ongoing"] });
       refuse(run("retire", String(plan), "--reason", "No longer needed"), CHANGED);
       expect(issue(plan).state).toBe("OPEN");
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "retire reads the plan again after its label removal and leaves it open when an owner goes or a phase label lands",
+    () => {
+      const { run, issue, updateState, createPlan } = planCliContext();
+      for (const [name, change] of [
+        ["the owner goes", { assignees: [] }],
+        ["a phase label lands", { labels: ["plan", "plan:blocked"] }],
+      ] satisfies ReadonlyArray<readonly [string, StubChange]>) {
+        const plan = createPlan(`retire when ${name}`);
+        // The change lands right after the label removal, before the read right before the close.
+        updateState((state) => {
+          state.afterMutationOnce = { issue: plan, ...change };
+        });
+        refuse(run("retire", String(plan), "--reason", "No longer needed"), CHANGED);
+        expect(issue(plan).state, name).toBe("OPEN");
+      }
     },
     SPAWN_TIMEOUT_MS,
   );

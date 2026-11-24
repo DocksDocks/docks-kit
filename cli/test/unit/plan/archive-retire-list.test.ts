@@ -289,6 +289,43 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
   );
 
   it(
+    "show advises a hand reopen for a close by an unknown closer and reopen --pr for a commit of one merged pull request",
+    () => {
+      const { run, updateIssue, updateState, closedPlan } = planCliContext();
+      const advice = (number: number): Array<string> => {
+        const shown = run("show", String(number));
+        expectSuccess(shown, `show #${number}`);
+        return shown.stdout.split("\n").filter((line) => line.startsWith("advice: plan is closed"));
+      };
+      // A v4 plan that someone closed by hand: no pull request can reopen it.
+      const byHand = closedPlan("v4 closed by hand", { status: "in-flight" });
+      updateIssue(byHand.number, (entry) => {
+        entry.body = body("in-flight", 4);
+        entry.timelineItems = [{ __typename: "ClosedEvent", closer: null }];
+      });
+      expect(advice(byHand.number)).toStrictEqual([
+        `advice: plan is closed as completed while step fix_parser is in-flight; closed by an unknown closer; run step ${byHand.number} fix_parser done if the merged work finished it; otherwise reopen the plan by hand only if that close was a mistake`,
+      ]);
+      // A v3 plan that a commit closed, and the first page of that commit's pull requests lists one merged pull request.
+      const byCommit = closedPlan("v3 closed by a commit", { status: "in-flight" });
+      const oid = "c0ffee0000000000000000000000000000000003";
+      updateState((state) => {
+        state.commits = [{ oid, associatedPullRequests: [{ number: byCommit.pr }] }];
+      });
+      updateIssue(byCommit.number, (entry) => {
+        entry.body = body("in-flight", 3);
+        entry.timelineItems = [
+          { __typename: "ClosedEvent", closer: { __typename: "Commit", oid } },
+        ];
+      });
+      expect(advice(byCommit.number)).toStrictEqual([
+        `advice: plan is closed as completed while step fix_parser is in-flight; closed by commit ${oid}; run step ${byCommit.number} fix_parser done if the merged work finished it; otherwise run reopen ${byCommit.number} --pr ${byCommit.pr}`,
+      ]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
     "retire repairs labels before it closes the issue, and list filters open and closed plans",
     () => {
       const { run, updateState, issue, updateIssue, createPlan } = planCliContext();
@@ -435,6 +472,22 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
         `finished\t#${finished.number}\tfinished plan`,
         `retired\t#${retired}\tretired plan`,
       ]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "list refuses when an open plan that it keeps is missing from the body pages",
+    () => {
+      const { run, updateState, createPlan } = planCliContext();
+      // The plan closes right after the first list request, so the request for open bodies does not return it.
+      const plan = createPlan("closed while list reads");
+      updateState((state) => {
+        state.afterListOnce = { issue: plan, state: "CLOSED", stateReason: "NOT_PLANNED" };
+      });
+      const listed = run("list");
+      refuse(listed, "the plan list changed while list read it; run list again");
+      expect(listed.stdout).toBe("");
     },
     SPAWN_TIMEOUT_MS,
   );

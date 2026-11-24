@@ -547,6 +547,12 @@ GitHub left plan #<n> closed with reason REOPENED and refuses every state change
 plan #<n> closed again after the reopen; no comment was posted; run reopen again
 plan #<n> closed again after the reopen; no comment was posted; run archive again
 plan #<n> reopened, but it reads phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> reopened, but its claim did not land; no comment was posted; <recovery>
+the reopen request of plan #<n> failed (<error>); it reads closed with phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> reopened, but its request failed (<error>); it reads open with phase labels <labels> and owners <logins>; no comment was posted; <recovery>
+plan #<n> is open again, but its reopen comment did not post (<error>); <recovery>
+plan #<n> closed again after the reopen, but its reopen comment did not post (<error>); <recovery>
+pull request #<pr> did not land by its own merge: its merge commit is missing, is its head commit, or belongs to another pull request
 ```
 
 GitHub call failures exit 1 and print one of these messages on stderr. `edit`,
@@ -921,7 +927,7 @@ A retry of `archive <n>` or `archive <n> --pr` on a plan that is closed as
 completed does the same safe reopen for the open work that `show` advises on:
 a child that is not terminal on every plan, and on a parent archive record also
 a named child that is not linked or no finished named child. The `--pr` retry checks this
-right after the not-merged refusal, before its other refusals. Run the retry
+right after the not-merged and own-merge refusals, before its other refusals. Run the retry
 when `show` advises it (Normalization, advice, and refusals). Each safe reopen,
 by `reopen` or by `archive`, reads the plan right before its write and refuses
 a change since the settle read: the close, the body, the labels, or the owners.
