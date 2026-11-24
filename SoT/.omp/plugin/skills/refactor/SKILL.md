@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: pipeline
   updated: "2026-11-24"
-  content_hash: "0d83ac2c5819186399c4ee72d18088a15ae4b9d41c050408f6af7554257c61b4"
+  content_hash: "5ffdbafae8adc45d10d982d55ffb2ab8830a15f0ae40214e4ffe6381d06970a8"
 ---
 
 # Refactor (sequential pipeline)
@@ -78,7 +78,7 @@ GitHub issue <owner>/<repo>#<n> labeled plan, created with plan:drafting;
 plan-manager owns every later phase transition.
 ```
 
-Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. Downstream phases and a resumed run read the issue with `docks-kit plan show <issue> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
+Hand phase output to `plan-manager` as you go — do not hold all of it in context and dump it at the end. Downstream phases and a resumed run first confirm the plan target as the plan contract's Plan target says, then read the issue with `docks-kit plan show <n> --body` and locate prior output by grepping the `### Phase` subheadings. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
 
 ## Review handoff (replaces Plan Mode)
 

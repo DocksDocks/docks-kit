@@ -402,7 +402,7 @@ URL and the check result into the file, and update the body with
 
 ## Recover after compaction
 
-The issue is the run record. Name it by its issue URL (`<owner>/<repo>#<n>`),
+The issue is the run record. Name it by its issue reference (`<owner>/<repo>#<n>`),
 not by its number alone. Run `show <n>` for the status and verdicts, and
 confirm the plan target as the contract's Plan target says before any write.
 Find the branch as the contract's Linked branch defines the plan's branch: the

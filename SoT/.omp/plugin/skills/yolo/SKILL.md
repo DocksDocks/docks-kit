@@ -6,7 +6,7 @@ disable-model-invocation: true
 metadata:
   pattern: pipeline
   updated: "2026-11-24"
-  content_hash: "015329e95ae2b2225ea247b02b50b1903d2a2ca3d113e8016a6a206d54500463"
+  content_hash: "cfb2027f590801bf14392a1d5d798cab82bb14cbd7307c95bb3ef74b044ccc8d"
 ---
 
 # Yolo
@@ -237,11 +237,11 @@ without a merge. The contract's Round ceiling also says this.
    fails, follow the contract's Repository hooks. Never skip the hook.
 4. Write the run summary from `../plan-manager/references/run-summary.md`, as
    the practices Run summary says.
-5. When `gh pr list --repo <owner/repo> --head <branch> --state open` shows a
-   pull request, update its body with `gh pr edit <pr> --repo <owner/repo>
-   --body-file <file>`. Otherwise open the pull request with `gh pr create
+5. When the contract's Linked branch finds the plan's pull request, update its
+   body with `gh pr edit <url> --body-file <file>`, using the URL that the
+   lookup verified. Otherwise open the pull request with `gh pr create
    --repo <owner/repo> --base <default> --head <branch> --title <title>
-   --body-file <file>`.
+   --body-file <file>`, and carry the URL that it prints.
 6. Wait for checks as the contract says. If a check fails, fix it, rerun
    acceptance, review again, and push. Right after the push, build the
    Checklist again from the evidence for the new head, and update the body

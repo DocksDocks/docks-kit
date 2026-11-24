@@ -48,8 +48,9 @@ Check all before dispatching:
   Read `skills/plan-manager/references/plan-contract.md` inside the installed docks-kit kit plugin.
 - `plan-manager` owns the plan issue and its declared scope, which is the union
   of the Steps `Files` cells.
-- Immediately before dispatch, `plan-manager` re-reads the issue with
-  `docks-kit plan show <issue> --body` and confirms its Steps `Files` union still
+- Immediately before dispatch, `plan-manager` confirms the plan target as the
+  plan contract's Plan target says, re-reads the issue with
+  `docks-kit plan show <n> --body`, and confirms its Steps `Files` union still
   matches the assigned work. A change requires re-planning.
 - Immediately before dispatch, record `<base>` = `git rev-parse HEAD`.
 
@@ -62,7 +63,7 @@ executor (for example, a cheaper one), they set that key before the dispatch.
 The subagent gets no conversation history and no `AGENTS.md`, so the item must
 contain:
 
-1. The canonical plan issue URL (`<owner>/<repo>#<n>`), the union of its Steps
+1. The canonical plan issue reference (`<owner>/<repo>#<n>`), the union of its Steps
    `Files` cells, and the Steps `Id` values the executor must complete. The
    executor first runs `docks-kit plan show <n>` and checks that the issue URL
    at the end of its first output line names `<owner>/<repo>`, and stops
@@ -75,7 +76,7 @@ contain:
    the Steps `Files` cells; do not edit the plan issue; if a STOP condition
    fires, stop and report; do not improvise around obstacles; do not commit,
    push, or merge; audit every claim against an actual tool result.*
-3. A fixed report format: plan issue URL plus Steps `Id` values attempted ·
+3. A fixed report format: plan issue reference plus Steps `Id` values attempted ·
    `STATUS: COMPLETE | STOPPED` · per-step done/skipped and verification result ·
    `STOPPED BECAUSE` (if stopped) · `FILES CHANGED` · `NOTES` (deviations,
    judgment calls). omp captures the changes of the run as a patch, or as the
@@ -92,7 +93,7 @@ result instead of the recorded HEAD.
 Review like a tech lead reviewing a PR against the plan. Fixable gaps go to a
 fresh executor run (see REVISE); the reviewed result returns to `plan-manager`.
 
-1. **Plan-identity check:** the report must name the same plan issue URL and
+1. **Plan-identity check:** the report must name the same plan issue reference and
    Steps `Id` values that were dispatched, and the patch must stay within the
    union of that plan's Steps `Files` cells.
 2. **Re-run every done criterion** in a review checkout - do not trust the

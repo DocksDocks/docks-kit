@@ -251,12 +251,14 @@ with every assigned actor, users and bots, of the issue:
 
 ```bash
 gh api graphql -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){assignedActors(first:100){nodes{... on Actor{login}}}}}}' \
-  -F owner=<owner> -F name=<repo> -F n=<n> --jq '[.data.repository.issue.assignedActors.nodes[].login]'
+  -f owner=<owner> -f name=<repo> -F n=<n> --jq '[.data.repository.issue.assignedActors.nodes[].login]'
 ```
 
-Post only when that list holds exactly the acting login. Otherwise, or when the
-read fails, post nothing and stop, as the refusal `plan #<n> is owned by <login>`
-does.
+`-f` passes the owner and the repository as strings, also a name such as `123`
+or `true`; `-F` passes the issue number as a number.
+Post only when that list holds exactly the acting login. Otherwise, or when
+the read fails, post nothing, run Work preservation when implementation
+changed files, and stop as the refusal `plan #<n> is owned by <login>` does.
 
 Reviewers never fetch the issue. Save the review blocks of each round comment,
 without the manager response, as `<phase>-<n>-round-<k>.md` in the review
@@ -626,13 +628,14 @@ failure:
 
 The helper reads the repository of the current checkout, so an issue number
 alone can name another issue in another checkout. Name the plan by its issue
-URL (`<owner>/<repo>#<n>`) in every handoff and run summary. Before the first
-write of a run that resumes a plan, also from another checkout, run
+reference (`<owner>/<repo>#<n>`) in every handoff and run summary. Before the
+first write of a run that resumes a plan, also a run in another checkout, run
 `show <n>` without `--body`, whose first output line ends with the issue URL
-(`--body` writes that line to stderr). Continue only when that URL names the
-repository of the plan: the one that the publication preflight resolved, or the
-one that the handoff names. Use that repository in every `--repo`. Otherwise
-write nothing and stop, and report both repositories.
+`https://github.com/<owner>/<repo>/issues/<n>` (`--body` writes that line to
+stderr). Continue only when that URL names the repository of the plan: the
+one that the publication preflight resolved, or the one that the handoff
+names. Use that repository in every `--repo`. Otherwise write nothing and
+stop, and report both repositories.
 
 ### Linked branch
 
@@ -657,12 +660,14 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
 The plan's branch is a branch of `<owner/repo>` that one of two sources names:
 the branch that `gh issue develop <n> --list --repo <owner/repo>` lists, whose
 URL must start with `https://github.com/<owner/repo>/tree/`; or, after the pull
-request opens and GitHub drops that link, the head of the open pull request
-that `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`
-names, read with
-`gh pr view <pr> --repo <owner/repo> --json state,headRepositoryOwner,headRepository,headRefName`,
-whose head repository must be `<owner/repo>`. A branch of another repository
-is not the plan's branch.
+request opens and GitHub drops that link, the head of the plan's pull request.
+The plan's pull request is the open pull request whose URL, from
+`gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences --jq '.closedByPullRequestsReferences[].url'`,
+starts with `https://github.com/<owner/repo>/pull/`. Read its head with
+`gh pr view <url> --json state,headRepositoryOwner,headRepository,headRefName`,
+whose head repository must be `<owner/repo>`. Carry that pull request URL,
+not a bare number, through recovery and landing. A branch or a pull request
+of another repository is not the plan's.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
@@ -672,26 +677,35 @@ When a lookup fails, stop. The check passes when all of these hold:
 - The branch differs from the default branch.
 - Each URL that `git remote get-url --push --all origin` prints names
   `<owner/repo>`, because a push goes to every push URL of the remote.
+- `git config --get remotes.origin` prints nothing, because a remote group
+  named `origin` takes precedence over the remote in a push.
 
 Run it for every branch that a run selects: here, in Linked branch timing,
 when a run adopts a plan and reuses its branch, and right before each push,
-for the current branch. When it fails, push nothing, keep the commits local,
-and block the plan with that reason.
+for the current branch. When it fails, push nothing and keep the commits
+local. Then block the plan with that reason, unless the calling rule keeps the
+status (a stall question or an ended grant); then report the failure and list
+the branch under Kept resources as `not pushed`.
 
-Push only with `git push -u origin HEAD --no-follow-tags` from the checked
-branch. The explicit `HEAD` refspec sends the current branch to the branch of
-the same name on `origin`, so `remote.origin.push` and `push.default` cannot
-choose another destination, and `--no-follow-tags` keeps `push.followTags`
-from sending a tag, which can start a release workflow.
+Push only with
+`git push -u origin HEAD --no-follow-tags --recurse-submodules=check` from the
+checked branch. The explicit `HEAD` refspec sends the current branch to the
+branch of the same name on `origin`, so `remote.origin.push` and `push.default`
+cannot choose another destination. `--no-follow-tags` keeps `push.followTags`
+from sending a tag, which can start a release workflow, and
+`--recurse-submodules=check` keeps `push.recurseSubmodules` from pushing a
+submodule to another repository or skipping the branch.
 
 ### Work preservation
 
 Run this before each block, stall exit, or ended grant after implementation
-changed files. Commit the plan's own changes, the paths of the Steps Files
-cells, on the linked branch, never ambient work. Run the Branch check of
-Linked branch, then push them as Linked branch says. When the pull request is
-open, update its body as Checklist says. A hook that refuses the commit or the
-push follows Repository hooks. Then record the block.
+changed files. First run the Branch check of Linked branch on the current
+branch; when it fails, commit nothing and follow that check. Commit the plan's
+own changes, the paths of the Steps Files cells, never ambient work, and push
+them as Linked branch says. When the pull request is open, update its body as
+Checklist says. A hook that refuses the commit or the push follows Repository
+hooks. Then continue with the rule that called this one: it blocks, asks, or
+keeps the status.
 
 ### Repository hooks
 
@@ -715,10 +729,11 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
 4. When the check passes on `origin/<default>`, this plan causes the failure.
    Fix it as item 1 says.
 
-A block or a stall needs a commit and a push of current work (Round ceiling,
-and `plan-manager` phase 6). When a hook refuses that commit or push, keep the
-work where it is. List the branch under Kept resources as `not pushed`. Then
-continue with the block or the stall question.
+Work preservation (above) needs a commit and a push of the plan's own changes
+before a block, a stall exit, or an ended grant. When a hook refuses that
+commit or push, keep the work where it is. List the branch under Kept
+resources as `not pushed`. Then continue with the rule that called Work
+preservation.
 
 A step after the landing merge, such as a release, can also meet a failing
 hook. Then leave that step `planned`, and keep the plan status. Record the
@@ -890,9 +905,9 @@ lists those rows. When a named row ran without the `verify` skill, keep a
 template item that names that skill unticked. Give it the reason
 `<ids> ran without the verify skill`, where `<ids>` lists those rows.
 A template item without proof gets the reason `not checked by the plan`.
-After each push to the linked branch while the pull request is open, also a
-push of current work before a block or a stall, build every tick again from
-the evidence for the new head. Evidence for an older head ticks nothing: the
+After each push to the linked branch while the pull request is open, also the
+push of Work preservation, build every tick again from the evidence for the
+new head. Evidence for an older head ticks nothing: the
 item stays unticked, with the reason `not checked on <short-sha>`, until it
 passes on the new head. Update the body right after the push, before any wait
 for checks, with `gh pr edit <pr> --repo <owner/repo> --body-file <file>`.

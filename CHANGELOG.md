@@ -4,14 +4,14 @@
 
 ### Fixed
 
-- The plan contract gains Plan target: a run names the plan by its issue URL,
-  and a resumed run checks the URL that `show <n>` prints before its first
-  write.
-- The linked branch must differ from the default branch, also right before
-  each push.
-- Work preservation: every block, stall exit, and ended grant after
-  implementation changed files first commits and pushes the plan's own
-  changes to the linked branch, also a block at the Effect gate.
+- The plan contract gains Plan target. A run names the plan by its issue
+  reference (`<owner>/<repo>#<n>`). A resumed run checks the issue URL that
+  `show <n>` prints before its first write.
+- The linked branch must differ from the default branch. The run checks this
+  again right before each push.
+- The plan contract gains Work preservation. Before a block, a stall exit, or
+  an ended grant, the run commits the plan's own changes and pushes them to
+  the linked branch. This also covers a block at the Effect gate.
 - A run posts a review round, a `Self-review`, or a merge record only while the
   acting login is the sole assignee of the issue.
 - The plan-reviewer finding bar admits the recorded-decision effects that its

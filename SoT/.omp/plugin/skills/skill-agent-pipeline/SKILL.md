@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: pipeline
   updated: "2026-11-24"
-  content_hash: "d90d2467a5dd55f7df171cd8f837fadd4de0d16f4899d713f6df89655f352a11"
+  content_hash: "d0ecc979fe2b3ec0fcb9c261fbdfffabc0e7364d4da9d590528a52520d858c11"
 ---
 
 # Skills & Agents Pipeline
@@ -78,7 +78,7 @@ The plan issue holds the whole run — inter-phase memory and the implementation
 GitHub issue <owner>/<repo>#<n> labeled plan, plan:drafting (created and managed by plan-manager)
 ```
 
-Hand phase output to `plan-manager` as you go — never hold all of it in context and dump it at the end. Downstream phases read the issue with `docks-kit plan show <issue> --body` and locate prior output by grepping for the `### Phase` subheadings above. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
+Hand phase output to `plan-manager` as you go — never hold all of it in context and dump it at the end. Downstream phases first confirm the plan target as the plan contract's Plan target says, then read the issue with `docks-kit plan show <n> --body` and locate prior output by grepping for the `### Phase` subheadings above. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.
 
 ## Skill description quality (Phase 2a / 3)
 
