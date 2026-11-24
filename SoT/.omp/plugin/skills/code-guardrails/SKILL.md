@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "eb7dd257fa4421db08c87191bc0f6dfb75b9047919a297f5d1029b1fd499053d"
+  content_hash: "6158cc07798d18b2239ce8bc3560f30d6af4cb7b93e480ac9cb13936d517295b"
 ---
 
 # Code Guardrails
@@ -236,28 +236,21 @@ matches() {
 
 # git grep exits with 1 when nothing matches; a higher status is a failed scan.
 # git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
-# The matches go to a temporary file, and the grouping runs only after these checks pass.
-# The scan runs in a subshell, so its traps stay inside it. The folder path is set before
-# the traps and before the folder exists, so one EXIT trap removes the folder on every
-# path, also after TERM or INT. A failed removal fails the scan.
-scan() (
-  dir="${TMPDIR:-/tmp}/scan.$BASHPID.$RANDOM"
-  found=$dir/matches errors=$dir/errors status=0
-  trap 'if [ -n "$dir" ] && [ -d "$dir" ]; then rm -f -- "$found" "$errors" && rmdir -- "$dir" ||
-    { echo "scan failed: cannot remove the temporary files" >&2; exit 2; }; fi' EXIT
-  trap 'exit 143' TERM
-  trap 'exit 130' INT
-  # mkdir fails when the path exists; then the folder is not ours, so the trap leaves it.
-  if ! mkdir -m 700 -- "$dir"; then
-    dir=''; echo "scan failed: cannot create a private temporary folder" >&2; exit 2
+# The scan holds the matches in memory and groups them only after these checks pass.
+scan() {
+  local found='' errors='' status='' vars
+  # Read the matches, the error output, and the status of matches into shell variables.
+  vars=$( { errors=$( { status=0; found=$(matches "$@") || status=$?
+    declare -p found status >&4; } 2>&1 ); declare -p errors; } 4>&1 )
+  eval "$vars"
+  case $status in '' | *[!0-9]*) echo "scan failed: cannot read the matches" >&2; return 2 ;; esac
+  if [ "$status" -le 1 ] && [ -n "$errors" ]; then status=2; fi
+  if [ "$status" -gt 1 ]; then
+    echo "scan failed with status $status" >&2; printf '%s\n' "$errors" >&2; return "$status"
   fi
-  # `>|` writes the files even with noclobber set. A file that cannot be written fails the scan.
-  if ! true >| "$found" 2>| "$errors"; then echo "scan failed: cannot write $found or $errors" >&2; exit 2; fi
-  matches "$@" >| "$found" 2>| "$errors" || status=$?
-  if [ "$status" -le 1 ] && [ -s "$errors" ]; then status=2; fi
-  if [ "$status" -gt 1 ]; then echo "scan failed with status $status" >&2; cat "$errors" >&2; exit "$status"; fi
-  group < "$found" || { echo "scan failed: grouping failed" >&2; exit 1; }
-)
+  if [ -z "$found" ]; then return 0; fi
+  printf '%s\n' "$found" | group || { echo "scan failed: grouping failed" >&2; return 1; }
+}
 
 # Numbers: hexadecimal, binary, and octal literals, and decimal numbers with
 # 2 or more digits, with an optional Rust type suffix such as u64.
@@ -276,12 +269,10 @@ an apostrophe in a comment.
 
 When git grep exits with 1, no file matched, and the scan succeeds. A higher git grep
 status, any error output from git grep or `tr` (such as a file that git cannot read),
-a failure of `tr`, `awk`, or `sort`, or a failure to write the temporary files that
-hold the matches and the error output means that the scan failed: the block prints an
-error, stops, and returns a nonzero status. The scan keeps its temporary files in a
-private folder whose path it knows before it creates the folder. It removes that folder
-on every exit, also after TERM or INT, and a failed removal also fails the scan. Do not
-read the empty output of a failed scan as "no repeated values".
+or a failure of `tr`, `awk`, or `sort` means that the scan failed: the block prints an
+error, stops, and returns a nonzero status. Do not read the empty output of a failed
+scan as "no repeated values". The scan holds the matches in memory and uses no
+temporary file, so a very large match stream uses more memory.
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
