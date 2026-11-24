@@ -199,10 +199,10 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
 }
 
 /**
- * An ATX heading: up to three spaces, one to six `#`, then a space, a tab, or the
- * end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
+ * An ATX heading without its indentation: one to six `#`, then a space, a tab,
+ * or the end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
  */
-const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t]|$)(.*)$/;
+const ATX_HEADING = /^#{1,6}(?=[ \t]|$)(.*)$/;
 /** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
 const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
 /**
@@ -211,13 +211,15 @@ const CLOSING_HASHES = /(?:^|[ \t])#+[ \t]*$/;
  */
 const FENCE_LINE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 
-/** The offset of each line that is an ATX heading with the text `title`, at any level. Lines end at `\n` or `\r\n`. */
+/**
+ * The offset of each line that is an ATX heading with the text `title`, at any
+ * level and any indentation. Lines end at `\n` or `\r\n`.
+ */
 function headingOffsets(content: string, title: string): Array<number> {
   const offsets: Array<number> = [];
   let offset = 0;
   for (const raw of content.split("\n")) {
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    if (ATX_HEADING.exec(line)?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
+    if (ATX_HEADING.exec(raw.trim())?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
       offsets.push(offset);
     }
     offset += raw.length + 1;
@@ -232,23 +234,27 @@ const COMMENT_START = /^[ \t]*<!--/;
  * The problem that the lines of `text` leave open at its end, in one ordered
  * scan, or null. A fence line opens a code fence; while it is open, only a fence
  * line of the same character, at least as long, with nothing but spaces or tabs
- * after it, closes it, and nothing else counts. A fence opened with k leading
- * spaces, as in a list item, must close before any non-blank line with fewer
- * than k leading spaces. Outside a fence, a line that starts with `<!--` opens
- * an HTML comment, and the first `-->` after it closes it; a `<!--` inside a
- * line does not count.
+ * after it, closes it, and nothing else counts. Outside a fence, a line that
+ * starts with `<!--` opens an HTML comment, and the first `-->` after it closes
+ * it; a `<!--` inside a line does not count, and nothing inside the comment
+ * opens a fence. A fence or comment opened with k leading spaces, as in a list
+ * item, must close before any non-blank line with fewer than k leading spaces.
  */
 function blockProblem(text: string): string | null {
   let fence: { readonly marker: string; readonly indent: number } | null = null;
-  let inComment = false;
+  let commentIndent: number | null = null;
   for (const raw of text.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const marker = FENCE_LINE.exec(line)?.[1];
     const indent = line.length - line.replace(/^ +/, "").length;
-    if (inComment) {
-      inComment = !line.includes("-->");
+    const blank = line.trim() === "";
+    if (commentIndent !== null) {
+      if (!blank && indent < commentIndent) {
+        return "an indented HTML comment before the Report section ends without --> at its indentation";
+      }
+      if (line.includes("-->")) commentIndent = null;
     } else if (fence !== null) {
-      if (line.trim() !== "" && indent < fence.indent) {
+      if (!blank && indent < fence.indent) {
         return "an indented code fence before the Report section ends without a closer at its indentation";
       }
       if (
@@ -261,25 +267,27 @@ function blockProblem(text: string): string | null {
     } else if (marker !== undefined) {
       fence = { marker, indent };
     } else if (COMMENT_START.test(line)) {
-      inComment = !line.slice(line.indexOf("<!--") + "<!--".length).includes("-->");
+      const closed = line.slice(line.indexOf("<!--") + "<!--".length).includes("-->");
+      if (!closed) commentIndent = indent;
     }
   }
   if (fence !== null) return "an unclosed code fence comes before the Report section";
-  return inComment ? "an unclosed HTML comment comes before the Report section" : null;
+  return commentIndent !== null ? "an unclosed HTML comment comes before the Report section" : null;
 }
 
 /**
  * Each skill ends with the canonical report section, byte for byte; the
  * `reportSection` text of config.json is the one source of that section. The
  * files are read as latin1 (one character per byte), so line endings and the
- * final newline count. Every line that is the Report heading in ATX form
- * counts, also inside fenced code or an HTML comment, and the file must have
- * exactly one. Before it, the lines must leave no code fence or HTML comment
- * open (see `blockProblem`). The check does no Markdown block parsing beyond
- * that scan, and it does not model container blocks such as list items: a fence
- * or comment that a container ends early stays open in the scan, so the check
- * fails closed. A skill that quotes the heading quotes it in another form, such
- * as inline code.
+ * final newline count. Every line that is the Report heading in ATX form, at
+ * any indentation, counts, also inside fenced code, an HTML comment, or an
+ * indented code block, and the file must have exactly one; so an indented code
+ * block that quotes the heading fails closed. Before it, the lines must leave
+ * no code fence or HTML comment open (see `blockProblem`). The check does no
+ * Markdown block parsing beyond that scan, and it does not model container
+ * blocks such as list items: a fence or comment that a container ends early
+ * stays open in the scan, so the check fails closed. A skill that quotes the
+ * heading quotes it in another form, such as inline code.
  */
 export function checkReportSection(
   repoRoot: string,

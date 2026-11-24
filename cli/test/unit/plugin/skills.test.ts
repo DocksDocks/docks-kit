@@ -330,6 +330,37 @@ describe("kit plugin skills: report section and shared copies", () => {
     );
   });
 
+  it("fails a list item comment that the list end leaves open, before a fence and the only report section", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "- item\n\n  <!-- draft\n\nText.\n\n```html\n<!-- example -->\n\n## Report a problem with this skill",
+      ),
+    );
+    expectFailure(
+      checkReportSection(root),
+      skillFile("zoom-out"),
+      "an indented HTML comment before the Report section ends without --> at its indentation",
+    );
+  });
+
+  it("fails a stale report section indented under a numbered list item before the canonical one", () => {
+    const root = copyFixture();
+    edit(
+      root,
+      skillFile("zoom-out"),
+      (text) =>
+        `${text
+          .replace("Leave out secrets", "Leave out passwords")
+          .replace(
+            "## Report a problem with this skill",
+            "10. Draft instructions\n\n    ## Report a problem with this skill",
+          )}${config.reportSection}`,
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+  });
+
   it("passes a `<!--` in inline code before the only report section", () => {
     const root = copyFixture();
     edit(root, skillFile("zoom-out"), (text) =>
