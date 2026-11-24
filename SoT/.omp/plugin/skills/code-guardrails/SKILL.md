@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "1ba5c28d8a9d277dbeb35742ca31904b6e7eba281d5f9ec47f7ec8d5cf54b021"
+  content_hash: "eb7dd257fa4421db08c87191bc0f6dfb75b9047919a297f5d1029b1fd499053d"
 ---
 
 # Code Guardrails
@@ -237,16 +237,20 @@ matches() {
 # git grep exits with 1 when nothing matches; a higher status is a failed scan.
 # git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
 # The matches go to a temporary file, and the grouping runs only after these checks pass.
-# The scan runs in a subshell, so its traps stay inside it. One EXIT trap removes the
-# temporary files on every path, also after TERM or INT, and a failed removal fails the scan.
+# The scan runs in a subshell, so its traps stay inside it. The folder path is set before
+# the traps and before the folder exists, so one EXIT trap removes the folder on every
+# path, also after TERM or INT. A failed removal fails the scan.
 scan() (
-  found='' errors='' status=0
-  trap 'rm -f -- ${found:+"$found"} ${errors:+"$errors"} ||
-    { echo "scan failed: cannot remove the temporary files" >&2; exit 2; }' EXIT
+  dir="${TMPDIR:-/tmp}/scan.$BASHPID.$RANDOM"
+  found=$dir/matches errors=$dir/errors status=0
+  trap 'if [ -n "$dir" ] && [ -d "$dir" ]; then rm -f -- "$found" "$errors" && rmdir -- "$dir" ||
+    { echo "scan failed: cannot remove the temporary files" >&2; exit 2; }; fi' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
-  found=$(mktemp) || exit 2
-  errors=$(mktemp) || exit 2
+  # mkdir fails when the path exists; then the folder is not ours, so the trap leaves it.
+  if ! mkdir -m 700 -- "$dir"; then
+    dir=''; echo "scan failed: cannot create a private temporary folder" >&2; exit 2
+  fi
   # `>|` writes the files even with noclobber set. A file that cannot be written fails the scan.
   if ! true >| "$found" 2>| "$errors"; then echo "scan failed: cannot write $found or $errors" >&2; exit 2; fi
   matches "$@" >| "$found" 2>| "$errors" || status=$?
@@ -274,8 +278,9 @@ When git grep exits with 1, no file matched, and the scan succeeds. A higher git
 status, any error output from git grep or `tr` (such as a file that git cannot read),
 a failure of `tr`, `awk`, or `sort`, or a failure to write the temporary files that
 hold the matches and the error output means that the scan failed: the block prints an
-error, stops, and returns a nonzero status. The scan removes its temporary files on
-every exit, also after TERM or INT, and a failed removal also fails the scan. Do not
+error, stops, and returns a nonzero status. The scan keeps its temporary files in a
+private folder whose path it knows before it creates the folder. It removes that folder
+on every exit, also after TERM or INT, and a failed removal also fails the scan. Do not
 read the empty output of a failed scan as "no repeated values".
 
 The output is a list of candidates, not a list of defects. The checks include test
