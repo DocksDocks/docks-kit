@@ -15,7 +15,7 @@
 - Check `Package.swift` for `SwiftLintBuildToolPlugin` or a SwiftLint package command plugin.
 - Check Xcode targets for a SwiftLint build tool plugin or a Run Script phase.
 - Find `.swift-format` if the project uses `swift-format`. Treat formatting as layout work, not lint coverage.
-- If no package or Xcode plugin runs SwiftLint, run `command -v swiftlint` before proposing SwiftLint changes. Ask before installing it when absent.
+- Run `command -v swiftlint` to find a local standalone binary before proposing SwiftLint changes. When it is absent, follow the approval gate in `../SKILL.md` before you install it.
 
 ## Recommended config
 
@@ -107,7 +107,7 @@ func upload(_ body: Data) {
 
 ## Verify
 
-- Run the SwiftLint command that Detect found. Run the command plugin (`swift package plugin swiftlint`) or a build tool plugin (the package or Xcode build) only when SwiftPM has already resolved SwiftLint locally: `.build/checkouts` or `.build/artifacts` holds it. Otherwise, follow the approval gate in `../SKILL.md`, because a fresh resolve fetches packages and the SwiftLint binary. For a standalone binary, run `swiftlint lint --strict` from the directory with `.swiftlint.yml`.
+- Run a local standalone `swiftlint` binary directly: `swiftlint lint --strict` from the directory with `.swiftlint.yml`. The command plugin (`swift package plugin swiftlint`), a build tool plugin, and an Xcode build always go through the approval gate in `../SKILL.md` first, because SwiftPM can resolve and download the whole dependency graph.
 - Check each new rule for violations and report every config change.
 - When the request includes value mapping, report unhandled repeated values from [Find scattered values](../SKILL.md#find-scattered-values).
 - If SwiftLint is absent, follow the approval gate in `../SKILL.md` before you install it; do not claim the lint check passed.

@@ -59,7 +59,7 @@ Remove an existing test-file override for this rule only after you ask the user.
 
 ### Anti-slop handoff
 
-[anti-slop](https://github.com/dmmulroy/anti-slop) is an MIT-licensed Oxlint JavaScript plugin. It is meant to be copied into the project and maintained there. Its rules include `no-array-filter-map`, `no-chained-type-assertions`, `no-known-value-widening`, and `no-module-mocking`. The install command downloads code: follow the approval gate in `../SKILL.md` before you run it. After approval, run `npx skills@1.7.0 add dmmulroy/anti-slop --skill install-anti-slop`. Let that skill copy and configure the rules. Do not copy rules by hand.
+[anti-slop](https://github.com/dmmulroy/anti-slop) is an MIT-licensed Oxlint JavaScript plugin. It is meant to be copied into the project and maintained there. Its rules include `no-array-filter-map`, `no-chained-type-assertions`, `no-known-value-widening`, and `no-module-mocking`. The install command downloads code. Resolve the commit with `git ls-remote https://github.com/dmmulroy/anti-slop HEAD`, name that full 40-character commit and the URL `https://github.com/dmmulroy/anti-slop/tree/<commit>` in the approval question, and follow the approval gate in `../SKILL.md`. After approval, install exactly that commit: `npx skills@1.7.0 add https://github.com/dmmulroy/anti-slop/tree/<commit> --skill install-anti-slop`. Do not use the `dmmulroy/anti-slop` shorthand: it follows `GH_HOST` and clones the default branch. Let that skill copy and configure the rules. Do not copy rules by hand.
 
 Oxlint enforces code rules. Oxfmt or Prettier changes layout only; neither replaces these checks.
 
@@ -118,3 +118,4 @@ Run the local binary directly: `node_modules/.bin/oxlint`, or `node_modules/.bin
 - npm `npx` install of a missing package and the implied `--yes` without a terminal: <https://docs.npmjs.com/cli/v11/commands/npm-exec>
 - Bun `bunx` auto-install of a missing package: <https://bun.com/docs/pm/bunx>
 - npm `pre` and `post` scripts that `npm run` runs: <https://docs.npmjs.com/cli/v11/using-npm/scripts/#pre--post-scripts>
+- skills 1.7.0 source forms (`/tree/<ref>`, `GH_HOST` for shorthand) and commit checkout: <https://github.com/vercel-labs/skills/blob/v1.7.0/src/source-parser.ts>, <https://github.com/vercel-labs/skills/blob/v1.7.0/src/git.ts>

@@ -4,7 +4,7 @@
 
 - Check `pyproject.toml` for `[tool.ruff]` and `[tool.ruff.lint]`.
 - Check `ruff.toml` and `.ruff.toml` for `[lint]`.
-- The settings probe: from the project's working directory, run `ruff check --show-settings <file.py>` with the local `ruff` binary and the lint command's settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). It prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`, and edit and verify each distinct `Settings path`.
+- The settings probe: from the project's working directory, run `ruff check --show-settings <file.py>` with the local `ruff` binary and the lint command's settings flags (`--config`, `--select`, `--ignore`, `--extend-select`, and the like). It prints `Settings path` and the effective rules. Probe one file in each folder of the requested scope that can have its own config, such as `src/` and `tests/`. Collect all probe results first, then apply the cases below to each result, and edit only the files that those cases allow.
 - Read the project's Ruff lint command and take the first case that matches. A `--config` value that names an existing file is a file; otherwise, a value that contains `=` is an inline override.
   1. **`--isolated`, a `--config` file outside the repository, or an inline `--config` override:** report what controls the settings, change no file, and ask the user how to continue.
   2. **A `--config` file inside the repository:** edit that file. Use the standalone schema (`[lint]`) unless the file is `pyproject.toml`.

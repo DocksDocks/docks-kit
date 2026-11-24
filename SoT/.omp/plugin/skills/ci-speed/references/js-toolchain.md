@@ -92,7 +92,7 @@ if bun check --no-script --no-pretty > new.txt 2>&1; then new=0; else new=$?; fi
 if [ "$old" = 127 ] || [ "$new" = 127 ] || grep -qE '^error: (Script not found|Could not find an existing)' old.txt new.txt; then echo 'a checker did not start'; exit 2; fi   # Bun exits 1, not 127, for a missing script or binary
 class() { case $1 in 0) echo clean ;; 1|2) echo errors ;; *) echo failed ;; esac; }   # tsc exits 1 or 2 on diagnostics, depending on emit; bun check exits 1
 if [ "$(class "$old")" = failed ] || [ "$(class "$new")" = failed ]; then echo "a checker failed to run: $old and $new"; exit 2; elif [ "$(class "$old")" != "$(class "$new")" ]; then echo "one checker passed and one found errors: $old and $new"; exit 2; fi
-codes() { sed -nE '/^::/d; s/^([^ :][^:]*\([0-9]+,[0-9]+\): )?error (TS[0-9]+): .*/\2/p' "$1" | sort | uniq -c; }   # the first header of each error record only: skips ::error annotations, indented lines, and codes inside messages
+codes() { sed -nE '/^::/d; s/^(([A-Za-z]:)?[^ :][^:]*\([0-9]+,[0-9]+\): )?error (TS[0-9]+): .*/\3/p' "$1" | sort | uniq -c; }   # the first header of each error record only, also after a Windows drive letter: skips ::error annotations, indented lines, and codes inside messages
 old_codes=$(codes old.txt) && new_codes=$(codes new.txt) || { echo 'a code filter failed'; exit 2; }
 if [ "$old" != 0 ] && { [ -z "$old_codes" ] || [ -z "$new_codes" ]; }; then echo 'a checker found errors but printed no error record'; exit 2; fi
 if [ -n "$planted" ] && { [ "$old" = 0 ] || ! grep -qE " $planted\$" <<< "$old_codes" || ! grep -qE " $planted\$" <<< "$new_codes"; }; then echo "both checkers must fail and list $planted"; exit 2; fi
