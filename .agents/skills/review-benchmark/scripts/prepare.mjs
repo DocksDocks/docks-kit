@@ -2125,17 +2125,49 @@ export function layoutAt(repo, sha) {
   return runGit(repo, ['cat-file', '-e', `${sha}:${agent}`]).status === 0 ? PLUGIN_LAYOUTS.kit : PLUGIN_LAYOUTS.legacy;
 }
 
+// The role (`baseline`, `variant`, or `selfreview`) and the commit of the plugin copy in `dir`, from its marker file
+// `<role> <commit>`, or null without a marker. The marker of an earlier version of this script holds only the commit;
+// the folder name then gives the role: `variant-*-plugin` and `selfreview-*-plugin` are the copies of these roles.
+function pluginCopyOwner(dir) {
+  const marker = path.join(dir, PLUGIN_COPY_MARKER);
+  if (!fs.existsSync(marker)) return null;
+  const [first, second] = fs.readFileSync(marker, 'utf8').trim().split(' ');
+  if (second !== undefined) return { role: first, sha: second };
+  const name = path.basename(dir);
+  const role = /^variant-.+-plugin$/.test(name)
+    ? 'variant'
+    : /^selfreview-.+-plugin$/.test(name)
+      ? 'selfreview'
+      : 'baseline';
+  return { role, sha: first };
+}
+
+// Stops before `agents` changes a file when the plugin copy `copy` ({ role, sha, dir }) cannot go to its folder: a
+// folder with files but no marker, the copy of another role, or a variant copy of another commit. The agents of an
+// earlier setup read such a copy, so it stays. A copy of the same role at another commit is replaced (see
+// extractPlugin), except a variant copy, which belongs to its commit (see variantCommit).
+function checkPluginCopy({ role, sha, dir }) {
+  const owner = pluginCopyOwner(dir);
+  if (owner === null) {
+    if (fs.existsSync(dir) && fs.readdirSync(dir).length) {
+      fail(`${dir} exists and is not a plugin copy from this script; remove it, or pass another --out or --baseline-dir`);
+    }
+    return;
+  }
+  if (owner.role !== role || (role === 'variant' && owner.sha !== sha)) {
+    fail(
+      `${dir} holds the ${owner.role} plugin copy at ${owner.sha.slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`,
+    );
+  }
+}
+
 // Extracts the plugin folder `pluginPath` at `sha` into `dir`: the reviewer root of the layout of the commit for the
 // baseline copy or the copy of a variant, or its self-review root for the copy of a self-review root (see layoutAt).
-// A marker file records the commit, so a later call reuses the copy or replaces a copy of another commit.
-function extractPlugin(repo, sha, dir, pluginPath) {
-  const marker = path.join(dir, PLUGIN_COPY_MARKER);
-  if (fs.existsSync(marker)) {
-    if (fs.readFileSync(marker, 'utf8').trim() === sha) return;
-    fs.rmSync(dir, { recursive: true, force: true });
-  } else if (fs.existsSync(dir) && fs.readdirSync(dir).length) {
-    fail(`${dir} exists and is not a plugin copy from this script; remove it, or pass another --out or --baseline-dir`);
-  }
+// The marker file records the role and the commit, so a later call reuses the copy or replaces a copy of the same role
+// at another commit. checkPluginCopy runs first.
+function extractPlugin(repo, { role, sha, dir, pluginPath }) {
+  if (pluginCopyOwner(dir)?.sha === sha) return;
+  fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   const indexFile = path.join(dir, '.git-index');
   const env = { GIT_INDEX_FILE: indexFile };
@@ -2145,7 +2177,7 @@ function extractPlugin(repo, sha, dir, pluginPath) {
   } finally {
     fs.rmSync(indexFile, { force: true });
   }
-  fs.writeFileSync(marker, `${sha}\n`);
+  fs.writeFileSync(path.join(dir, PLUGIN_COPY_MARKER), `${role} ${sha}\n`);
 }
 
 // omp reads project agents and project settings from the working folder of the session that dispatches the
@@ -2682,19 +2714,6 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
     ? candidateContractOverlay(repo, sha, options['baseline-ref'])
     : undefined;
   const baselineLayout = layoutAt(repo, sha);
-  extractPlugin(repo, sha, baselineDir, baselineLayout.reviewerRoot);
-  for (const variant of variants) {
-    extractPlugin(repo, variant.sha, variant.dir, layoutAt(repo, variant.sha).reviewerRoot);
-    const modes = variant.delta ? 'full and delta mode' : 'full mode only';
-    const overlay = variant.contractDiff ? ', contract overlay' : '';
-    const commit = variant.sha.slice(0, 12);
-    console.log(`variant ${variant.name}: ${variant.ref} at ${commit}, ${modes}${overlay}, in ${variant.dir}`);
-  }
-  for (const root of roots) {
-    if (root.sha) extractPlugin(repo, root.sha, root.dir, layoutAt(repo, root.sha).selfReviewRoot);
-    const origin = root.sha ? `${root.source} at ${root.sha.slice(0, 12)}` : 'the working tree';
-    console.log(`self-review root ${root.name}: ${origin}, in ${root.dir}`);
-  }
   const sources = [];
   for (const role of ['code', 'plan']) {
     const source = `${baselineLayout.reviewerRoot}/agents/${role}-reviewer.md`;
@@ -2711,12 +2730,31 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
       },
     );
   }
-  console.log(`baseline ${options['baseline-ref']} at ${sha.slice(0, 12)}: ${baselineLayout.name} layout, in ${baselineDir}`);
   for (const variant of variants) {
     sources.push({ side: variantSide(variant), role: 'plan', text: variant.text, pluginRoot: variant.dir });
   }
+  // The plugin copies: the baseline, each variant, and each self-review root at a ref.
+  const copies = [
+    { role: 'baseline', sha, dir: baselineDir, pluginPath: baselineLayout.reviewerRoot },
+    ...variants.map((variant) => ({
+      role: 'variant',
+      sha: variant.sha,
+      dir: variant.dir,
+      pluginPath: layoutAt(repo, variant.sha).reviewerRoot,
+    })),
+    ...roots
+      .filter((root) => root.sha)
+      .map((root) => ({
+        role: 'selfreview',
+        sha: root.sha,
+        dir: root.dir,
+        pluginPath: layoutAt(repo, root.sha).selfReviewRoot,
+      })),
+  ];
+  for (const copy of copies) checkPluginCopy(copy);
 
-  // Every agent renders before the previous agents go, so an agent that does not render leaves the previous setup.
+  // Every agent renders before a plugin copy or a generated file changes, so an agent that does not render leaves the
+  // previous setup as it was.
   const agentFiles = [];
   const overrides = {};
   const agentDir = path.join(project, AGENT_DIR);
@@ -2749,6 +2787,18 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
     agentFiles.push([agentFile, text]);
     if (setting.tier !== null) overrides[agentFile] = setting.tier;
   }
+  for (const copy of copies) extractPlugin(repo, copy);
+  for (const variant of variants) {
+    const modes = variant.delta ? 'full and delta mode' : 'full mode only';
+    const overlay = variant.contractDiff ? ', contract overlay' : '';
+    const commit = variant.sha.slice(0, 12);
+    console.log(`variant ${variant.name}: ${variant.ref} at ${commit}, ${modes}${overlay}, in ${variant.dir}`);
+  }
+  for (const root of roots) {
+    const origin = root.sha ? `${root.source} at ${root.sha.slice(0, 12)}` : 'the working tree';
+    console.log(`self-review root ${root.name}: ${origin}, in ${root.dir}`);
+  }
+  console.log(`baseline ${options['baseline-ref']} at ${sha.slice(0, 12)}: ${baselineLayout.name} layout, in ${baselineDir}`);
   removeGenerated(project);
   fs.mkdirSync(agentDir, { recursive: true });
   for (const [name, text] of agentFiles) fs.writeFileSync(path.join(agentDir, `${name}.md`), text);

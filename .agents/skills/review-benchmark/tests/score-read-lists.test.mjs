@@ -199,14 +199,16 @@ test('transcripts splits a target on `;`, on white space, and on all three delim
   ];
   assert.deepEqual(listReadScope(fixture, calls), { outside: [whiteSpace, semicolons, skills, commaName, allThree] });
 });
-// Plan #216, R67: omp keeps a search path that names an existing file or folder as a whole before it splits the path
-// on `;`, so a snapshot under a workspace `bench-gpt;7` is one target.
+// Plan #216, R67: omp keeps a search path that names an existing file or folder as a whole, as written or without its
+// line selector, before it splits the path on `;` (splitDelimitedPathEntry in path-utils.ts of omp 19.0.0). So a
+// snapshot path under a workspace `bench-gpt;7` is one target, also with a selector.
 test('a grep, glob, or ast_grep path that names an existing path as a whole is one target, also with a `;`', () => {
   const fixture = listCase(scratch(), 'bench-gpt;7');
   const { snapshot } = fixture;
   put(snapshot, 'src/a.mjs', 'text\n');
   const calls = [
     ['grep', { pattern: 'lock', path: path.join(snapshot, 'src') }],
+    ['grep', { pattern: 'lock', path: `${path.join(snapshot, 'src', 'a.mjs')}:1-20` }],
     ['glob', { path: snapshot }],
     ['ast_grep', { pattern: 'lock()', path: path.join(snapshot, 'src', 'a.mjs') }],
   ];
@@ -227,22 +229,29 @@ test('a search result file outside the inputs is outside, also when the file is 
   assert.deepEqual(listReadScope(fixture, calls, results), { outside: [`grep result: ${gone}`] });
   // A result that shows only files of the inputs adds no target.
   assert.deepEqual(listReadScope(fixture, calls, { 'call-1': { cwd: live, files: [a] } }), { outside: [] });
+  // omp can show an internal URI in a search result, for example a spilled output. It stays a URI, which the URI
+  // rules of the read scope allow, and does not resolve against the `cwd` of the result.
+  const spilled = { 'call-1': { cwd: live, files: [a, 'local://3.log'] } };
+  assert.deepEqual(listReadScope(fixture, calls, spilled), { outside: [] });
 });
-// Plan #216, R68: transcripts decodes each transcript once and gives its records to every reader. Only the lookup of
-// the task reads the head of a candidate again, up to its first user message.
-test('transcripts decodes each record of a transcript after the task one time', () => {
+// Plan #216, R68: decoding is bounded. To pick a transcript, the task lookup decodes each record of a candidate up to
+// its first user message; then transcripts decodes the picked transcript one time in full and gives its records to
+// every reader. So each record up to the task is decoded twice and each later record once; a reader that decoded the
+// transcript again would add one to each count.
+test('transcripts decodes the task prefix once for the lookup and each transcript once in full', () => {
   const { ws, sessions, live, caseDir, snapshot } = listCase(scratch(), 'bench');
   put(snapshot, 'src/a.mjs', 'text\n');
   const a = path.join(snapshot, 'src', 'a.mjs');
   const results = { 'call-1': { displayReadTargets: [a] } };
   const text = toolTranscript(caseDir, 30, [['read', { path: a }]], undefined, { cwd: live, results });
   put(sessions, 'Code7C1LowR1K1Full.jsonl', text);
-  const [assistant, toolResult] = text.split('\n').slice(-2);
+  const lines = text.split('\n');
+  const task = lines.findIndex((line) => JSON.parse(line).message?.role === 'user');
   const parse = vi.spyOn(JSON, 'parse');
   onTestFinished(() => parse.mockRestore());
   assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
   const decodes = (line) => parse.mock.calls.filter(([value]) => value === line).length;
-  assert.deepEqual([decodes(assistant), decodes(toolResult)], [1, 1]);
+  assert.deepEqual(lines.map(decodes), lines.map((_, index) => (index <= task ? 2 : 1)));
 });
 test('readScope records each web search query, and a query that targets the benchmark repository is outside', () => {
   const call = (name, args) => ({ type: 'toolCall', id: name, name, arguments: args });

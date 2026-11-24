@@ -198,17 +198,28 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
   return failures;
 }
 
-/** A code fence: up to three spaces, then three or more backticks or tildes (CommonMark 0.31.2, 4.5). */
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/**
+ * A code fence: up to three spaces, then three or more backticks or tildes. The
+ * info string after a backtick fence has no backtick (CommonMark 0.31.2, 4.5).
+ */
+const FENCE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 /** The start of an HTML comment block (CommonMark 0.31.2, 4.6), which runs to the line with `-->`. */
 const COMMENT_OPEN = /^ {0,3}<!--/;
+/**
+ * An ATX heading: up to three spaces, one to six `#`, then a space, a tab, or the
+ * end of the line; group 1 is the raw text (CommonMark 0.31.2, 4.2).
+ */
+const ATX_HEADING = /^ {0,3}#{1,6}(?=[ \t\r]|$)(.*)$/;
+/** The optional closing `#` sequence of an ATX heading, after a space or a tab. */
+const CLOSING_HASHES = /(?:^|[ \t])#+[ \t\r]*$/;
 
 /**
- * The offset of each line equal to `heading` outside fenced code and HTML comment
- * blocks. A fence or comment that is open at the end runs to the end of the file,
- * as in CommonMark, so a heading inside it does not count.
+ * The offset of each ATX heading line with the text `title`, at any level,
+ * outside fenced code and HTML comment blocks. A fence or comment that is open
+ * at the end runs to the end of the file, as in CommonMark, so a heading inside
+ * it does not count.
  */
-function headingOffsets(content: string, heading: string): Array<number> {
+function headingOffsets(content: string, title: string): Array<number> {
   const offsets: Array<number> = [];
   let fence: string | null = null;
   let inComment = false;
@@ -223,7 +234,9 @@ function headingOffsets(content: string, heading: string): Array<number> {
     } else if (marker !== undefined) fence = marker;
     else if (COMMENT_OPEN.test(line)) {
       inComment = !line.slice(line.indexOf("<!--") + 4).includes("-->");
-    } else if (line === heading) offsets.push(offset);
+    } else if (ATX_HEADING.exec(line)?.[1]?.replace(CLOSING_HASHES, "").trim() === title) {
+      offsets.push(offset);
+    }
     offset += line.length + 1;
   }
   return offsets;
@@ -232,9 +245,9 @@ function headingOffsets(content: string, heading: string): Array<number> {
 /**
  * Each skill ends with the canonical report section, byte for byte. The files
  * are read as latin1 (one character per byte), so line endings and the final
- * newline count. A heading line inside fenced code or an HTML comment does not
- * count, so a skill can quote the heading; outside them, the file has exactly
- * one heading.
+ * newline count. A heading with the Report text inside fenced code or an HTML
+ * comment does not count, so a skill can quote the heading; outside them, the
+ * file has exactly one such heading.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -248,7 +261,7 @@ export function checkReportSection(
   const failures: Array<string> = [];
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const content = readFileSync(file, "latin1");
-    const starts = headingOffsets(content, heading);
+    const starts = headingOffsets(content, heading.slice("## ".length));
     if (starts.length === 0) {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,

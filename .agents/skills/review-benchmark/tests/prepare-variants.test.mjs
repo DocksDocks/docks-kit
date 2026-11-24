@@ -678,19 +678,50 @@ test('agents keeps the variant copy of a commit when another setup prepares the 
   agentsOnBun({ ...options, variants: 'a=HEAD', 'baseline-dir': path.join(root, 'b1-plugin') }, repo);
   assert.equal(fs.existsSync(path.join(agentDir, agentFile)), false);
 });
-test('agents keeps the previous setup when a new agent does not render', () => {
+test('agents refuses a --baseline-dir that holds the copy of a variant, and the copy keeps its bytes', () => {
   const fixture = variantRepo();
-  const { repo, project } = fixture;
+  const { root, repo, shas } = fixture;
   agentsOnBun(variantOptions(fixture), repo);
-  const state = treeState(project);
+  const copy = variantRoot(root, 'a', shas['cand-a']);
+  // A second setup puts its baseline copy of v16 in the folder of the copy of variant a at cand-a.
+  const project = path.join(root, 'project2');
+  fs.mkdirSync(project);
+  const state = treeState(root);
+  const second = { ...variantOptions(fixture), variants: undefined, 'full-only': undefined, project };
+  const holds = (dir, role, sha) =>
+    `${dir} holds the ${role} plugin copy at ${sha.slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`;
+  assert.throws(() => agentsOnBun({ ...second, 'baseline-dir': copy }, repo), {
+    message: holds(copy, 'variant', shas['cand-a']),
+  });
+  assert.deepEqual(treeState(root), state);
+  // The marker of an earlier version of this script holds only the commit; the folder name gives the role.
+  const legacy = path.join(root, 'variant-a-plugin');
+  put(legacy, '.review-bench-ref', `${shas['cand-a']}\n`);
+  put(legacy, 'skills/plan-reviewer/SKILL.md', '# Plan reviewer A\n');
+  const legacyState = treeState(root);
+  assert.throws(() => agentsOnBun({ ...second, 'baseline-dir': legacy }, repo), {
+    message: holds(legacy, 'variant', shas['cand-a']),
+  });
+  assert.deepEqual(treeState(root), legacyState);
+});
+test('agents keeps the previous setup and its plugin copies when a new agent does not render', () => {
+  const fixture = variantRepo();
+  const { root, repo } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const baseline = treeState(path.join(root, 'baseline-plugin'));
   // A variant agent without a frontmatter name passes the checks of the variants but does not render.
   const noName = '---\ndescription: Reviews plans.\n---\n\nLoad and follow `skill://plan-reviewer/SKILL.md`.\n';
   put(repo, `${KIT_ROOT}/agents/plan-reviewer.md`, noName);
   gitIn(repo, 'commit', '-q', '-am', 'no name');
   gitIn(repo, 'tag', 'no-name');
+  const state = treeState(root);
+  // The call also gives another baseline ref, whose copy would replace the baseline copy of the previous setup.
+  const change = { 'baseline-ref': 'cand-a', variants: '16=v16,a=no-name' };
   const message = 'the agent frontmatter has no name';
-  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), variants: '16=v16,a=no-name' }, repo), { message });
-  assert.deepEqual(treeState(project), state);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), ...change }, repo), { message });
+  // The agents, the tier overrides, the baseline copy, and every variant copy stay as they were.
+  assert.deepEqual(treeState(path.join(root, 'baseline-plugin')), baseline);
+  assert.deepEqual(treeState(root), state);
 });
 // B1 and B0 describe the lens or review the whole diff again, as the released reviewer of plan #98 needed. B3 and Bd
 // give the baseline reviewer the prompt of the candidate arms, so a comparison measures only the reviewer files (#113).

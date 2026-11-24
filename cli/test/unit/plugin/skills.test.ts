@@ -231,6 +231,33 @@ describe("kit plugin skills: report section and shared copies", () => {
     expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
   });
 
+  for (const { shape, stale } of [
+    { shape: "an indented", stale: "   ## Report a problem with this skill" },
+    { shape: "a closed", stale: "## Report a problem with this skill ##" },
+  ]) {
+    it(`fails ${shape} stale report heading before the canonical one`, () => {
+      const root = copyFixture();
+      edit(
+        root,
+        skillFile("zoom-out"),
+        (text) =>
+          `${text.replace("## Report a problem with this skill", stale)}\n${config.reportSection}`,
+      );
+      expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+    });
+  }
+
+  it("passes a report section after an inline code line that starts with three backticks", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "```js `x` ```\n\n## Report a problem with this skill",
+      ),
+    );
+    expect(checkReportSection(root)).toEqual([]);
+  });
+
   it("fails a report section inside an unclosed code fence", () => {
     const root = copyFixture();
     edit(root, skillFile("zoom-out"), (text) =>

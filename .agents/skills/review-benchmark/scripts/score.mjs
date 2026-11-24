@@ -2823,8 +2823,8 @@ function runtimeVersion(entry) {
 // `toolCalls` lists the calls in order; a transcript without a tool call gives no `toolCalls`. A web search call whose
 // tool result is in the transcript also gets `resultUrls`: the URLs that the result cites (see resultUrls). A call
 // whose tool result is an error result (`isError: true`) gets `error: true`: the tool showed no file for it. A search
-// call (omp.mjs SEARCH_TOOLS) whose tool result lists the files that it showed (`details.files`, a path relative to
-// `details.cwd` or absolute) also gets `resultFiles`: these files, absolute when the result names its `cwd` (see
+// call (omp.mjs SEARCH_TOOLS) whose tool result lists what it showed (`details.files`: a local path, relative to
+// `details.cwd` or absolute, or an internal URI such as `local://3.log`) also gets `resultFiles` (see
 // searchResultFiles). They show what the search read, also after a file of its path is gone (see readScope).
 // `ompVersion` is the omp version of the last record that names one (no field without such a record). A transcript
 // with more than one user message gets `revived: true`: a revived agent appends its next task to the transcript of
@@ -2872,11 +2872,13 @@ export function transcriptFacts(entries) {
   return toolCalls.length ? { ...facts, toolCalls } : facts;
 }
 
-// The files that the tool result of a search shows (`details.files`), each resolved against `details.cwd` when the
-// result names one; an empty list without them.
+// What the tool result of a search shows (`details.files`). A relative local path resolves against `details.cwd` when
+// the result names one; an absolute path and a URI stay as they are, so readScope reads a URI by its URI rules. An
+// empty list without `details.files`.
 function searchResultFiles(details) {
   const files = Array.isArray(details?.files) ? details.files.filter((file) => typeof file === 'string' && file) : [];
-  return typeof details?.cwd === 'string' ? files.map((file) => path.resolve(details.cwd, file)) : files;
+  if (typeof details?.cwd !== 'string') return files;
+  return files.map((file) => (uriScheme(file) === undefined ? path.resolve(details.cwd, file) : file));
 }
 
 // The JSON type of a value: 'null', 'array', or its `typeof`.
@@ -3435,12 +3437,15 @@ const withoutSelector = (target) => {
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
 // (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector. A list path
-// that names an existing file or folder as a whole is one target, because omp keeps an existing path before it splits
-// a list: for example a snapshot folder under a workspace `bench-gpt;7`. An exclusion part (see isExclusion) reads
-// nothing, so it gives no target. A list of exclusions only searches the working directory (see readScope).
+// that names an existing file or folder as a whole, as written or without its read selector (OMP_SELECTOR, for
+// example `:1-20`), is one target, because omp keeps such a literal path before it splits a list
+// (splitDelimitedPathEntry in packages/coding-agent/src/tools/path-utils.ts of omp 19.0.0): for example a snapshot
+// folder under a workspace `bench-gpt;7`. An exclusion part (see isExclusion) reads nothing, so it gives no target. A
+// list of exclusions only searches the working directory (see readScope).
 function pathTargets(name, value, cwd) {
-  const whole = value.trim();
-  if (!PATH_LIST_TOOLS.has(name) || ompPathExists(whole, cwd)) return [whole].filter(Boolean);
+  const trimmed = value.trim();
+  const literal = ompPathExists(trimmed, cwd) || ompPathExists(trimmed.replace(OMP_SELECTOR, ''), cwd);
+  if (!PATH_LIST_TOOLS.has(name) || literal) return [trimmed].filter(Boolean);
   return value
     .split(';')
     .map((part) => part.trim())
@@ -4436,8 +4441,10 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // field when the reply names no finding). The manager entry of a round, under `manager.agents`, gets the same facts,
 // and `manager.seconds` and `manager.tokens` are its time and tokens; `report` checks them against the manager setting
 // of the run (see managerStage). Each entry also gets `ompVersion` and, for a transcript with more than one task,
-// `revived` (see transcriptFacts). meta.json keeps no tool calls. The command decodes each transcript that it picks
-// once (see transcriptEntries). Before it writes, it checks every dispatch name, the shape of every transcript that it
+// `revived` (see transcriptFacts). meta.json keeps no tool calls. Decoding is bounded: to pick a transcript, the task
+// lookup (transcriptTask) decodes only the records of each candidate up to its first user message; then the command
+// decodes each transcript that it picks one time in full (see transcriptEntries), and every reader takes these
+// records. Before it writes, it checks every dispatch name, the shape of every transcript that it
 // picks (see checkTranscriptShape), and the agent of each of these transcripts: omp records the agent that it ran in
 // the `session_init` entry (see sessionAgent), and the command stops when that agent is not the agent of the first
 // line `agent: <name>` of the prompt, or when the transcript names no agent. A transcript of another agent, for

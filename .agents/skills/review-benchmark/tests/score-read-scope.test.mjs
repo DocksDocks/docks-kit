@@ -986,3 +986,30 @@ test('transcripts command takes the changed files of a plan case from the Files 
     outside: [contractRead],
   });
 });
+// Plan #216, R51, end to end: `score.mjs transcripts` as the operator runs it refuses a transcript whose agent is
+// another variant than the prompt names, exits nonzero, and leaves meta.json as it was.
+test('score.mjs transcripts exits nonzero on a transcript of another agent and leaves meta.json unchanged', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'Va-low', 'run-1');
+  const agent = 'review-bench-variant-a-0123456789ab-plan-low';
+  const swapped = 'review-bench-variant-16-ba9876543210-plan-low';
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const file = path.join(sessions, 'Plan3VaLowR1Plan.jsonl');
+  const calls = [['read', { path: path.join(caseDir, 'plan.md') }]];
+  put(sessions, 'Plan3VaLowR1Plan.jsonl', toolTranscript(caseDir, 30, calls, swapped));
+  const before = readText(path.join(run, 'meta.json'));
+  const args = [path.join(SCRIPTS_DIR, 'score.mjs'), 'transcripts', ws, '--omp-sessions', sessions];
+  const cli = spawnSync(BUN_RUNTIME, args, { encoding: 'utf8' });
+  assert.equal(cli.status, 1, cli.stdout);
+  assert.equal(
+    cli.stderr.trim(),
+    `transcripts: 1 transcripts show another agent than their prompt names: Plan3VaLowR1Plan (${file}): agent ${swapped}, not ${agent}; dispatch them again with the agent of the prompt`,
+  );
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+});
