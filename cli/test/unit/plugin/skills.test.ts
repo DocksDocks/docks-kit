@@ -315,6 +315,32 @@ describe("kit plugin skills: report section and shared copies", () => {
     });
   }
 
+  it("fails a list item fence that an unindented fence line follows, before the only report section", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "- item\n\n  ```text\n  code\n```\n\n## Report a problem with this skill",
+      ),
+    );
+    expectFailure(
+      checkReportSection(root),
+      skillFile("zoom-out"),
+      "an indented code fence before the Report section ends without a closer at its indentation",
+    );
+  });
+
+  it("passes a `<!--` in inline code before the only report section", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "Write `<!--` to open a comment.\n\n## Report a problem with this skill",
+      ),
+    );
+    expect(checkReportSection(root)).toEqual([]);
+  });
+
   it("checks a skill whose SKILL.md is a symbolic link", () => {
     const root = copyFixture();
     const outside = join(root, "linked-SKILL.md");

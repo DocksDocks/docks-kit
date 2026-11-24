@@ -225,38 +225,47 @@ function headingOffsets(content: string, title: string): Array<number> {
   return offsets;
 }
 
+/** An HTML comment block start: the line starts with `<!--` after its leading spaces (CommonMark 0.31.2, 4.6). */
+const COMMENT_START = /^[ \t]*<!--/;
+
 /**
- * The block that is still open at the end of `text`, in one ordered scan of its
- * lines. A fence line opens a code fence; while it is open, only a fence line of
- * the same character, at least as long, with nothing but spaces or tabs after
- * it, closes it, and nothing else counts. Outside a fence, `<!--` opens an HTML
- * comment and a later `-->` closes it; a `-->` with no open comment does not count.
+ * The problem that the lines of `text` leave open at its end, in one ordered
+ * scan, or null. A fence line opens a code fence; while it is open, only a fence
+ * line of the same character, at least as long, with nothing but spaces or tabs
+ * after it, closes it, and nothing else counts. A fence opened with k leading
+ * spaces, as in a list item, must close before any non-blank line with fewer
+ * than k leading spaces. Outside a fence, a line that starts with `<!--` opens
+ * an HTML comment, and the first `-->` after it closes it; a `<!--` inside a
+ * line does not count.
  */
-function openBlock(text: string): "code fence" | "HTML comment" | null {
-  let fence: string | null = null;
+function blockProblem(text: string): string | null {
+  let fence: { readonly marker: string; readonly indent: number } | null = null;
   let inComment = false;
   for (const raw of text.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const marker = FENCE_LINE.exec(line)?.[1];
-    if (fence !== null) {
-      if (marker?.[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) {
+    const indent = line.length - line.replace(/^ +/, "").length;
+    if (inComment) {
+      inComment = !line.includes("-->");
+    } else if (fence !== null) {
+      if (line.trim() !== "" && indent < fence.indent) {
+        return "an indented code fence before the Report section ends without a closer at its indentation";
+      }
+      if (
+        marker?.[0] === fence.marker[0] &&
+        marker.length >= fence.marker.length &&
+        line.trim() === marker
+      ) {
         fence = null;
       }
-    } else if (!inComment && marker !== undefined) {
-      fence = marker;
-    } else {
-      let at = 0;
-      for (;;) {
-        const token = inComment ? "-->" : "<!--";
-        const found = line.indexOf(token, at);
-        if (found === -1) break;
-        inComment = !inComment;
-        at = found + token.length;
-      }
+    } else if (marker !== undefined) {
+      fence = { marker, indent };
+    } else if (COMMENT_START.test(line)) {
+      inComment = !line.slice(line.indexOf("<!--") + "<!--".length).includes("-->");
     }
   }
-  if (fence !== null) return "code fence";
-  return inComment ? "HTML comment" : null;
+  if (fence !== null) return "an unclosed code fence comes before the Report section";
+  return inComment ? "an unclosed HTML comment comes before the Report section" : null;
 }
 
 /**
@@ -265,12 +274,12 @@ function openBlock(text: string): "code fence" | "HTML comment" | null {
  * files are read as latin1 (one character per byte), so line endings and the
  * final newline count. Every line that is the Report heading in ATX form
  * counts, also inside fenced code or an HTML comment, and the file must have
- * exactly one. Before it, no code fence or HTML comment may still be open (see
- * `openBlock`). The check does no Markdown block parsing beyond that scan, and
- * it does not model container blocks such as list items: a fence or comment
- * that a list item ends early stays open to the heading, so the check fails
- * closed. A skill that quotes the heading quotes it in another form, such as
- * inline code.
+ * exactly one. Before it, the lines must leave no code fence or HTML comment
+ * open (see `blockProblem`). The check does no Markdown block parsing beyond
+ * that scan, and it does not model container blocks such as list items: a fence
+ * or comment that a container ends early stays open in the scan, so the check
+ * fails closed. A skill that quotes the heading quotes it in another form, such
+ * as inline code.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -285,7 +294,7 @@ export function checkReportSection(
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const content = readFileSync(file, "latin1");
     const starts = headingOffsets(content, heading.slice("## ".length));
-    const open = openBlock(content.slice(0, starts[0]));
+    const problem = blockProblem(content.slice(0, starts[0]));
     if (starts.length === 0) {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
@@ -294,10 +303,8 @@ export function checkReportSection(
       failures.push(
         `${shown(repoRoot, file)}: has ${starts.length} Report sections; keep one, at the end of the file`,
       );
-    } else if (open !== null) {
-      failures.push(
-        `${shown(repoRoot, file)}: an unclosed ${open} comes before the Report section`,
-      );
+    } else if (problem !== null) {
+      failures.push(`${shown(repoRoot, file)}: ${problem}`);
     } else if (content.slice(starts[0]) !== canonical) {
       failures.push(
         `${shown(repoRoot, file)}: the Report section differs from the reportSection text of config.json; copy that text over it`,
