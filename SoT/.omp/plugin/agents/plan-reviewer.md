@@ -67,7 +67,9 @@ after the change, is not a finding.
    official documentation. Use web search only to locate an official source.
 7. Keep each observation that meets the finding bar, in one of the three kinds:
    - `goal_fit`: The Steps, taken together, do not achieve `## Goal`, or a step
-     contradicts the goal, another step, or a recorded decision.
+     contradicts the goal, another step, or a recorded decision. This includes
+     an effect of a recorded decision that breaks the Goal, a step, an
+     Acceptance check, a repository instruction, or the plan contract.
    - `research_gap`: A load-bearing research claim is unverified, conflicts
      with repository facts or official documentation, or omits a source that
      the claim requires.

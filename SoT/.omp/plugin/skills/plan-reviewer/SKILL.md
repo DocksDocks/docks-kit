@@ -4,8 +4,8 @@ description: "Use when plan-manager needs a read-only pre-implementation review 
 user-invocable: false
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
-  content_hash: "fa2ad2a978b284761b570ae75c4dc90398b0685d7937f79b47b41fee59465aac"
+  updated: "2026-11-24"
+  content_hash: "95d15f20b82acf20ac50c35000ee52581ac36fd8e1de6ce140425a729dc1ab86"
 ---
 
 # Plan Reviewer
@@ -61,7 +61,7 @@ your attention. The checklist does not limit the review.
 
 | Kind | Finding boundary |
 |---|---|
-| `goal_fit` | The Steps, taken together, do not achieve the Goal, or a step contradicts the Goal, another step, or a recorded decision |
+| `goal_fit` | The Steps, taken together, do not achieve the Goal, or a step contradicts the Goal, another step, or a recorded decision. This includes an effect of a recorded decision that breaks the Goal, a step, an Acceptance check, a repository instruction, or the plan contract |
 | `research_gap` | A load-bearing claim lacks evidence, contradicts repository facts or official documentation, or omits a source that the claim requires. This includes the facts that a recorded decision states or relies on |
 | `security_risk` | The plan introduces or ignores a security risk, such as secret exposure, injection, or an authorization gap, or it runs a destructive or release effect without confirmation |
 
@@ -73,8 +73,9 @@ path, unless Open questions record user approval.
 
 A finding qualifies only when all of these hold:
 
-- It changes whether the Steps achieve the Goal or whether Research holds, or
-  it is a security risk.
+- It changes whether the Steps achieve the Goal or whether Research holds, it
+  is a decision effect that the last condition below names as a finding, or it
+  is a security risk.
 - It is one discrete defect, and the manager can act on it.
 - It is in the plan under review, or the plan relies on it.
 - It does not rest on an unstated assumption. Label an inference as an

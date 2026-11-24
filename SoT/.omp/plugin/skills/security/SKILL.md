@@ -4,8 +4,8 @@ description: "Use when running a security audit on a codebase — OWASP Top 10, 
 user-invocable: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "6836d41e81fd3f3f208243cdf93c8ad3266a68d975130e72008c2c38b3a839d0"
+  updated: "2026-11-24"
+  content_hash: "4d58dde1fdeaa5bf147d7b18054ac95f8275c2fac23dfe051a84334503745011"
 ---
 
 # Security Audit (sequential pipeline)
@@ -75,7 +75,7 @@ Phases 2a–2c are independent lenses over the same Phase 1 map; run them sequen
 The plan issue holds the whole run. It doubles as inter-phase memory and the final artifact.
 
 ```text
-GitHub issue #<n> labeled plan, created with plan:drafting;
+GitHub issue <owner>/<repo>#<n> labeled plan, created with plan:drafting;
 plan-manager owns every later phase transition.
 ```
 

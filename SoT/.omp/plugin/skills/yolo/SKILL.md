@@ -5,8 +5,8 @@ user-invocable: true
 disable-model-invocation: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "dfb708c9766b5e4629b7490b182e88e7950a76a570c392fcb8897df1a3b48d53"
+  updated: "2026-11-24"
+  content_hash: "3b678a7d416b01ac317a7fe8cc7a26ad1b0058f886cf2f905e5fb898abbba408"
 ---
 
 # Yolo
@@ -98,7 +98,8 @@ Before Draft, run `list` and `gh pr list --repo <owner/repo> --state open`.
 
 To adopt a plan:
 
-1. Run `show <n>`. Adopt only an open plan. When the helper reports that
+1. Run `show <n>`, and confirm the plan target as the contract's Plan target
+   says. Adopt only an open plan. When the helper reports that
    another login owns the plan, stop and report. When the plan is a parent
    (the contract's Record and mode), adopt it with steps 2 to 4 and skip
    step 5. Then get a plan pass that covers the current parent body: when
@@ -126,8 +127,8 @@ To adopt a plan:
    `plan=pass`, this change needs a plan-review round, as the contract's Phases
    and review comments says.
 5. Reuse the branch that `gh issue develop <n> --list` shows, or the head branch
-   of the open pull request. When neither exists, use the contract's Linked
-   branch steps.
+   of the open pull request, after the contract's Branch check of Linked branch
+   passes for it. When neither exists, use the contract's Linked branch steps.
 6. Continue at the first Run order phase whose Done when is not met.
 
 ## Draft
@@ -231,8 +232,10 @@ without a merge. The contract's Round ceiling also says this.
 2. Fetch the default branch. If it is not an ancestor of `HEAD`, merge
    `origin/<default>` into the linked branch. Do not rebase. Rerun acceptance,
    and run a code-review round on the result. Commit each repair.
-3. Push the linked branch with a normal push. When a repository hook fails,
-   follow the contract's Repository hooks. Never skip the hook.
+3. Run the Branch check of the contract's Linked branch, then push the linked
+   branch as that section says, with `git push -u origin HEAD`. When a
+   repository hook fails, follow the contract's Repository hooks. Never skip
+   the hook.
 4. Write the run summary from `../plan-manager/references/run-summary.md`, as
    the practices Run summary says.
 5. When `gh pr list --repo <owner/repo> --head <branch> --state open` shows a

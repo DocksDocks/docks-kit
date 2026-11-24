@@ -4,8 +4,8 @@ description: "Use when bootstrapping or auditing a project's skills and agents �
 user-invocable: true
 metadata:
   pattern: pipeline
-  updated: "2026-11-20"
-  content_hash: "5b0219df455d635289d8d4c91f6d1d979478e4fe8db861ac6e20a9007d35c4b0"
+  updated: "2026-11-24"
+  content_hash: "d90d2467a5dd55f7df171cd8f837fadd4de0d16f4899d713f6df89655f352a11"
 ---
 
 # Skills & Agents Pipeline
@@ -75,7 +75,7 @@ Run in order. Each phase reads its reference, then hands its output to `plan-man
 The plan issue holds the whole run — inter-phase memory and the implementation spec.
 
 ```text
-GitHub issue #<n> labeled plan, plan:drafting (created and managed by plan-manager)
+GitHub issue <owner>/<repo>#<n> labeled plan, plan:drafting (created and managed by plan-manager)
 ```
 
 Hand phase output to `plan-manager` as you go — never hold all of it in context and dump it at the end. Downstream phases read the issue with `docks-kit plan show <issue> --body` and locate prior output by grepping for the `### Phase` subheadings above. Never add a new `##` heading: the helper rejects any `##` heading outside its fixed sections.

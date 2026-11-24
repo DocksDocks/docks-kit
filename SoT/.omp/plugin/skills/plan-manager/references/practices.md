@@ -402,8 +402,10 @@ URL and the check result into the file, and update the body with
 
 ## Recover after compaction
 
-The issue is the run record. Run `show <n>` for the status and verdicts. Run
-`gh issue develop <n> --list --repo <owner/repo>` for the branch. After the pull
+The issue is the run record. Name it by its issue URL (`<owner>/<repo>#<n>`),
+not by its number alone. Run `show <n>` for the status and verdicts, and
+confirm the plan target as the contract's Plan target says before any write.
+Run `gh issue develop <n> --list --repo <owner/repo>` for the branch. After the pull
 request exists, GitHub lists no branch there. Then read the pull request number
 from `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`,
 and read the branch from `gh pr view <pr> --repo <owner/repo> --json headRefName`.

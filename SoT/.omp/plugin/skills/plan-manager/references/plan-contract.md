@@ -129,8 +129,9 @@ a reviewer prompt alone has no driven surface.
 Every non-local step requires an in-session `ask` immediately before it runs.
 A yolo run uses the effect table in Yolo runs instead.
 Persisted Effect values record intent, not permission. If `ask` is unavailable,
-block the step and plan with a reason. Unknown tokens produce advice; they do
-not authorize an effect. Finish dependencies before starting dependent work.
+run Work preservation (Landing and archive proof), then block the step and
+plan with a reason. Unknown tokens produce advice; they do not authorize an
+effect. Finish dependencies before starting dependent work.
 
 A non-production target is one that repository configuration or documentation
 names local, development, dev, test, homolog, homologation, staging, or
@@ -203,7 +204,8 @@ Run this review loop for plan review and for code review:
 2. Post the blocks that the round returned unchanged in one issue comment. Put
    the lens blocks of a panel round in the lens order of Code-review rounds.
    From round 2, put the manager response to the previous round after the
-   blocks. Never store a review in the body.
+   blocks. Never store a review in the body. Run the comment check below
+   right before the post.
 3. Run `show <n>` and read the verdict. Stop on pass.
 4. Otherwise reproduce each finding. Fix confirmed defects as Repairs says, and
    reject the others with evidence. Write the manager response to round k.
@@ -240,6 +242,21 @@ Write no bracketed severity in the response. When a run stops between rounds,
 at a block or before the question of item 5 or of the Round ceiling, first post
 the pending response as its own comment. A v4 plan can keep the separate
 repair and rejection comments of contract v4.
+
+Comment check: the helper counts a review or another record only when its
+author is the sole assignee of the issue. So right before each issue comment
+that the run posts with `gh`, such as a round comment, a pending response, a
+`Self-review` comment, or a merge record, compare `gh api user --jq .login`
+with every assigned actor, users and bots, of the issue:
+
+```bash
+gh api graphql -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){assignedActors(first:100){nodes{... on Actor{login}}}}}}' \
+  -F owner=<owner> -F name=<repo> -F n=<n> --jq '[.data.repository.issue.assignedActors.nodes[].login]'
+```
+
+Post only when that list holds exactly the acting login. Otherwise, or when the
+read fails, post nothing and stop, as the refusal `plan #<n> is owned by <login>`
+does.
 
 Reviewers never fetch the issue. Save the review blocks of each round comment,
 without the manager response, as `<phase>-<n>-round-<k>.md` in the review
@@ -605,6 +622,17 @@ failure:
 
 ## Landing and archive proof
 
+### Plan target
+
+The helper reads the repository of the current checkout, so an issue number
+alone can name another issue in another checkout. Name the plan by its issue
+URL (`<owner>/<repo>#<n>`) in every handoff and run summary. Before the first
+write of a run that resumes a plan, also from another checkout, run `show <n>`.
+Its first line ends with the issue URL. Continue only when that URL names the
+repository of the plan: the one that the publication preflight resolved, or the
+one that the handoff names. Use that repository in every `--repo`. Otherwise
+write nothing and stop, and report both repositories.
+
 ### Linked branch
 
 Set up the linked branch after the plan is ongoing and before any code change.
@@ -620,8 +648,33 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
 3. Run `gh issue develop <n> --list --repo <owner/repo>`. Reuse a listed branch.
 4. If no branch is listed, run
    `gh issue develop <n> --repo <owner/repo> --base <default> --checkout`.
-5. If a call fails, list again. Continue only when the list shows the branch.
-   Otherwise block the plan. Never work on an unlinked branch.
+5. If a call fails, list again. Continue only when the list shows the branch
+   and the Branch check below passes. Otherwise block the plan. Never work on
+   an unlinked branch or on the default branch.
+
+Branch check: read the default branch with
+`gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
+When the lookup fails, stop. The check passes when `gh issue develop <n> --list
+--repo <owner/repo>` lists the branch, the branch differs from the default
+branch, and `git remote get-url origin` names `<owner/repo>`. Run it for every
+branch that a run selects: here, in Linked branch timing, when a run adopts a
+plan and reuses a listed branch or the head branch of an open pull request,
+and right before each push, for the current branch. When it fails, push
+nothing, keep the commits local, and block the plan with that reason.
+
+Push only with `git push -u origin HEAD` from the checked branch. The explicit
+`HEAD` refspec sends the current branch to the branch of the same name on
+`origin`, so `remote.origin.push` and `push.default` cannot choose another
+destination.
+
+### Work preservation
+
+Run this before each block, stall exit, or ended grant after implementation
+changed files. Commit the plan's own changes, the paths of the Steps Files
+cells, on the linked branch, never ambient work. Run the Branch check of
+Linked branch, then push them as Linked branch says. When the pull request is
+open, update its body as Checklist says. A hook that refuses the commit or the
+push follows Repository hooks. Then record the block.
 
 ### Repository hooks
 
@@ -841,10 +894,9 @@ fixing it. That is a stall. In a yolo run, follow Round ceiling. Otherwise,
 under a grant, apply the Stall rule of Delegated decisions first. Without a
 grant, or when the Stall rule asks, ask with the options `Continue fixing` and
 `Leave plan blocked`. `Continue fixing` gives the check three more fix
-attempts. On `Leave plan blocked`, or without an answer, commit and push
-current work to the linked branch, update the body as Checklist says, set the
-status to `blocked` with the check name as the reason, run Teardown's exit
-without a merge, and report.
+attempts. On `Leave plan blocked`, or without an answer, run
+Work preservation, set the status to `blocked` with the check name as the
+reason, run Teardown's exit without a merge, and report.
 
 Before the merge question, run the landing self-check. Read the pushed body
 with `gh pr view <pr> --repo <owner/repo> --json body --jq .body`. For each
@@ -1308,7 +1360,7 @@ line.
 |---|---|
 | `local` | Run |
 | `probe` | Run against a non-production target or a public read-only source |
-| `push` | Run only to the plan's linked branch |
+| `push` | Run only to the plan's linked branch, after the Branch check of Linked branch |
 | `deploy` | Run only to a non-production environment |
 | `production_access`, `publish`, `release` | Do not run before the landing merge |
 
@@ -1327,7 +1379,8 @@ hooks. When it passes, use these commands instead:
 
 1. If `gh issue develop <n> --list --repo <owner/repo>` lists no branch, run
    `gh issue develop <n> --repo <owner/repo> --base <default>`.
-2. List again and read the branch name.
+2. List again and read the branch name. Run the Branch check of Linked branch
+   for it.
 3. Run `git fetch origin <branch>`.
 4. Run `git worktree add <worktree> <branch>`, where `<worktree>` is
    `${XDG_DATA_HOME:-$HOME/.local/share}/agent-worktrees/<repository-name>/issue-<n>`.
@@ -1367,22 +1420,19 @@ code-review pass that still lists MEDIUM or LOW findings, land, and list those
 findings in the run summary.
 
 On a stall, apply the Stall rule of Delegated decisions first. When it asks,
-commit and push current work to the linked branch first, when code exists.
-When the pull request is open, update its body as Checklist says. A hook that
-refuses them follows Repository hooks. Then ask once, with the options
-`Continue yolo` and `Leave plan blocked`. Keep the status unchanged while you
-ask, because the helper does not move a blocked plan back to `drafting` or
-`planned`. `Continue yolo` extends the ceiling of the phase, or gives a failing
-check three more fix attempts. On `Leave plan blocked`, or without an answer,
-set the status to `blocked` with the stall reason, run Teardown's exit without
-a merge, and report.
+run Work preservation first, when implementation changed files. Then ask once,
+with the options `Continue yolo` and `Leave plan blocked`. Keep the status
+unchanged while you ask, because the helper does not move a blocked plan back
+to `drafting` or `planned`. `Continue yolo` extends the ceiling of the phase,
+or gives a failing check three more fix attempts. On `Leave plan blocked`, or
+without an answer, set the status to `blocked` with the stall reason, run
+Teardown's exit without a merge, and report.
 
 ### Ended grant
 
 When the Grant check of Delegated decisions finds that the grant has ended,
-the yolo run stops at once and decides nothing more. Commit and push current
-work to the linked branch first, when code exists, and when the pull request
-is open, update its body as Checklist says, as a stall does. Post one issue
+the yolo run stops at once and decides nothing more. Run Work preservation
+first, when implementation changed files, as a stall does. Post one issue
 comment that names the ending event, keep the plan status unchanged, and
 report. Do not ask the merge question.
 

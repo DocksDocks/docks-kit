@@ -3,7 +3,7 @@
 Keep the summary short. Use this shape:
 
 ```markdown
-## Plan run: #<n> <title>
+## Plan run: <owner>/<repo>#<n> <title>
 
 Pull request: <url>. Checks: <state>. Reviewed head: `<sha>`.
 
