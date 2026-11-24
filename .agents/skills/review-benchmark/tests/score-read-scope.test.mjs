@@ -1157,3 +1157,26 @@ test('transcripts checks every prompt header first and writes nothing when one i
   });
   assert.equal(readText(path.join(run(2), 'meta.json')), before);
 });
+// Plan #156, step 10, end to end: `score.mjs transcripts` as the operator runs it reads the `!` part of a grep path as
+// an exclusion, which reads nothing, so a successful grep of the snapshot with an exclusion part stays inside the
+// inputs of the run.
+test('score.mjs transcripts keeps a grep of the snapshot with an exclusion part out of the outside reads', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'P0-low', 'run-1');
+  const agent = 'review-bench-candidate-plan-low';
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(caseDir, 'snapshot/src/sync.mjs', 'export const lock = 1;\n');
+  put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const calls = [['grep', { pattern: 'lock', path: `${path.join(caseDir, 'snapshot')};!**/AGENTS.md` }]];
+  const results = { 'call-1': { matchCount: 1 } };
+  put(sessions, 'Plan3P0LowR1Plan.jsonl', toolTranscript(caseDir, 30, calls, agent, { results }));
+  const args = [path.join(SCRIPTS_DIR, 'score.mjs'), 'transcripts', ws, '--omp-sessions', sessions];
+  const cli = spawnSync(BUN_RUNTIME, args, { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(readJson(path.join(run, 'meta.json')).reviewers.plan.readScope, { outside: [] });
+});

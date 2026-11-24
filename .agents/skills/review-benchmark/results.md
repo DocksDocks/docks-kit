@@ -1652,3 +1652,18 @@ The owner asked for the same quick comparison of `plan-reviewer`. This run is th
 ### Limits
 
 - One run per case, 16 dev cases, and no second judge. Earlier plans tuned the plan-reviewer prompts on these dev cases.
+
+## Decision 2026-11-24: reviewer roles after plan #156
+
+The two quick comparisons of plan #156 above changed two of the four reviewer agents. Each kit reviewer has its own model role, so a measured result moves only the agent that it measured.
+
+| Agent | Role and model | Source |
+|---|---|---|
+| `code-reviewer` | `code_reviewer`: `openai-codex/gpt-6.2-sol:high`, tier `inherit` | The code comparison above; DocksDocks/docks-kit#207 |
+| `plan-reviewer` | `plan_reviewer`: `openai-codex/gpt-6.2-sol:high`, tier `inherit` | The `plan-reviewer` comparison above; DocksDocks/docks-kit#210 |
+| `reviewer` | `reviewer`: `openai-codex/gpt-6.1-terra:high`, tier `inherit` | No change |
+| `security-reviewer` | `reviewer`: `openai-codex/gpt-6.1-terra:high`, tier `inherit` | No change |
+
+- `reviewer` and `security-reviewer` stay on GPT-6.1 Terra, because no run of this benchmark measured those agents. The arms cover only `code-reviewer` (code and code-delta cases) and `plan-reviewer` (plan and plan-delta cases). The run of 2026-11-05 (DocksDocks/public#130) also measured only those two, and its result reached `reviewer` and `security-reviewer` through the role that all four agents shared then.
+- For `code-reviewer` at tier `default`, Sol cost about 4.8 times as much per valid run as Terra and gave 6 times the wrong findings. Those ratios are not measured for `reviewer` or `security-reviewer`.
+- A later move of `reviewer` or `security-reviewer` needs a case set for that agent and its own comparison.
