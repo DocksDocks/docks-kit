@@ -732,17 +732,19 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    says. Never delete, stash, or move those files. Do not run the command from
    another worktree to avoid them. A new worktree can run other hooks than the
    checkout (Worktree hooks).
-3. Otherwise, run `git fetch origin refs/heads/<default>`. Then run the hook's
-   check on the fetched commit, `FETCH_HEAD`, in a clean worktree. The full
-   ref name keeps a tag of the same name from being fetched instead. When the
-   check fails the same way there, it is a baseline failure. When the fetch
+3. Otherwise, read the commit of the default branch with
+   `gh api repos/<owner/repo>/commits/refs/heads/<default> --jq .sha`. Run
+   `git fetch origin <sha>`, then run the hook's check on `<sha>` in a clean
+   worktree. The hash names the commit of the plan repository, so a mirror, a
+   tag, or another fetch cannot change what the check runs on. When it fails
+   the same way there, it is a baseline failure. When the read or the fetch
    fails, the baseline is unknown; record that, and continue as for a
    baseline failure. Record the hook, the check, and both results in
    Verification Results. Block the plan with that reason. Then ask the user
    how to continue. A yolo run uses the hook row in Yolo runs instead of the
    question.
-4. When the check passes on `FETCH_HEAD`, this plan causes the failure.
-   Fix it as item 1 says.
+4. When the check passes on `<sha>`, this plan causes the failure. Fix it as
+   item 1 says.
 
 Work preservation (above) needs a commit and a push of the plan's own changes
 before a block, a stall exit, or an ended grant. The run is already leaving,
@@ -971,10 +973,10 @@ Teardown's exit without a merge. Right before the merge, read the default
 branch again as the Branch check does, and confirm with
 `gh pr view <url> --json headRefOid,baseRefName` that the head is the reviewed
 head and the base is that default branch, the one that the merge question
-named. When the default branch or the base changed, the answer no longer
-holds: wait for the checks of the pull request again as this section says,
-run the landing self-check again, and then ask the merge question again.
-Merge with
+named. When the default branch or the base changed, do not merge: the answer
+no longer holds, and the checks do not prove the new base. Leave the issue
+and the pull request open, report the change, and run Teardown's exit without
+a merge. Merge with
 `gh pr merge <pr> --repo <owner/repo> --match-head-commit <reviewed-head-sha>`
 and the merge-method flag that the repository allows. A prior plan approval
 never authorizes a merge.
