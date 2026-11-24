@@ -343,8 +343,16 @@ export function armAgent(kind, side, config, root) {
   return agentName(side, isPlanKind(kind) ? 'plan' : 'code', config);
 }
 
-// The side of the agents of a variant, `variant-<name>`.
-const variantSide = (name) => `variant-${name}`;
+// The commit part of the names of a variant: the first characters of its commit. Its plugin copy
+// `variant-<name>-<commit>-plugin` and its agents `review-bench-variant-<name>-<commit>-*` then belong to one commit, so
+// a variant at another commit replaces neither, and a prompt for the old commit names an agent that no longer exists.
+const variantCommit = (sha) => sha.slice(0, 12);
+// The side of the agents of a variant, `variant-<name>-<commit>`.
+const variantSide = ({ name, sha }) => `variant-${name}-${variantCommit(sha)}`;
+// The reviewer skill paths under the plugin copy `dir` in a rendered agent text; group 1 is the path in the copy.
+const reviewerSkillUnder = (dir) =>
+  new RegExp(`${escapeRegExp(dir)}/(skills/(?:[^\\s\\x60'"/]+/)?(?:code|plan)-reviewer/SKILL\\.md)`, 'g');
+const PLAN_SKILL = /\/plan-reviewer\/SKILL\.md$/;
 
 // The arm `arm` of a case kind, or undefined when the kind has no such arm: an arm of ARMS, on a plan kind the arm
 // `V<name>` of a variant of `variants` (the list that `agents --variants` wrote), or on a code case the arm `S1<name>`
@@ -373,7 +381,7 @@ function armSpec(kind, arm, lists = {}) {
   const variant = isPlanKind(kind) ? variants.find((item) => `V${item.name}` === arm) : undefined;
   if (!variant) return undefined;
   const mode = kind === 'plan-delta' && variant.delta ? 'delta' : 'full';
-  return { side: variantSide(variant.name), mode, reviewers: ['plan'], contractDiff: variant.contractDiff };
+  return { side: variantSide(variant), mode, reviewers: ['plan'], contractDiff: variant.contractDiff };
 }
 
 // The folder of an arm at one configuration. Arm names have no hyphen, so the folder name splits at its first one.
@@ -1902,6 +1910,12 @@ export function prepareLoop(options, repo) {
       fixerChangedNothing,
     };
     if (noRepair.fixRepairedNothing) return { notApplied: split.notApplied, noRepair };
+    // A fixer patch that undoes the fix patches gives back the reviewed tree, so the next round would review no repair.
+    if (tree === reviewedTree) {
+      fail(
+        `the fixer patch ${repair.patch} undoes the fix patches of ${roundLabel}, so the tree is the reviewed tree of the round; give a corrected patch with --fixer-patch <file>, or delete the patch and dispatch the fixer prompt again`,
+      );
+    }
     const head = commitTree(repo, tree, parent, `Review loop ${label}, round ${nextRound}`);
     const base = resolveCommit(repo, caseData.base, `${caseId} base`);
     const fullLines = diffSize(repo, hidden, base, tree);
@@ -1955,6 +1969,12 @@ export function prepareLoop(options, repo) {
   for (const [field, flag] of Object.entries(noRepair)) {
     if (flag) record[field] = true;
     else delete record[field];
+  }
+  // A repair by hand replaces the fixer of the round: the round keeps no fixer entry and no fixer prompt, so
+  // `transcripts` takes no fixer transcript for it and `report` finds no transcript facts of its fixer.
+  if (options['fixer-patch']) {
+    delete record.fixer;
+    fs.rmSync(path.join(fixerDir, `${FIXER_NAME}.txt`), { force: true });
   }
   writeJson(roundMetaFile, record);
   if (noRepair.fixRepairedNothing) {
@@ -2366,20 +2386,25 @@ function parseVariants(options, repo, baselineDir) {
   }
   const entries = options.variants.split(',').map((entry) => entry.trim());
   if (entries.includes('')) fail(`--variants has an empty entry: ${options.variants}`);
-  const variants = entries.map((entry) => {
+  const parsed = entries.map((entry) => {
     const at = entry.indexOf('=');
     if (at < 1 || at === entry.length - 1) fail(`--variants: ${entry} is not <name>=<git ref>`);
     const name = entry.slice(0, at);
     if (!VARIANT_NAME.test(name)) fail(`--variants: the variant name ${name} has a character other than a-z and 0-9`);
-    return { name, ref: entry.slice(at + 1), dir: path.join(path.dirname(baselineDir), `variant-${name}-plugin`) };
+    return { name, ref: entry.slice(at + 1) };
   });
-  const names = variants.map((variant) => variant.name);
+  const names = parsed.map((variant) => variant.name);
   const twice = names.find((name, index) => names.indexOf(name) !== index);
   if (twice) fail(`--variants: the variant name ${twice} occurs two times`);
   for (const [option, list] of Object.entries(named)) {
     const other = list.find((name) => !names.includes(name));
     if (other) fail(`${option} names ${other}, which is not a variant`);
   }
+  // The plugin copy of a variant belongs to its commit (see variantCommit).
+  const variants = parsed.map(({ name, ref }) => {
+    const sha = resolveCommit(repo, ref, `variant ${name}: ref`);
+    return { name, ref, sha, dir: path.join(path.dirname(baselineDir), `variant-${name}-${variantCommit(sha)}-plugin`) };
+  });
   // Each plugin copy needs a folder of its own: a copy in the folder of another copy would replace it, and the agents
   // of the other copy would then load its files.
   const copies = [
@@ -2390,19 +2415,27 @@ function parseVariants(options, repo, baselineDir) {
     const earlier = copies.slice(0, index).find((other) => other.dir === copy.dir);
     if (earlier) fail(`${earlier.label} and ${copy.label} both go to ${copy.dir}; give another --baseline-dir`);
   }
-  return variants.map(({ name, ref, dir }) => {
-    const sha = resolveCommit(repo, ref, `variant ${name}: ref`);
-    const source = `${layoutAt(repo, sha).reviewerRoot}/agents/plan-reviewer.md`;
+  return variants.map(({ name, ref, sha, dir }) => {
+    const { reviewerRoot } = layoutAt(repo, sha);
+    const source = `${reviewerRoot}/agents/plan-reviewer.md`;
     const blob = runGit(repo, ['cat-file', 'blob', `${sha}:${source}`]);
     if (blob.status !== 0) fail(`${source} does not exist at ${ref} (variant ${name})`);
     const text = blob.stdout.toString();
     // score.mjs takes the plugin root of a reviewer from the path of its reviewer skill in the agent text. An agent
     // text that names no such path, or another root, would make every run of the variant read outside its inputs.
-    const roots = reviewerPluginRoots(pluginRootText(text, dir));
-    if (roots.length !== 1 || roots[0] !== dir) {
+    const rendered = pluginRootText(text, dir);
+    const roots = reviewerPluginRoots(rendered);
+    const skills = [...new Set(Array.from(rendered.matchAll(reviewerSkillUnder(dir)), (match) => match[1]))];
+    if (roots.length !== 1 || roots[0] !== dir || !skills.length || !skills.every((skill) => PLAN_SKILL.test(skill))) {
       fail(
         `variant ${name}: ${source} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT_TOKEN}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`,
       );
+    }
+    for (const skill of skills) {
+      const file = `${reviewerRoot}/${skill}`;
+      if (runGit(repo, ['cat-file', '-e', `${sha}:${file}`]).status !== 0) {
+        fail(`variant ${name}: ${source} at ${ref} names ${file}, which does not exist at ${ref}`);
+      }
     }
     const variant = { name, ref, sha, delta: !fullOnly.includes(name), dir, text };
     if (overlay.includes(name)) variant.contractDiff = variantContractOverlay(repo, sha, ref, `variant ${name}`);
@@ -2679,19 +2712,19 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
     );
   }
   console.log(`baseline ${options['baseline-ref']} at ${sha.slice(0, 12)}: ${baselineLayout.name} layout, in ${baselineDir}`);
-  for (const { name, text, dir } of variants) {
-    sources.push({ side: variantSide(name), role: 'plan', text, pluginRoot: dir });
+  for (const variant of variants) {
+    sources.push({ side: variantSide(variant), role: 'plan', text: variant.text, pluginRoot: variant.dir });
   }
 
-  removeGenerated(project);
-  const agentDir = path.join(project, AGENT_DIR);
-  fs.mkdirSync(agentDir, { recursive: true });
+  // Every agent renders before the previous agents go, so an agent that does not render leaves the previous setup.
+  const agentFiles = [];
   const overrides = {};
+  const agentDir = path.join(project, AGENT_DIR);
   for (const config of configs) {
     for (const { side, role, text, pluginRoot } of sources) {
       const name = agentName(side, role, config.name);
       const agent = renderAgent(text, { name, model: config.model, effort: config.effort, pluginRoot });
-      fs.writeFileSync(path.join(agentDir, `${name}.md`), agent);
+      agentFiles.push([name, agent]);
       if (config.tier !== null) overrides[name] = config.tier;
     }
     // Each self-review agent gets the model, effort, and tier of the reviewer agents of its configuration: the default
@@ -2704,7 +2737,7 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
         model: config.model,
         effort: config.effort,
       });
-      fs.writeFileSync(selfReviewFile, selfReviewText);
+      agentFiles.push([selfReview, selfReviewText]);
       if (config.tier !== null) overrides[selfReview] = config.tier;
     }
   }
@@ -2713,9 +2746,12 @@ export function prepareAgents(options, repo, { run = runOmp } = {}) {
     [MANAGER_AGENT, MANAGER_SOURCE, manager],
   ]) {
     const text = renderAgent(source, { name: agentFile, model: setting.model, effort: setting.effort });
-    fs.writeFileSync(path.join(agentDir, `${agentFile}.md`), text);
+    agentFiles.push([agentFile, text]);
     if (setting.tier !== null) overrides[agentFile] = setting.tier;
   }
+  removeGenerated(project);
+  fs.mkdirSync(agentDir, { recursive: true });
+  for (const [name, text] of agentFiles) fs.writeFileSync(path.join(agentDir, `${name}.md`), text);
   const variantList = variants.map(({ name, ref, sha: commit, delta, contractDiff: diff }) => ({
     name,
     ref,

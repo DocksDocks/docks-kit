@@ -198,11 +198,43 @@ export function checkSkillFrontmatter(repoRoot: string): Array<string> {
   return failures;
 }
 
+/** A code fence: up to three spaces, then three or more backticks or tildes (CommonMark 0.31.2, 4.5). */
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/** The start of an HTML comment block (CommonMark 0.31.2, 4.6), which runs to the line with `-->`. */
+const COMMENT_OPEN = /^ {0,3}<!--/;
+
+/**
+ * The offset of each line equal to `heading` outside fenced code and HTML comment
+ * blocks. A fence or comment that is open at the end runs to the end of the file,
+ * as in CommonMark, so a heading inside it does not count.
+ */
+function headingOffsets(content: string, heading: string): Array<number> {
+  const offsets: Array<number> = [];
+  let fence: string | null = null;
+  let inComment = false;
+  let offset = 0;
+  for (const line of content.split("\n")) {
+    const marker = FENCE.exec(line)?.[1];
+    if (inComment) inComment = !line.includes("-->");
+    else if (fence !== null) {
+      if (marker?.[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) {
+        fence = null;
+      }
+    } else if (marker !== undefined) fence = marker;
+    else if (COMMENT_OPEN.test(line)) {
+      inComment = !line.slice(line.indexOf("<!--") + 4).includes("-->");
+    } else if (line === heading) offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
 /**
  * Each skill ends with the canonical report section, byte for byte. The files
  * are read as latin1 (one character per byte), so line endings and the final
- * newline count. The last heading starts the section, because a skill can
- * quote the heading in its body.
+ * newline count. A heading line inside fenced code or an HTML comment does not
+ * count, so a skill can quote the heading; outside them, the file has exactly
+ * one heading.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -213,17 +245,19 @@ export function checkReportSection(
   if (!heading.startsWith("## ")) {
     return ["config.json reportSection: the first line must be the `## ` heading of the section"];
   }
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const headingLine = new RegExp(`^${escaped}$`, "gm");
   const failures: Array<string> = [];
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const content = readFileSync(file, "latin1");
-    const start = [...content.matchAll(headingLine)].at(-1)?.index;
-    if (start === undefined) {
+    const starts = headingOffsets(content, heading);
+    if (starts.length === 0) {
       failures.push(
         `${shown(repoRoot, file)}: missing the Report section; end the file with the reportSection text of config.json`,
       );
-    } else if (content.slice(start) !== canonical) {
+    } else if (starts.length > 1) {
+      failures.push(
+        `${shown(repoRoot, file)}: has ${starts.length} Report sections; keep one, at the end of the file`,
+      );
+    } else if (content.slice(starts[0]) !== canonical) {
       failures.push(
         `${shown(repoRoot, file)}: the Report section differs from the reportSection text of config.json; copy that text over it`,
       );

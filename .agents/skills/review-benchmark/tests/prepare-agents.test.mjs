@@ -171,12 +171,14 @@ test('agents takes the tiers of the tier family of each model and refuses a tier
   // The requested tier of a transcript is the tier of the family of its model: an Anthropic run that asked for
   // priority shows priority, also when the session also holds an OpenAI tier.
   const facts = score.transcriptFacts(
-    jsonl([
-      { type: 'model_change', timestamp: isoAt(0), model: claude },
-      { type: 'service_tier_change', timestamp: isoAt(0), serviceTier: { openai: 'default', anthropic: 'priority' } },
-      { type: 'message', timestamp: isoAt(1), message: { role: 'user' } },
-      assistantLine(5, 'anthropic', 'claude-opus-5-5', 'priority', { input: 10, output: 5 }),
-    ]),
+    score.transcriptEntries(
+      jsonl([
+        { type: 'model_change', timestamp: isoAt(0), model: claude },
+        { type: 'service_tier_change', timestamp: isoAt(0), serviceTier: { openai: 'default', anthropic: 'priority' } },
+        { type: 'message', timestamp: isoAt(1), message: { role: 'user' } },
+        assistantLine(5, 'anthropic', 'claude-opus-5-5', 'priority', { input: 10, output: 5 }),
+      ]),
+    ),
   );
   assert.equal(facts.requestedTier, 'priority');
 });

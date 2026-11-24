@@ -42,7 +42,7 @@ import {
 // outside the inputs of its run can see a fix, so its recall does not count.
 //
 // Changed export:
-// - transcriptFacts(text, source): when an assistant message of the transcript has a `toolCall` content item, the
+// - transcriptFacts(entries): when an assistant message of the transcript has a `toolCall` content item, the
 //   result also has `toolCalls`: one { name, path } per item, in transcript order. path is `arguments.path` when it
 //   is a string, else null. A `web_search` call also has `query`: `arguments.query` when it is a string, else null.
 //   When the transcript has a `toolResult` message for a `web_search` call (same `toolCallId`), the call also has
@@ -123,7 +123,7 @@ test('transcript facts list the name and the path of each tool call of the assis
     { type: 'message', timestamp: isoAt(6), message: { role: 'toolResult', content: [{ type: 'text', text: 'x' }] } },
     second,
   ]);
-  assert.deepEqual(score.transcriptFacts(text, 'tools.jsonl'), {
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(text, 'tools.jsonl')), {
     requestedTier: null,
     messages: [
       { model: MODEL, effort: null, servedTier: 'default' },
@@ -139,7 +139,34 @@ test('transcript facts list the name and the path of each tool call of the assis
     ],
   });
   // A transcript without a tool call has no toolCalls field.
-  assert.equal('toolCalls' in score.transcriptFacts(jsonl(FALLBACK_TRANSCRIPT), 'fallback.jsonl'), false);
+  assert.equal('toolCalls' in score.transcriptFacts(score.transcriptEntries(jsonl(FALLBACK_TRANSCRIPT))), false);
+});
+// Plan #216, R59: an instruction path in backticks ends at the closing backtick, so a project under a folder such as
+// `Team's review runs` keeps its roots and its agent file, and the self-review agent may read its own file.
+test('transcripts takes the instruction paths in backticks that hold an apostrophe', () => {
+  const team = "/work/Team's review runs";
+  const agentFile = `${team}/project/.omp/agents/review-bench-selfreview-low.md`;
+  const prompt = [
+    `Load \`${team}/baseline-plugin/skills/code-reviewer/SKILL.md\`.`,
+    `Your agent file is \`${agentFile}\`.`,
+    `Load \`${team}/selfreview-x-plugin/skills/code-review/SKILL.md\`.`,
+  ].join('\n');
+  assert.deepEqual(score.reviewerPluginRoots(prompt), [`${team}/baseline-plugin`]);
+  assert.deepEqual(score.selfReviewSkillRoots(prompt), [`${team}/selfreview-x-plugin`]);
+  const text = jsonl([
+    sessionRecord({ cwd: LIVE }),
+    { type: 'session_init', timestamp: isoAt(0), systemPrompt: ['You are a coding assistant.', prompt] },
+  ]);
+  const session = score.transcriptSession(score.transcriptEntries(text, 'team.jsonl'));
+  assert.deepEqual(session, {
+    cwd: LIVE,
+    pluginRoots: [`${team}/baseline-plugin`],
+    agentFiles: [agentFile],
+    skillRoots: [`${team}/selfreview-x-plugin`],
+  });
+  assert.deepEqual(score.readScope(reads(agentFile), { runDir: `${SCOPE_CASE}/S1-low/run-1`, ...session }), {
+    outside: [],
+  });
 });
 test('readScope allows the inputs of the run, the instructions of the reviewer, and other web pages', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
@@ -944,10 +971,15 @@ test('transcripts command takes the changed files of a plan case from the Files 
   put(
     sessions,
     'Plan3P0R1Plan.jsonl',
-    toolTranscript(path.join(ws, 'plan-3'), 30, [
-      ['read', { path: contractRead }],
-      ['read', { path: 'skill://code-review/references/perf.md' }],
-    ]),
+    toolTranscript(
+      path.join(ws, 'plan-3'),
+      30,
+      [
+        ['read', { path: contractRead }],
+        ['read', { path: 'skill://code-review/references/perf.md' }],
+      ],
+      'review-bench-candidate-plan-low',
+    ),
   );
   assert.deepEqual(transcriptsCommand(ws, sessions), ['Plan3P0R1Plan']);
   assert.deepEqual(readJson(path.join(ws, 'plan-3/P0/run-1/meta.json')).reviewers.plan.readScope, {

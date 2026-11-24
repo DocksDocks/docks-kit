@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { test } from 'vitest';
+import { onTestFinished, test, vi } from 'vitest';
 import * as score from '../scripts/score.mjs';
 import {
   findingsCommand,
@@ -199,6 +199,51 @@ test('transcripts splits a target on `;`, on white space, and on all three delim
   ];
   assert.deepEqual(listReadScope(fixture, calls), { outside: [whiteSpace, semicolons, skills, commaName, allThree] });
 });
+// Plan #216, R67: omp keeps a search path that names an existing file or folder as a whole before it splits the path
+// on `;`, so a snapshot under a workspace `bench-gpt;7` is one target.
+test('a grep, glob, or ast_grep path that names an existing path as a whole is one target, also with a `;`', () => {
+  const fixture = listCase(scratch(), 'bench-gpt;7');
+  const { snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const calls = [
+    ['grep', { pattern: 'lock', path: path.join(snapshot, 'src') }],
+    ['glob', { path: snapshot }],
+    ['ast_grep', { pattern: 'lock()', path: path.join(snapshot, 'src', 'a.mjs') }],
+  ];
+  assert.deepEqual(listReadScope(fixture, calls), { outside: [] });
+});
+// Plan #216, R61: the split of a search path depends on the files at the time of the call, so the files that the
+// tool result shows decide too. A file outside the inputs that the search showed stays outside after it is gone.
+test('a search result file outside the inputs is outside, also when the file is gone after the call', () => {
+  const fixture = listCase(scratch(), 'bench');
+  const { live, snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const a = path.join(snapshot, 'src', 'a.mjs');
+  const gone = path.join(live, 'src', 'gone.mjs');
+  // Both files existed at the call, so omp split the path on white space; gone.mjs is gone now. The result names a
+  // file relative to its `cwd`.
+  const calls = [['grep', { pattern: 'lock', path: `${a} ${gone}` }]];
+  const results = { 'call-1': { cwd: live, files: [a, 'src/gone.mjs'] } };
+  assert.deepEqual(listReadScope(fixture, calls, results), { outside: [`grep result: ${gone}`] });
+  // A result that shows only files of the inputs adds no target.
+  assert.deepEqual(listReadScope(fixture, calls, { 'call-1': { cwd: live, files: [a] } }), { outside: [] });
+});
+// Plan #216, R68: transcripts decodes each transcript once and gives its records to every reader. Only the lookup of
+// the task reads the head of a candidate again, up to its first user message.
+test('transcripts decodes each record of a transcript after the task one time', () => {
+  const { ws, sessions, live, caseDir, snapshot } = listCase(scratch(), 'bench');
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const a = path.join(snapshot, 'src', 'a.mjs');
+  const results = { 'call-1': { displayReadTargets: [a] } };
+  const text = toolTranscript(caseDir, 30, [['read', { path: a }]], undefined, { cwd: live, results });
+  put(sessions, 'Code7C1LowR1K1Full.jsonl', text);
+  const [assistant, toolResult] = text.split('\n').slice(-2);
+  const parse = vi.spyOn(JSON, 'parse');
+  onTestFinished(() => parse.mockRestore());
+  assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
+  const decodes = (line) => parse.mock.calls.filter(([value]) => value === line).length;
+  assert.deepEqual([decodes(assistant), decodes(toolResult)], [1, 1]);
+});
 test('readScope records each web search query, and a query that targets the benchmark repository is outside', () => {
   const call = (name, args) => ({ type: 'toolCall', id: name, name, arguments: args });
   const reply = assistantLine(5, 'openai-codex', 'gpt-6.1-sol', 'default', { input: 10 });
@@ -208,7 +253,7 @@ test('readScope records each web search query, and a query that targets the benc
     call('read', { path: `${SCOPE_CASE}/plan.md` }),
   ];
   const text = jsonl([{ type: 'message', timestamp: isoAt(0), message: { role: 'user' } }, reply]);
-  assert.deepEqual(score.transcriptFacts(text, 'search.jsonl').toolCalls, [
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(text, 'search.jsonl')).toolCalls, [
     { name: 'web_search', path: null, query: 'node lock release finally' },
     { name: 'web_search', path: null, query: null },
     { name: 'read', path: `${SCOPE_CASE}/plan.md` },
@@ -298,7 +343,7 @@ test('a web search whose result cites a page of the benchmark repository is outs
     result('s1', `The toggle is documented in the plugin README (${cited}).`),
     result('s2', `Anonymous volumes stay after down: ${docs}.`),
   ]);
-  const toolCalls = score.transcriptFacts(text, 'search.jsonl').toolCalls;
+  const toolCalls = score.transcriptFacts(score.transcriptEntries(text, 'search.jsonl')).toolCalls;
   assert.deepEqual(toolCalls, [
     { name: 'web_search', path: null, query: 'docks-kit fast mode', resultUrls: [cited] },
     { name: 'web_search', path: null, query: 'compose anonymous volumes', resultUrls: [docs] },
@@ -372,14 +417,15 @@ test('a failed request without a served tier stays out of the model and tier che
   // A failed request of the configured model, then a failed request of a fallback model at second 61.
   const failedFallback = error(assistantLine(61, 'anthropic', 'claude-opus-5-5', null, { input: 0 }));
   const failing = jsonl([...head, reply(5, 'priority'), error(reply(40, null)), failedFallback]);
-  assert.deepEqual(score.transcriptFacts(failing, 'failing.jsonl').messages, [
+  const failingEntries = score.transcriptEntries(failing, 'failing.jsonl');
+  assert.deepEqual(score.transcriptFacts(failingEntries).messages, [
     { model: MODEL, effort: 'xhigh', servedTier: 'priority' },
     { model: MODEL, effort: 'xhigh', servedTier: null, failed: true },
     { model: 'anthropic/claude-opus-5-5', effort: 'xhigh', servedTier: null, failed: true },
   ]);
   // The time of the failed requests is real wall time: the seconds run to the last failed request, also of another
   // model. The tokens count the messages of the configured model only.
-  assert.deepEqual(parseTranscript(failing, 'failing.jsonl', MODEL), { seconds: 60, tokens: 20 });
+  assert.deepEqual(parseTranscript(failingEntries, 'failing.jsonl', MODEL), { seconds: 60, tokens: 20 });
   // Every request failed: no model served the reviewer.
   const noReply = jsonl([...head, error(reply(5, null))]);
   // A message that stopped on an error but has a served tier was served, so the checks keep it.

@@ -1,4 +1,12 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -210,6 +218,60 @@ describe("kit plugin skills: report section and shared copies", () => {
       text.replace("## Report a problem with this skill", "## Report"),
     );
     expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+  });
+
+  it("fails a stale report section before the canonical one", () => {
+    const root = copyFixture();
+    edit(
+      root,
+      skillFile("zoom-out"),
+      (text) =>
+        `${text.replace("Leave out secrets", "Leave out passwords")}\n${config.reportSection}`,
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+  });
+
+  it("fails a report section inside an unclosed code fence", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "```text\n## Report a problem with this skill",
+      ),
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+  });
+
+  it("fails a report section inside an unclosed HTML comment", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "<!-- draft\n\n## Report a problem with this skill",
+      ),
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+  });
+
+  it("passes a quoted heading inside a closed fence", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace(
+        "## Report a problem with this skill",
+        "```markdown\n## Report a problem with this skill\n```\n\n## Report a problem with this skill",
+      ),
+    );
+    expect(checkReportSection(root)).toEqual([]);
+  });
+
+  it("checks a skill whose SKILL.md is a symbolic link", () => {
+    const root = copyFixture();
+    const outside = join(root, "linked-SKILL.md");
+    writeFileSync(outside, minimalSkill("linked", "Use when testing a linked skill."));
+    mkdirSync(join(root, SKILLS, "linked"));
+    symlinkSync(outside, join(root, skillFile("linked")));
+    expect(scoreSkills(root).rows.map((row) => row.name)).toContain("linked");
+    expectFailure(checkReportSection(root), skillFile("linked"), "missing the Report section");
   });
 
   it("fails an edit to one shared copy", () => {

@@ -337,7 +337,7 @@ test('an unknown pair with a missed known defect counts as unresolved, and the f
   const lines = renderReport(scores).split('\n');
   assert.ok(
     lines.includes(
-      '| code-7 | C3 | run-1 | 0.00 | - | 1 | 0 | 0 | 0 | 1 | 1 | - | - | - | - | pass | correctness: pass |',
+      '| code-7 | C3 | run-1 | 0.00 | - | 1 | 0 | 0 | 0 | 1 | 1 | 1 | - | - | - | - | pass | correctness: pass |',
     ),
   );
 });
@@ -353,7 +353,7 @@ test('an unknown pair with a known defect that the run found counts as an unknow
   const lines = renderReport(scores).split('\n');
   assert.ok(
     lines.includes(
-      '| code-7 | C3 | run-1 | 1.00 | D1 | 1 | 0 | 0 | 0 | 0 | 1 | - | - | - | - | pass | correctness: pass |',
+      '| code-7 | C3 | run-1 | 1.00 | D1 | 1 | 0 | 0 | 0 | 0 | 1 | 1 | - | - | - | - | pass | correctness: pass |',
     ),
   );
   assert.ok(lines.some((line) => line.includes('| Unresolved mean | Unknown pairs mean |')));
@@ -374,6 +374,87 @@ test('an unknown pair with a known defect that another finding of the run matche
   assert.deepEqual([first.found, first.unresolved, first.unknownPairs], [['D1', 'D2'], 0, 1]);
   assert.deepEqual([second.found, second.unresolved, second.unknownPairs], [[], 1, 1]);
   assert.deepEqual([scores.summaries[0].unresolved, scores.summaries[0].unknownPairs], [0.5, 1]);
+});
+// Plan #216, R71: each unknown answer is one unknown pair, also when two findings name the same missed defect.
+test('two findings with unknown pairs of one missed known defect give two unknown pairs and one unresolved defect', () => {
+  const scores = scoreRuns(
+    judgedArm(CODE_KNOWN.slice(0, 2), [
+      [
+        { matches: { D1: 'match' } },
+        { matches: { D2: 'unknown' }, rating: 'valid' },
+        { matches: { D2: 'unknown' }, rating: 'wrong' },
+      ],
+    ]),
+  );
+  const [run] = scores.runs;
+  assert.deepEqual([run.unknownPairs, run.unresolved], [2, 1]);
+  const lines = renderReport(scores).split('\n');
+  assert.ok(
+    lines.includes(
+      '| code-7 | C3 | run-1 | 0.50 | D1 | 1 | 1 | 0 | 0 | 1 | 2 | 1 | - | - | - | - | pass | correctness: pass |',
+    ),
+  );
+});
+// Plan #216, R70: a known-defect id can hold a space, so the score keeps the whole id of each answer.
+test('a known-defect id with a space keeps its whole id in the found defects and in the unknown pairs', () => {
+  const known = [
+    { id: 'D1 first', title: 'First', locator: 'src/sync.mjs:1' },
+    { id: 'D1 second', title: 'Second', locator: 'src/sync.mjs:2' },
+  ];
+  const scores = scoreRuns(
+    judgedArm(known, [
+      [
+        { matches: { 'D1 first': 'match' } },
+        { matches: { 'D1 first': 'unknown', 'D1 second': 'unknown' }, rating: 'valid' },
+      ],
+    ]),
+  );
+  const [run] = scores.runs;
+  assert.deepEqual([run.found, run.recall, run.unresolved, run.unknownPairs], [['D1 first'], 0.5, 1, 2]);
+});
+// Plan #216, R63: a held-out reader reads only the report, so the report tells a valid extra that can repeat a known
+// defect (an unknown pair of a valid extra) from an unknown pair of a finding that matched a known defect.
+test('doubtful extras tell an unknown pair of a valid extra from an unknown pair of a matched finding', () => {
+  const scores = scoreRuns(
+    judgedArm(CODE_KNOWN.slice(0, 2), [
+      [{ matches: { D1: 'match', D2: 'unknown' } }, { rating: 'valid' }, { matches: { D2: 'match' } }],
+      [{ matches: { D1: 'match' } }, { matches: { D2: 'unknown' }, rating: 'valid' }, { matches: { D2: 'match' } }],
+    ]),
+  );
+  assert.deepEqual(
+    scores.runs.map((run) => [run.validExtras, run.unknownPairs, run.doubtfulExtras]),
+    [
+      [1, 1, 0],
+      [1, 1, 1],
+    ],
+  );
+  const lines = renderReport(scores).split('\n');
+  for (const [run, doubtful] of [
+    ['run-1', 0],
+    ['run-2', 1],
+  ]) {
+    const row = `| code-7 | C3 | ${run} | 1.00 | D1, D2 | 1 | 0 | 0 | 0 | 0 | 1 | ${doubtful} | - | - | - | - | pass | correctness: pass |`;
+    assert.ok(lines.includes(row), `the report lacks ${row}`);
+  }
+  const summary =
+    '| code-7 | C3 | 2 | 2 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0.00 | 0.00 | 0.00 | 1.00 | 0.50 | 0.00 | - | - | - | - | - | - | - |';
+  assert.ok(lines.includes(summary), `the report lacks ${summary}`);
+});
+// Plan #216, R66: only a run with a configuration must prove it with transcript facts, and the legend says so.
+test('the report legend limits the transcript-fact reasons to runs with a configuration', () => {
+  const scores = scoreRuns(scoringFixture());
+  // A run without a configuration and without transcript facts stays valid.
+  assert.ok(scores.runs.some((run) => run.config === null && run.invalid.length === 0));
+  const legend = renderReport(scores)
+    .split('\n')
+    .find((line) => line.startsWith('The Runs table lists every run.'));
+  assert.ok(
+    legend.includes(
+      'runs with a configuration whose reviewer or fixer has no transcript facts or no served assistant message',
+    ),
+    legend,
+  );
+  assert.ok(legend.includes('loops with a configuration and a fixer but without a fixer setting'), legend);
 });
 test('the summary gives the median and the range of seconds and tokens, so one slow run does not move the median', () => {
   const costs = [
@@ -428,11 +509,11 @@ test('report.md lists known-defect ids and no defect text', () => {
   const report = fs.readFileSync(path.join(ws, 'report.md'), 'utf8');
   const lines = report.split('\n');
   for (const expected of [
-    '| code-7 | B0 | 1 | 3 | 0.33 | 0.33 | 0.33 | 0.33 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | - | 61.5 | 61.5 | 61.5 | 4200 | 4200 | 4200 |',
-    '| code-7 | B0 | run-1 | 0.33 | D1 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | 61.5 | 4200 | fixes-required | full: fixes-required |',
-    '| code-7 | C3 | run-1 | 0.67 | D1, D2 | 1 | 1 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: fixes-required, text-and-safety: unreadable |',
-    '| code-7 | C3 | run-2 | 0.00 | - | 1 | 1 | 1 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
-    '| plan-3 | P0 | run-1 | 0.50 | K1 | 1 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | repair | plan: repair |',
+    '| code-7 | B0 | 1 | 3 | 0.33 | 0.33 | 0.33 | 0.33 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | - | 61.5 | 61.5 | 61.5 | 4200 | 4200 | 4200 |',
+    '| code-7 | B0 | run-1 | 0.33 | D1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | 61.5 | 4200 | fixes-required | full: fixes-required |',
+    '| code-7 | C3 | run-1 | 0.67 | D1, D2 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: fixes-required, text-and-safety: unreadable |',
+    '| code-7 | C3 | run-2 | 0.00 | - | 1 | 1 | 1 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
+    '| plan-3 | P0 | run-1 | 0.50 | K1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | repair | plan: repair |',
   ]) {
     assert.ok(lines.includes(expected), `report.md lacks ${expected}`);
   }
@@ -506,9 +587,10 @@ test('transcript reader measures first user to last assistant message and sums t
     },
   ];
   const text = lines.map((entry) => JSON.stringify(entry)).join('\n');
-  assert.deepEqual(parseTranscript(`${text}\n`), { seconds: 90.2, tokens: 535 });
-  assert.throws(() => parseTranscript(JSON.stringify(lines[1]), 'half.jsonl'), /half\.jsonl has no timestamped/);
-  assert.throws(() => parseTranscript('{"type":', 'cut.jsonl'), /cut\.jsonl line 1 is not JSON/);
+  assert.deepEqual(parseTranscript(score.transcriptEntries(`${text}\n`)), { seconds: 90.2, tokens: 535 });
+  const half = score.transcriptEntries(JSON.stringify(lines[1]), 'half.jsonl');
+  assert.throws(() => parseTranscript(half, 'half.jsonl'), /half\.jsonl has no timestamped/);
+  assert.throws(() => score.transcriptEntries('{"type":', 'cut.jsonl'), /cut\.jsonl line 1 is not JSON/);
 });
 test('pickTranscript finds nested and repeated transcripts and refuses ties', () => {
   const files = [
@@ -530,12 +612,13 @@ test('pickTranscript finds nested and repeated transcripts and refuses ties', ()
 test('transcripts command fills meta files by dispatch name and keeps other fields', () => {
   const { ws } = workspace();
   const sessions = path.join(path.dirname(ws), 'sessions');
-  // An omp 19 transcript at the effort low without a service tier.
+  // An omp 19 transcript at the effort low without a service tier, of the agent of the C3 prompts.
   const transcript = (seconds, input) =>
     jsonl([
       sessionRecord(),
       { type: 'model_change', timestamp: isoAt(0), model: MODEL },
       { type: 'thinking_level_change', timestamp: isoAt(0), thinkingLevel: 'low' },
+      { type: 'session_init', timestamp: isoAt(0), agent: 'review-bench-candidate-code' },
       { type: 'message', timestamp: isoAt(0), message: taskMessage(path.join(ws, 'code-7')) },
       assistantLine(seconds, 'openai-codex', 'gpt-6.1-sol', null, { input, output: 1 }),
     ]);
@@ -590,7 +673,7 @@ test('transcripts command keeps same-name dispatches of two workspaces separate 
   const transcript = (ws, seconds, fixer = false) => {
     const caseDir = path.join(ws, 'code-7');
     const target = path.join(ws, roundDir, ...(fixer ? ['fixer'] : []), 'snapshot', 'src', 'sync.mjs');
-    return toolTranscript(caseDir, seconds, [['read', { path: target }]])
+    return toolTranscript(caseDir, seconds, [['read', { path: target }]], fixer ? 'review-bench-fixer' : undefined)
       .split('\n')
       .map((line) => {
         const entry = JSON.parse(line);
@@ -680,7 +763,8 @@ test('dispatch names that collide stop the names and transcripts commands', () =
 // Plan #100 step 2: API note for the tests below. They read the new exports through `score`.
 //
 // New exports of score.mjs:
-// - transcriptFacts(text, source = 'transcript') -> { requestedTier, messages, sideCalls }
+// - transcriptFacts(entries) -> { requestedTier, messages, sideCalls }, for the records `entries` of a transcript
+//   (transcriptEntries(text, source); each reader of a transcript takes its records, plan #216)
 //   requestedTier: `serviceTier.openai` of the last `service_tier_change`, else null.
 //   messages: one { model, effort, servedTier } per assistant message, in transcript order. model is
 //   `<provider>/<model>` (`<model>` without a provider, null without a model). effort is the `thinkingLevel` of the
@@ -705,10 +789,10 @@ test('dispatch names that collide stop the names and transcripts commands', () =
 //   with a string id`. readKnown, `report --keys`, and the loop command of step 3 read key files only through it.
 //
 // Changed exports:
-// - parseTranscript(text, source, model): with `model`, seconds run from the first user message to the last
+// - parseTranscript(entries, source, model): with `model`, seconds run from the first user message to the last
 //   assistant message of `model` or failed request, and tokens add only the messages of `model`. With no such
 //   message, the result is { seconds: null, tokens: 0 }. Without `model`, the result does not change.
-// - transcriptsCommand writes { ...parseTranscript(text, file, meta.config?.model), ...transcriptFacts(text, file) }
+// - transcriptsCommand writes { ...parseTranscript(entries, file, meta.config?.model), ...transcriptFacts(entries) }
 //   into meta.reviewers[reviewer]. The existing test 'transcripts command fills meta files ...' then gets these
 //   fields in each reviewer entry.
 // - Rounds: a run folder can hold `round-<r>/` folders, each with prompts/, blocks/, and meta.json. The blocks and
@@ -789,21 +873,25 @@ None.
 `;
 test('transcript facts give the model, effort, and served tier of each message and the last requested tier', () => {
   const text = `${jsonl(FALLBACK_TRANSCRIPT)}\n`;
-  assert.deepEqual(score.transcriptFacts(text, 'fallback.jsonl'), FALLBACK_FACTS);
+  const entries = score.transcriptEntries(text, 'fallback.jsonl');
+  assert.deepEqual(score.transcriptFacts(entries), FALLBACK_FACTS);
   // Without the model change of the fallback, the session stays on the OpenAI model, and the last OpenAI request
   // counts.
   const withoutFallback = FALLBACK_TRANSCRIPT.filter((entry) => entry.type !== 'model_change' || entry.model === MODEL);
-  assert.equal(score.transcriptFacts(jsonl(withoutFallback), 'fallback.jsonl').requestedTier, 'priority');
+  assert.equal(score.transcriptFacts(score.transcriptEntries(jsonl(withoutFallback))).requestedTier, 'priority');
   // Time and tokens count only the configured model: the side call and the fallback message stay out.
-  assert.deepEqual(parseTranscript(text, 'fallback.jsonl', MODEL), { seconds: 30, tokens: 535 });
-  assert.deepEqual(parseTranscript(text, 'fallback.jsonl'), { seconds: 90, tokens: 1635 });
+  assert.deepEqual(parseTranscript(entries, 'fallback.jsonl', MODEL), { seconds: 30, tokens: 535 });
+  assert.deepEqual(parseTranscript(entries, 'fallback.jsonl'), { seconds: 90, tokens: 1635 });
   const fallbackOnly = jsonl(FALLBACK_TRANSCRIPT.filter((entry) => entry.message?.model !== 'gpt-6.1-sol'));
-  assert.deepEqual(parseTranscript(fallbackOnly, 'fallback.jsonl', MODEL), { seconds: null, tokens: 0 });
+  assert.deepEqual(parseTranscript(score.transcriptEntries(fallbackOnly), 'fallback.jsonl', MODEL), {
+    seconds: null,
+    tokens: 0,
+  });
   const bare = jsonl([
     { type: 'message', timestamp: isoAt(0), message: { role: 'user' } },
     { type: 'message', timestamp: isoAt(4), message: { role: 'assistant', usage: { input: 1 } } },
   ]);
-  assert.deepEqual(score.transcriptFacts(bare, 'bare.jsonl'), {
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(bare, 'bare.jsonl')), {
     requestedTier: null,
     messages: [{ model: null, effort: null, servedTier: null }],
     sideCalls: [],
@@ -821,11 +909,12 @@ test('transcripts command writes the facts and the time and tokens of the config
   put(
     sessions,
     'Code7C1XhighFastR1Full.jsonl',
-    jsonl(
-      FALLBACK_TRANSCRIPT.map((entry) =>
+    jsonl([
+      { type: 'session_init', timestamp: isoAt(0), agent: 'review-bench-candidate-code-xhigh-fast' },
+      ...FALLBACK_TRANSCRIPT.map((entry) =>
         entry.message?.role === 'user' ? { ...entry, message: taskMessage(path.join(ws, 'code-7')) } : entry,
       ),
-    ),
+    ]),
   );
   assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1XhighFastR1Full']);
   assert.deepEqual(readJson(path.join(ws, 'code-7/C1-xhigh-fast/run-1/meta.json')), {
@@ -1015,8 +1104,8 @@ test('report refuses a configured run whose transcript facts name no omp version
 //   per run (the known defects that round r found, divided by the loops that reached it).
 // - Rounds median and max: the rounds of a loop. Loop seconds median: the sum of the round seconds of a loop.
 // - `... per run`: the sum over the runs divided by the runs. Known found (by the end of the loop), Escaped (known
-//   minus found), Valid extras, Extra-only rounds (rounds r >= 2 whose round r - 1 records a fix step that gave
-//   valid extras to the fixer and repaired no known defect), Wrong, Unjudged, Unknown ratings, and Unknown pairs.
+//   minus found), Valid extras, Extra-only rounds (the repair-based definition of the scoreRuns contract in
+//   prepare-loop.test.mjs), Wrong, Unjudged, Unknown ratings, Unknown pairs, and Doubtful extras.
 // - Tokens median; Side-call tokens median (the sideCalls tokens of a run).
 // - Loops with a fixer: the loops with meta.fixer in a round. Fixer seconds median and Fixer tokens median: over those
 //   loops only, the sum of meta.fixer.seconds and the sum of meta.fixer.tokens over the rounds of a loop.
@@ -1141,6 +1230,7 @@ test('the configuration table gives one column per configuration and the rows of
     '| Unjudged per run | 0.00 | 0.00 | 0.00 |',
     '| Unknown ratings per run | 0.00 | 0.00 | 0.50 |',
     '| Unknown pairs per run | 0.00 | 0.00 | 0.00 |',
+    '| Doubtful extras per run | 0.00 | 0.00 | 0.00 |',
     '| Tokens median | 1100 | 800 | 2900 |',
     '| Side-call tokens median | 181 | 0 | 0 |',
     // The high loop of code-8 ran no fixer, so the median covers only its code-7 loop.
@@ -1276,7 +1366,7 @@ test('report stops on a finding that has neither a match nor an adjudication and
   const lines = fs.readFileSync(path.join(ws, 'report.md'), 'utf8').split('\n');
   assert.ok(
     lines.includes(
-      '| code-7 | C3 | run-2 | 0.00 | - | 3 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
+      '| code-7 | C3 | run-2 | 0.00 | - | 3 | 0 | 0 | 0 | 0 | 0 | 0 | - | - | - | - | incomplete | correctness: fixes-required, spec-and-tests: unreadable, text-and-safety: missing |',
     ),
   );
 });

@@ -249,6 +249,22 @@ test('loop repairs a defect again when a later repair brings it back, and ends w
   assert.equal(fs.existsSync(round(4)), false);
   assert.deepEqual(readJson(path.join(round(3), 'meta.json')), meta);
 });
+test('loop refuses a fixer patch that undoes the fix step and writes no round', () => {
+  const { root, repo, cases, run, round } = devLoop();
+  // The fixer of round 1 sets v5 back to 0 after the fix patch of D1 and repairs nothing else, so the tree after the
+  // fix step is the reviewed tree of round 1.
+  const fixer = path.join(root, 'undoing-fixer.patch');
+  fs.writeFileSync(fixer, filePatch(repo, 'src/sync.mjs', SYNC_D1, SYNC_HEAD));
+  const before = readJson(path.join(round(1), 'meta.json'));
+  assert.throws(
+    () => prepare.prepareLoop({ run, cases, 'fixer-patch': fixer }, repo),
+    new RegExp(
+      `the fixer patch ${escapeRegExp(fixer)} undoes the fix patches of code-7/C1-low/run-1/round-1, so the tree is the reviewed tree of the round`,
+    ),
+  );
+  assert.equal(fs.existsSync(round(2)), false);
+  assert.deepEqual(readJson(path.join(round(1), 'meta.json')), before);
+});
 test('loop gives a defect that a later repair changed to the fixer, and ends when its fix repairs nothing', () => {
   const { root, repo, ws, cases, run, round, round1Answers } = devLoop();
   // The fixer of round 1 sets v5 to 50, so the fix patch of D1 applies neither forward nor in reverse.
@@ -422,6 +438,36 @@ test('extra-only rounds count the rounds whose previous fix step repaired valid 
   const table = tableAfter(renderReport(scores, { configs, reference: 'low' }), '### Code loops: dev');
   assert.ok(table.includes('| Extra-only rounds per run | 1.00 | 0.00 | 0.50 | 0.00 |'));
 });
+// Plan #216, R53: the fixer reply is the receipt of a repair by the fixer, so a finding without a reply is not repaired.
+test('a repair by the fixer counts only with the reply repaired, so a missing reply repairs nothing', () => {
+  const round = (seconds, tokens, mode, fixer, answers) => [seconds, tokens, mode, fixer, answers];
+  const loop = (config, answers) => ({
+    case: 'code-7',
+    config,
+    rounds: [round(50, 500, 'full', 10, answers), round(20, 200, 'delta', 0, [])],
+  });
+  const fixture = gridFixture({ 'code-7': { split: 'dev', known: ['D1', 'D2'] } }, [
+    loop('low', ['D1', 'valid']),
+    loop('low-fast', ['D1', 'valid']),
+    loop('high', ['valid']),
+  ]);
+  const meta = (config) => fixture.metas[`code-7/C1-${config}/run-1/round-1`];
+  // The fix patch of D1 did not apply, so the fixer got the finding of D1 (#1) with the valid extra (#2).
+  for (const config of ['low', 'low-fast']) meta(config).fixedByFixer = ['D1'];
+  // low: the fixer replied for the valid extra only, so it repaired the extra and not D1: only the extra caused
+  // round 2. low-fast keeps the reply repaired for both findings, so D1 caused round 2.
+  meta('low').fixer.replies = { 'code-7/C1-low/run-1/round-1/full#2': 'repaired' };
+  // high: the fixer gave no reply, so it repaired nothing, and the valid extra caused no round.
+  delete meta('high').fixer.replies;
+  assert.deepEqual(
+    scoreRuns(fixture).runs.map((run) => [run.arm, run.extraOnlyRounds, run.finalFound]),
+    [
+      ['C1-high', 0, []],
+      ['C1-low', 1, []],
+      ['C1-low-fast', 0, ['D1']],
+    ],
+  );
+});
 test('each assistant message keeps the effort that was active at it, so a review at another effort is invalid', () => {
   const config = CONFIGS['xhigh-fast'];
   const effort = (second, thinkingLevel) => ({
@@ -439,11 +485,13 @@ test('each assistant message keeps the effort that was active at it, so a review
   const switched = jsonl([...head, effort(2, 'low'), reply(5), effort(6, 'xhigh'), reply(9)]);
   // The changes before the first assistant message are setup: every message runs at xhigh.
   const setup = jsonl([...head, effort(2, 'xhigh'), reply(5), reply(9)]);
-  assert.deepEqual(score.transcriptFacts(switched, 'switched.jsonl').messages, [
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(switched, 'switched.jsonl')).messages, [
     { model: MODEL, effort: 'low', servedTier: 'priority' },
     { model: MODEL, effort: 'xhigh', servedTier: 'priority' },
   ]);
-  const setupEfforts = score.transcriptFacts(setup, 'setup.jsonl').messages.map((message) => message.effort);
+  const setupEfforts = score
+    .transcriptFacts(score.transcriptEntries(setup, 'setup.jsonl'))
+    .messages.map((message) => message.effort);
   assert.deepEqual(setupEfforts, ['xhigh', 'xhigh']);
   const fixture = judgedArm(CODE_KNOWN.slice(0, 1), [[], []], [transcriptEntry(switched), transcriptEntry(setup)]);
   for (const meta of Object.values(fixture.metas)) meta.config = config;

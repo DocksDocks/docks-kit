@@ -915,7 +915,7 @@ test('a read of a missing path with an error result counts as a missing read and
     ['read', { path: root }],
   ];
   const text = toolTranscript(SCOPE_CASE, 5, transcriptCalls, undefined, { results: { 'call-1': {} }, isError: true });
-  assert.deepEqual(score.transcriptFacts(text, 'missing.jsonl').toolCalls, [
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(text, 'missing.jsonl')).toolCalls, [
     { name: 'read', path: missing, error: true },
     { name: 'read', path: root },
   ]);
@@ -962,13 +962,14 @@ test('probe gives the manager a prompt, and transcripts records the served tier 
   // One transcript per dispatch; the manager is served at the priority tier.
   const transcript = (file, setting) => {
     const [provider, model] = setting.model.split('/');
-    const [, , ...task] = readText(file).split('\n');
+    const [head, , ...task] = readText(file).split('\n');
     const message = { role: 'user', content: [{ type: 'text', text: task.join('\n') }] };
     return jsonl([
       sessionRecord({ cwd: LIVE }),
       { type: 'model_change', timestamp: isoAt(0), model: setting.model },
       { type: 'thinking_level_change', timestamp: isoAt(0), thinkingLevel: setting.effort },
       { type: 'service_tier_change', timestamp: isoAt(0), serviceTier: { openai: setting.tier } },
+      { type: 'session_init', timestamp: isoAt(0), agent: head.replace(/^agent: /, '') },
       { type: 'message', timestamp: isoAt(0), message },
       assistantLine(5, provider, model, setting.tier, { input: 90, output: 10 }),
     ]);

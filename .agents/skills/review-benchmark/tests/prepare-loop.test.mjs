@@ -166,10 +166,10 @@ import {
 //   folder.
 // - scoreRuns: a round r >= 2 is extra-only when the fix step after round r - 1 repaired valid extras and no known
 //   defect. The fixer repaired the valid extras when it got them, the round has no `fixerChangedNothing`, and at least
-//   one of them has no `not present` in `fixer.replies`. A known defect was repaired when a fix in `fix.fixes` is not
+//   one of them has `repaired` in `fixer.replies`. A known defect was repaired when a fix in `fix.fixes` is not
 //   `pulled`, not in `fixAlreadyApplied`, and, when it is in `fixedByFixer`, repaired by the fixer: the round has no
-//   `fixerChangedNothing`, and a finding of round r - 1 that matches the defect has no `not present` in
-//   `fixer.replies`.
+//   `fixerChangedNothing`, and a finding of round r - 1 that matches the defect has `repaired` in `fixer.replies`. A
+//   finding without a reply counts as not repaired (plan #216).
 // - transcriptsCommand: the fixer entry of a round also gives `fixer.replies`: each finding id of a line
 //   `<id>: repaired` or `<id>: not present` (a list marker and backticks allowed, any case) in the strings of the
 //   arguments of the last `yield` call of the fixer transcript, or without such a call, of the text of the last
@@ -450,6 +450,19 @@ test('loop writes one fixer prompt for all valid extras of a round and takes an 
   assert.equal(fs.existsSync(path.join(round(2), 'rejection.md')), false);
   assert.deepEqual(fs.readdirSync(path.join(round(2), 'prompts')), ['delta.txt']);
 });
+test('loop --fixer-patch drops the recorded fixer entry and the fixer prompt of the round', () => {
+  const { repo, ws, cases, run, round, fixerPatch } = devLoop();
+  assert.throws(() => prepare.prepareLoop({ run, cases }, repo), /give their repair with --fixer-patch/);
+  // `transcripts` recorded a fixer of round 1 before the operator gave a repair by hand.
+  const metaFile = path.join(round(1), 'meta.json');
+  const fixer = { seconds: 20, tokens: 100, agents: { 'fixer-1': { seconds: 20, tokens: 100 } } };
+  put(round(1), 'meta.json', { ...readJson(metaFile), fixer });
+  assert.equal(prepare.prepareLoop({ run, cases, 'fixer-patch': fixerPatch }, repo), round(2));
+  // The hand repair has no fixer, and no prompt is left for `names` and `transcripts`.
+  assert.equal(readJson(metaFile).fixer, undefined);
+  const fixerPrompt = path.join('code-7', 'C1-low', 'run-1', 'round-1', 'fixer', 'fixer-1.txt');
+  assert.ok(!namesCommand(ws).some((entry) => entry.prompt === fixerPrompt));
+});
 test('loop counts the fixes of earlier rounds for fix_after and ends after a round without open findings', () => {
   const { repo, ws, cases, run, round, round1Answers, fixerPatch } = devLoop();
   prepare.prepareLoop({ run, cases, 'fixer-patch': fixerPatch }, repo);
@@ -728,6 +741,7 @@ test('round folders get dispatch names of their own, and names and transcripts w
       { type: 'model_change', timestamp: isoAt(0), model: MODEL },
       { type: 'thinking_level_change', timestamp: isoAt(0), thinkingLevel: 'low' },
       { type: 'service_tier_change', timestamp: isoAt(0), serviceTier: { openai: 'default' } },
+      { type: 'session_init', timestamp: isoAt(0), agent: 'review-bench-candidate-code-low' },
       { type: 'message', timestamp: isoAt(0), message: taskMessage(path.join(ws, 'code-7')) },
       assistantLine(seconds, 'openai-codex', 'gpt-6.1-sol', 'default', { input, output: 10 }),
     ]);
