@@ -654,13 +654,22 @@ A yolo run uses the timing and worktree rules in Yolo runs instead.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
-When the lookup fails, stop. The check passes when `gh issue develop <n> --list
---repo <owner/repo>` lists the branch, the branch differs from the default
-branch, and `git remote get-url origin` names `<owner/repo>`. Run it for every
-branch that a run selects: here, in Linked branch timing, when a run adopts a
-plan and reuses a listed branch or the head branch of an open pull request,
-and right before each push, for the current branch. When it fails, push
-nothing, keep the commits local, and block the plan with that reason.
+When a lookup fails, stop. The check passes when all of these hold:
+
+- The branch is the plan's branch: `gh issue develop <n> --list --repo
+  <owner/repo>` lists it, or, after the pull request opens and GitHub drops
+  that link, it is the `headRefName` of the open pull request that
+  `gh issue view <n> --repo <owner/repo> --json closedByPullRequestsReferences`
+  names.
+- The branch differs from the default branch.
+- Each URL that `git remote get-url --push --all origin` prints names
+  `<owner/repo>`, because a push goes to every push URL of the remote.
+
+Run it for every branch that a run selects: here, in Linked branch timing,
+when a run adopts a plan and reuses a listed branch or the head branch of an
+open pull request, and right before each push, for the current branch. When it
+fails, push nothing, keep the commits local, and block the plan with that
+reason.
 
 Push only with `git push -u origin HEAD` from the checked branch. The explicit
 `HEAD` refspec sends the current branch to the branch of the same name on

@@ -64,8 +64,9 @@ contain:
 
 1. The canonical plan issue URL (`<owner>/<repo>#<n>`), the union of its Steps
    `Files` cells, and the Steps `Id` values the executor must complete. The
-   executor reads the record with `docks-kit plan show <issue> --body`, checks
-   that the URL on its first line names that repository, and stops otherwise;
+   executor first runs `docks-kit plan show <n>` and checks that the issue URL
+   at the end of its first output line names `<owner>/<repo>`, and stops
+   otherwise. Then it reads the record with `docks-kit plan show <n> --body`;
    do not inline a second copy.
 2. An executor preamble: *before the first edit, read the root `AGENTS.md` and
    every `AGENTS.md` in a directory on the path to each file in the Steps
