@@ -670,8 +670,10 @@ starts with `https://github.com/<owner/repo>/pull/`. Read it with
 Its base must be the default branch, and its head repository must be
 `<owner/repo>`. When the issue still lists a branch, the head must be that
 branch. When more than one open pull request qualifies, stop and report them.
-Carry that pull request URL, not a bare number, through recovery and landing.
-A branch or a pull request of another repository is not the plan's.
+When a linked open pull request of `<owner/repo>` has another base, stop and
+report its branch and base; never create a branch then. Carry that pull
+request URL, not a bare number, through recovery and landing. A branch or a
+pull request of another repository is not the plan's.
 
 Branch check: read the default branch with
 `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
@@ -730,12 +732,13 @@ hooks off, such as `HUSKY=0`. When a hook fails on a commit or a push:
    another worktree to avoid them. A new worktree can run other hooks than the
    checkout (Worktree hooks).
 3. Otherwise, run `git fetch origin <default>`. Then run the hook's check on
-   `origin/<default>` in a clean worktree. When it fails the same way there, it
-   is a baseline failure. Record the hook, the check, and both results in
-   Verification Results. Block the plan with that reason. Then ask the user how
-   to continue. A yolo run uses the hook row in Yolo runs instead of the
-   question.
-4. When the check passes on `origin/<default>`, this plan causes the failure.
+   the fetched commit, `FETCH_HEAD`, in a clean worktree. When it fails the
+   same way there, it is a baseline failure. When the fetch fails, the
+   baseline is unknown; record that, and continue as for a baseline failure.
+   Record the hook, the check, and both results in Verification Results.
+   Block the plan with that reason. Then ask the user how to continue. A yolo
+   run uses the hook row in Yolo runs instead of the question.
+4. When the check passes on `FETCH_HEAD`, this plan causes the failure.
    Fix it as item 1 says.
 
 Work preservation (above) needs a commit and a push of the plan's own changes
@@ -744,9 +747,9 @@ commit or push, diagnose it with items 1 to 4, but change no status there.
 Fix a failure that this plan causes. Otherwise keep the work where it is,
 record the hook, the check, and the results, and list the branch under Kept
 resources as `not pushed`. Then return to the rule that called Work
-preservation. That rule records its step state. A block then blocks the plan
-and asks as item 3 says; a stall question or an ended grant keeps the status
-and reports the hook.
+preservation. That rule records its step state. It then asks about the hook
+as item 3 says (a yolo run uses the hook row), and blocks the plan or keeps
+the status as that rule says.
 
 A step after the landing merge, such as a release, can also meet a failing
 hook. Then leave that step `planned`, and keep the plan status. Record the
@@ -960,9 +963,12 @@ and stacks to stop, the worktree to remove, the local branch to delete with
 `git branch -d <branch>`, and each remote non-production resource to clean up.
 A `Merge now` answer confirms that teardown, including the branch delete.
 Without `Merge now`, leave the issue and the pull request open, and run
-Teardown's exit without a merge. Right before the merge, confirm with
+Teardown's exit without a merge. Right before the merge, read the default
+branch again as the Branch check does, and confirm with
 `gh pr view <url> --json headRefOid,baseRefName` that the head is the reviewed
-head and the base is the default branch. Merge with
+head and the base is that default branch, the one that the merge question
+named. When the default branch changed, ask the merge question again. Merge
+with
 `gh pr merge <pr> --repo <owner/repo> --match-head-commit <reviewed-head-sha>`
 and the merge-method flag that the repository allows. A prior plan approval
 never authorizes a merge.
