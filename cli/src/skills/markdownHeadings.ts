@@ -8,13 +8,22 @@
  * for a caller that does not run under Bun.
  */
 
-/** The number of real headings whose text is `title`, for each of `texts`. */
+/**
+ * The number of real headings whose text is `title`, for each of `texts`. The
+ * parser passes inline HTML through as raw text, so HTML comments and tags are
+ * removed, and runs of whitespace become one space, before the comparison.
+ */
 export function countHeadings(texts: ReadonlyArray<string>, title: string): Array<number> {
   return texts.map((text) => {
     let count = 0;
     Bun.markdown.render(text, {
       heading: (children) => {
-        if (children.trim() === title) count += 1;
+        const plain = children
+          .replace(/<!--[\s\S]*?-->/g, "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (plain === title) count += 1;
         return children;
       },
     });

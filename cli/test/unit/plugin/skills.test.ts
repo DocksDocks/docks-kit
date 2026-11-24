@@ -239,6 +239,10 @@ describe("kit plugin skills: report section and shared copies", () => {
     { shape: "a CRLF", stale: "## Report a problem with this skill\r" },
     { shape: "a blockquote", stale: "> ## Report a problem with this skill" },
     { shape: "a list item", stale: "- ## Report a problem with this skill" },
+    {
+      shape: "an inline-comment",
+      stale: "## Report a problem with this skill <!-- draft -->",
+    },
   ]) {
     it(`fails ${shape} stale report heading before the canonical one`, () => {
       const root = copyFixture();
@@ -251,6 +255,27 @@ describe("kit plugin skills: report section and shared copies", () => {
       expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
     });
   }
+
+  it("fails a stale report section that a `<!--` in a YAML literal would hide", () => {
+    const root = copyFixture();
+    edit(
+      root,
+      skillFile("zoom-out"),
+      (text) =>
+        `${text
+          .replace("---\n", "---\nnote: |\n  <!-- draft\n")
+          .replace("Leave out secrets", "Leave out passwords")}\n-->\n\n${config.reportSection}`,
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "has 2 Report sections");
+  });
+
+  it("fails a canonical report section inside a block quote", () => {
+    const root = copyFixture();
+    edit(root, skillFile("zoom-out"), (text) =>
+      text.replace("## Report a problem with this skill", "> ## Report a problem with this skill"),
+    );
+    expectFailure(checkReportSection(root), skillFile("zoom-out"), "missing the Report section");
+  });
 
   for (const { place, before, after, detail } of [
     { place: "inside an unclosed code fence", before: "```text\n", after: "", detail: HIDDEN },

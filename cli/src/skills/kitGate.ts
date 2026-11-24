@@ -229,16 +229,24 @@ function headingCounts(texts: ReadonlyArray<string>, title: string): Array<numbe
   return counts;
 }
 
+/** The Markdown body of a SKILL.md text: the text after its YAML frontmatter, or the whole text when it has none. */
+function markdownBody(text: string): string {
+  const extracted = extractFrontmatter(text);
+  return extracted.ok ? extracted.body : text;
+}
+
 /**
  * Each skill ends with the canonical report section, byte for byte, and that
  * section is the only Report section; the `reportSection` text of config.json is
  * the one source of the section. The bytes are compared as read, so line endings
- * and the final newline count. A CommonMark parser (Bun's `Bun.markdown`) finds
- * the real Report headings, so a heading line in a code block, an HTML block, or
- * a paragraph does not count, and one in a list item or a block quote does. The
- * whole file must have exactly one real Report heading, and the text before the
- * canonical section must have none. When the file ends with the canonical bytes
- * but has no real Report heading, a block before the section hides it.
+ * and the final newline count. The section starts at a line boundary. A
+ * CommonMark parser (Bun's `Bun.markdown`) finds the real Report headings in the
+ * Markdown body, after the YAML frontmatter, so a heading line in a code block,
+ * an HTML block, or a paragraph does not count, and one in a list item or a
+ * block quote does. The whole body must have exactly one real Report heading,
+ * and the body text before the canonical section must have none. When the file
+ * ends with the canonical bytes but has no real Report heading, a block before
+ * the section hides it.
  */
 export function checkReportSection(
   repoRoot: string,
@@ -255,11 +263,15 @@ export function checkReportSection(
   for (const file of findSkillFiles(skillsDir(repoRoot))) {
     const bytes = readFileSync(file);
     const start = bytes.length - canonical.length;
-    if (start >= 0 && bytes.subarray(start).equals(canonical)) {
+    if (
+      start >= 0 &&
+      (start === 0 || bytes[start - 1] === 0x0a) &&
+      bytes.subarray(start).equals(canonical)
+    ) {
       ended.push({
         file,
-        text: bytes.toString("utf8"),
-        before: bytes.subarray(0, start).toString("utf8"),
+        text: markdownBody(bytes.toString("utf8")),
+        before: markdownBody(bytes.subarray(0, start).toString("utf8")),
       });
     } else {
       failures.push(
