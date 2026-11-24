@@ -357,8 +357,10 @@ type SelectionField = {
 };
 
 // The object types of each abstract type that a query names in an inline fragment, as GitHub's schema lists them.
+// `Node` lists only the actor types, the only `Node` fragment that the helper reads.
 const ABSTRACT_TYPES: Readonly<Record<string, ReadonlyArray<string>>> = {
   Actor: ["Bot", "EnterpriseUserAccount", "Mannequin", "Organization", "User"],
+  Node: ["Bot", "EnterpriseUserAccount", "Mannequin", "Organization", "User"],
 };
 
 // The fields that a selection set names at its own level, in query order. Each field has its response key (its alias,

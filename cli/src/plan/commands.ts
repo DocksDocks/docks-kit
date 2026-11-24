@@ -20,7 +20,6 @@ import {
   issueConnectionSelection,
   issueSummaries,
   linkSubIssue,
-  ownedPreWriteIssue,
   preWriteIssue,
   refuseChangedIssue,
   parseJson,
@@ -1080,24 +1079,13 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   command: string,
 ) {
   const { issue, login, viewerId, labelIds } = plan;
-  // The settled read decided the reopen, so its close and its phase labels must still hold. The label read also reads
-  // the latest close, which the pre-write read cannot show.
   const phases = issue.labels.map((label) => token(label.name)).filter(isPhaseLabel);
-  const labelRead = (yield* readSnapshot(issue.number, { closure: true })).issue;
-  if (
-    labelRead.closedEventAt !== issue.closedEventAt ||
-    describeCloser(labelRead.closer) !== describeCloser(issue.closer) ||
-    !sameSet(labelRead.labels.map((label) => token(label.name)).filter(isPhaseLabel), phases)
-  )
-    return yield* refuse(
-      `plan #${issue.number} changed during the settle wait; run ${command} again`,
-    );
   const restoresPhase = phases.length === 0;
   const phaseLabelId = restoresPhase
     ? (labelIds?.get("plan:ongoing") ?? (yield* createdLabelId("plan:ongoing")))
     : undefined;
-  // The read right before the reopen: the observed close, the body, the base label that the open plan needs, the phase
-  // labels of the label read, and the owners. Ownership follows this read: an owner that appeared is refused by name.
+  // The pre-write read: the observed close, the body, the base label that the open plan needs, the settled phase
+  // labels, and the owners. Ownership follows this read: an owner that appeared is refused by name.
   const before = yield* preWriteIssue(issue.number);
   yield* attempt(() =>
     refuseStuck({
@@ -1107,6 +1095,25 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
     }),
   );
   const { id, assignees } = yield* refuseChangedIssue(issue, before, { phases, base: true });
+  // The last read before the reopen, with GraphQL: the close event that the pre-write read cannot show must still be
+  // the settled one, and the state, body, labels, and owners must still be those of the pre-write read.
+  const settled = (yield* readSnapshot(issue.number, { closure: true })).issue;
+  if (
+    settled.closedEventAt !== issue.closedEventAt ||
+    describeCloser(settled.closer) !== describeCloser(issue.closer) ||
+    settled.state !== before.state ||
+    settled.stateReason !== (before.stateReason ?? null) ||
+    settled.body !== before.body ||
+    !sameSet(settled.labels.map((label) => token(label.name)).filter(isPhaseLabel), phases) ||
+    !settled.labels.some((label) => token(label.name) === "plan") ||
+    !sameSet(
+      settled.assignees.map((owner) => owner.login),
+      assignees.map((owner) => String(owner.login)),
+    )
+  )
+    return yield* refuse(
+      `plan #${issue.number} changed during the settle wait; run ${command} again`,
+    );
   const claims = assignees.length === 0;
   const stored = `{... on Issue{state stateReason assignees(first:100){nodes{id}}}}`;
   const write: ReadonlyArray<MutationCall> = [
@@ -1186,14 +1193,9 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   // The status comes from a fresh read, which must show an open plan with exactly one phase label.
   const current = (yield* readSnapshot(issue.number)).issue;
   const status = statusFromIssueOf(current);
-  yield* attempt(() => refuseStuck(current));
-  if (isClosed(current))
+  if (isClosed(current) || !PLAN_STATUSES.has(status))
     return yield* refuse(
-      `plan #${issue.number} closed again after the reopen; run ${command} again`,
-    );
-  if (!PLAN_STATUSES.has(status))
-    return yield* refuse(
-      `plan issue state differs after reopen; run status ${issue.number} ongoing to repair the phase labels`,
+      `plan #${issue.number} ${isClosed(current) ? "closed again after the reopen" : `reopened with phase labels ${phaseList(current.labels)}`}; no comment was posted; ${reopenRecovery(current, login, command, comment)}`,
     );
   yield* refuseChangedIssue(issue, yield* preWriteIssue(issue.number), {
     state: "OPEN",
@@ -1213,24 +1215,27 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
   yield* printLine(`plan #${issue.number} reopened: ${status}`);
 });
 
-// The next step after a reopen that stopped before its comment landed, from what the plan reads now: on a closed plan
-// the rerun; on a plan with another owner, the ownership to settle by hand; on a plan without an owner or without exactly
-// one phase label, `status`, which claims an unassigned plan and sets one phase label; then the comment, which only the
-// single owner can post as a trusted record.
+// The next step after a reopen that stopped before its comment landed, from what the plan reads now: a plan that GitHub
+// left stuck goes to GitHub Support; a closed plan gets the rerun; on an open plan, each repair that blocks the comment,
+// in order: another owner to settle by hand, the base `plan` label, and `status`, which claims an unassigned plan and
+// sets one phase label; then the comment, which only the single owner can post as a trusted record.
 function reopenRecovery(
   now: PlanIssue,
   login: string | undefined,
   command: string,
   comment: string,
 ): string {
+  if (stuckClosed(now))
+    return `GitHub left plan #${now.number} closed with reason REOPENED; ask GitHub Support to repair it`;
   if (isClosed(now)) return `run ${command} again`;
-  const post = `post this comment as the plan owner: ${comment}`;
+  const repairs: Array<string> = [];
   const other = now.assignees.find((owner) => owner.login !== login);
-  if (other)
-    return `plan #${now.number} has another owner (${other.login}); settle the ownership by hand, then ${post}`;
-  return now.assignees.length === 1 && PLAN_STATUSES.has(statusFromIssueOf(now))
-    ? post
-    : `run status ${now.number} ongoing to repair the phase label and the claim, then ${post}`;
+  if (other) repairs.push(`settle the ownership with ${other.login} by hand`);
+  if (!now.labels.some((label) => token(label.name) === "plan"))
+    repairs.push(`add the plan label with \`gh issue edit ${now.number} --add-label plan\``);
+  if (now.assignees.length === 0 || !PLAN_STATUSES.has(statusFromIssueOf(now)))
+    repairs.push(`run status ${now.number} ongoing to repair the phase label and the claim`);
+  return [...repairs, `post this comment as the plan owner: ${comment}`].join(", then ");
 }
 
 const sameSet = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean =>

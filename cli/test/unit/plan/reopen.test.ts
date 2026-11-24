@@ -39,7 +39,7 @@ function settleRefusal(number: number): string {
 }
 
 function closedAgainRefusal(number: number): string {
-  return `plan #${number} closed again after the reopen; run reopen again`;
+  return `plan #${number} closed again after the reopen; no comment was posted; run reopen again`;
 }
 
 function childPlanRefusal(number: number): string {
@@ -474,7 +474,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       context.schedule(
         plan.number,
         { afterReads: 0, ...closedBy(plan.closer) },
-        { afterReads: 3, stateReason: "NOT_PLANNED" },
+        { afterReads: 2, stateReason: "NOT_PLANNED" },
       );
       refuse(reopen(context, plan), "plan issue changed remotely; re-read and retry");
       expect(context.issue(plan.number).state).toBe("CLOSED");
@@ -515,7 +515,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       refuse(
         reopen(context, plan),
-        `plan #${plan.number} reopened, but plan #${plan.number} is owned by other-agent; no comment was posted; plan #${plan.number} has another owner (other-agent); settle the ownership by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+        `plan #${plan.number} reopened, but plan #${plan.number} is owned by other-agent; no comment was posted; settle the ownership with other-agent by hand, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
       );
       expect(context.writes().length, "the reopen only").toBe(1);
     },

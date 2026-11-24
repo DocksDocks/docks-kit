@@ -575,22 +575,6 @@ export const preWriteIssue = Effect.fn("plan.preWriteIssue")(function* (number: 
   return yield* decodePreWrite(yield* parseJson(output, "gh issue view"));
 });
 
-/** The pre-write read before a state change that a rerun cannot take back: a later owner is refused. */
-export const ownedPreWriteIssue = Effect.fn("plan.ownedPreWriteIssue")(function* (
-  number: number,
-  login: string | undefined,
-) {
-  const current = yield* preWriteIssue(number);
-  if (current.assignees.some((owner) => !Predicate.isString(owner.login) || !owner.login))
-    return yield* new GhError({ message: "gh issue view returned malformed plan issue" });
-  const foreign = current.assignees.find((owner) => owner.login !== login);
-  if (foreign)
-    return yield* new PlanRefusal({
-      message: `plan #${number} is owned by ${String(foreign.login)}`,
-    });
-  return current;
-});
-
 const decodeCreatedLabel = malformed(LabelWithId, "repository labels");
 
 /** A status write can target a phase label that the repository lacks: create it as `new` does, then read its id. */
@@ -677,7 +661,7 @@ const decodeGraphqlPreWrite = malformed(
     body: Schema.String,
     state: Schema.String,
     stateReason: Schema.NullOr(Schema.String),
-    assignees: Schema.Struct({
+    assignedActors: Schema.Struct({
       nodes: Schema.Array(Schema.Struct({ id: Schema.NonEmptyString, login: Schema.String })),
     }),
   }),
@@ -686,13 +670,14 @@ const decodeGraphqlPreWrite = malformed(
 
 /**
  * Every label name of the issue, with the pre-write read to compare. A full label page of `gh issue view` may hide
- * more labels, so the issue is read again with GraphQL: its body, state, close reason, owners, and first label page
- * come from that one read, the later label pages follow it, and that read replaces the `gh issue view` read.
+ * more labels, so the issue is read again with GraphQL: its body, state, close reason, owners (users and bots), and
+ * first label page come from that one read, the later label pages follow it, and that read replaces the
+ * `gh issue view` read.
  */
 const currentIssue = Effect.fn("plan.currentIssue")(function* (number: number, current: PreWrite) {
   if (current.labels.length < GH_VIEW_LABEL_LIMIT)
     return { names: current.labels.map((label) => label.name), latest: current };
-  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id body state stateReason assignees(first:100){nodes{id login}} ${issueConnectionSelection("labels", "name")}}}}`;
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id body state stateReason assignedActors(first:100){nodes{... on Actor{login} ... on Node{id}}} ${issueConnectionSelection("labels", "name")}}}}`;
   const raw = field(field(yield* graphql(query, { number }), "repository"), "issue");
   const read = yield* decodeGraphqlPreWrite(raw);
   const names = (yield* decodeStoredLabels(
@@ -704,7 +689,7 @@ const currentIssue = Effect.fn("plan.currentIssue")(function* (number: number, c
     state: read.state,
     stateReason: read.stateReason,
     labels: names.map((name) => ({ name })),
-    assignees: read.assignees.nodes,
+    assignees: read.assignedActors.nodes,
   };
   return { names, latest };
 });

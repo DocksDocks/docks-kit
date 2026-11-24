@@ -155,12 +155,12 @@ function phaseLabels(context: PlanCliContext, number: number): Array<string> {
     .labels.filter((label) => /^plan:(?:drafting|planned|ongoing|blocked)$/i.test(label));
 }
 
-function repairHint(number: number): string {
-  return `plan issue state differs after reopen; run status ${number} ongoing to repair the phase labels`;
+function repairHint(number: number, child: number, phases: string): string {
+  return `plan #${number} reopened with phase labels ${phases}; no comment was posted; run status ${number} ongoing to repair the phase label and the claim, then post this comment as the plan owner: ${reopenedComment(number, child)}`;
 }
 
 function closedAgainRefusal(number: number): string {
-  return `plan #${number} closed again after the reopen; run archive again`;
+  return `plan #${number} closed again after the reopen; no comment was posted; run archive again`;
 }
 
 describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
@@ -881,7 +881,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       });
       const writes = context.writes().length;
       const result = archive(context, String(parent));
-      refuse(result, `plan #${parent} changed during the settle wait; run archive again`);
+      refuse(result, "plan issue changed remotely; re-read and retry");
       expect(context.issue(parent).state, "the plan stays closed").toBe("CLOSED");
       expect(context.writes().length, "no reopen and no comment").toBe(writes);
     },
@@ -901,7 +901,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
         state.beforeMutationOnce = { issue: parent, labels: ["plan", "plan:blocked"] };
       });
       const result = archive(context, String(parent));
-      refuse(result, repairHint(parent));
+      refuse(result, repairHint(parent, child, "plan:blocked, plan:ongoing"));
       expect(result.stdout, "no reopened status is reported").toBe("");
       expect(phaseLabels(context, parent), "no label is lost").toStrictEqual([
         "plan:blocked",
@@ -953,7 +953,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
         };
       });
       const result = archive(context, String(parent));
-      refuse(result, repairHint(parent));
+      refuse(result, repairHint(parent, child, "plan:ongoing, plan:blocked"));
       expect(result.stdout, "no reopened status is reported").toBe("");
     },
     SPAWN_TIMEOUT_MS,
