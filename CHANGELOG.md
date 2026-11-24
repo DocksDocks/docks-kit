@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.3: skill examples and recipes follow their own rules
+
+### Fixed
+
+- code-guardrails: an install, a download, or any command that can reach the
+  network waits for the user's approval through `ask`, and the turn ends
+  without it. Verify runs the project's own lint command unchanged (after the
+  approval when it can reach the network) and never substitutes another
+  executable, version, config, or directory.
+- code-guardrails: a request about repeated values maps values only and
+  changes no lint config. A constant is reused only when it has the same
+  meaning.
+- code-guardrails: the scattered-values scan uses `git grep --untracked`,
+  skips ignored files, counts distinct files, and groups quote styles and
+  Rust literal suffixes.
+- code-guardrails: the GOOD examples pass the recommended magic-number rules
+  and keep their behavior. The Bash examples validate their numeric
+  arguments before arithmetic.
+- code-guardrails: the Python recipe edits the one Ruff config that applies to
+  the whole lint scope, and asks the user in every other case, also before it
+  creates a first config. It reports every ignore that can turn `PLR2004`
+  off and leaves type checkers alone. The Oxlint, SwiftLint `only_rules`, and
+  Rust workspace recipes add only missing rules.
+- code-guardrails: an approval covers only the approved action. A first config
+  is proposed only for the file that the Verify command loads. The TypeScript
+  recipe gives the user the pinned `install-anti-slop` command and does not
+  run it.
+- code-guardrails: the scattered-values scan keeps its matches in memory and
+  writes no temporary file of its own.
+- report-skill-issue: every gh command names the host `github.com`, and the
+  account is checked again right before filing. Without gh, the skill gives a
+  browser search link and says when the duplicate search did not run.
+- code-clarity routes constant mapping to code-guardrails at step 2. The
+  refactor planner files `Scattered Values` findings as `duplicate`.
+- ci-speed: the `parity.sh` proof reads only primary error records, checks
+  that its filters succeed, and the concurrency key groups `pull_request`
+  runs only (DocksDocks/docks-kit#215).
+
 ## 2026-11-24 - docks-kit 0.29.2: plan runs keep their repository, branch, and work
 
 ### Fixed

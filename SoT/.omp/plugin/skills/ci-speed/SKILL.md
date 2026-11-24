@@ -4,8 +4,8 @@ description: "Use when CI or test runs are slow or costly: GitHub Actions queue 
 user-invocable: false
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-20"
-  content_hash: "13086fba270906becace4ba14efb9f9ef9a675177ccb0bdf4d204e8053a9ace9"
+  updated: "2026-11-24"
+  content_hash: "cc90add0ed68ba7a3a94df39bc5701e8ba627c021ea9990d3333dbbd18edef3b"
 ---
 
 # CI Speed
@@ -73,7 +73,7 @@ A faster job off the critical path saves billed minutes only. It does not cut th
 | Measured bottleneck | First lever | Proof | Reference |
 |---|---|---|---|
 | Queue time | Check the plan concurrency limit and the runner label. Then try a third-party runner. | Queue median and p90 per label fall | [references/measure.md](references/measure.md), [references/blacksmith.md](references/blacksmith.md) |
-| Duplicate or stale runs | Limit `push` to the default branch. Cancel stale pull request runs with a `concurrency` group keyed on the pull request number, and give every other run its own group (`github.run_id`). | One run per pull request head; every default-branch run finishes | [references/github-actions.md](references/github-actions.md) |
+| Duplicate or stale runs | Limit `push` to the default branch. Cancel stale pull request runs with a `concurrency` group keyed on the pull request number for `pull_request` runs only, and give every other run its own group (`github.run_id`). | One run per pull request head; every default-branch run finishes | [references/github-actions.md](references/github-actions.md) |
 | Serial single job | Split independent checks into parallel jobs or in-job parallel steps | Critical path falls; billed minutes reported | [references/github-actions.md](references/github-actions.md) |
 | Checkout | Keep `fetch-depth: 1`. If the job needs history, use `fetch-depth: 0` with `filter: blob:none`. | Checkout step falls; history commands still work | [references/github-actions.md](references/github-actions.md) |
 | Install | Frozen install of only the packages that the job needs | Install step falls; lockfile unchanged | [references/js-toolchain.md](references/js-toolchain.md) |
