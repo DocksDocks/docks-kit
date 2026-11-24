@@ -1,10 +1,11 @@
 # Command guards
 
 The kit ships one destructive-command policy to omp.
-The short rule for agents: **to remove, use the trash**. Run
-`gio trash -- <path>` on Linux or `trash <path>` on macOS. Remove a
-temporary file or directory with `docks-kit scratch remove <path>` instead.
-To remove a path from the git index, run `git rm -- <path>`.
+The short rule for agents: **a plain `rm` of a file is fine; a removal that can
+take a whole folder or the home folder is not**. Remove a folder with
+`gio trash -- <path>` on Linux or `trash <path>` on macOS, and a temporary
+folder with `docks-kit scratch remove <path>`. To remove a path from the git
+index, run `git rm -- <path>`.
 
 The policy keeps only deny rules. Where omp's critical-command check acts,
 the form is denied. omp also denies a `$` or a backtick after `git push`,
@@ -16,7 +17,8 @@ allow. Under omp's default `tools.approvalMode: yolo`, omp runs every
 command that no deny matches without a question, in the main session and in
 subagents. This includes any `rm` that omp does not deny, `git clean`,
 `git reset --hard`, a force push that no deny matches, and a git command
-that skips the repository's hooks. A prompt rule that the user adds to
+that skips the repository's hooks. The trigger rules below still interrupt
+some of these, such as a recursive `rm`. A prompt rule that the user adds to
 `~/.omp/agent/config.yml` survives sync and still asks; a subagent rejects
 it. The kit omp plugin trigger rule `git-safety.md` forbids these options with
 `git push` and `git rm`: `-f`, a flag cluster that holds `f`, and a long
@@ -38,8 +40,8 @@ The policy sorts shell commands into two tiers.
 A prompt rule that the user adds asks a person in the main session, and a
 subagent rejects it.
 
-The omp `eval` tool stays unrestricted: `bash.patterns` does not gate a shell
-that `eval` starts.
+The deny list does not gate the omp `eval` tool: `bash.patterns` does not
+gate a shell that `eval` starts. The trigger rules apply to eval too.
 
 ## Tiers
 
@@ -59,7 +61,7 @@ that `eval` starts.
 | A `$` or a backtick anywhere after `git push` in the same command | deny, also after a shell keyword, a wrapper, or a path before `git`: see below |
 | A git command that skips the repository's hooks: see below | run |
 | `git rm -- <path>`, `git worktree remove -- <path>` | run |
-| `git worktree remove --force -- <path>` | run; the omp `file-removal.md` trigger rule fires on each `--force`, `-f`, or `--f` form and permits it once, after the commits are on the remote |
+| `git worktree remove --force -- <path>` | run; the `workspace-hygiene` skill allows it only for a worktree that the agent created |
 | `docks-kit scratch remove <path>` | run; the command removes only a path inside the scratch root, the system temporary directory, or `/var/tmp` |
 | Any other non-recursive `git rm` or `git worktree remove` | run |
 | `gio trash -- <path>` | run |
@@ -120,11 +122,17 @@ block them. The omp `git-safety.md` trigger rule forbids each hook skip.
    empty the trash.
 3. To remove a path from the git index, run `git rm -- <path>`. To remove a
    worktree, run `git worktree remove -- <path>`. When git refuses because the
-   worktree has changes, the agent may pass `--force` once, after each commit
-   is on the remote and `git status --porcelain` lists only generated files.
-   Never pass `--force` two times.
-4. Do not use `rm`. omp denies a recursive `rm`, `find -delete`,
-   `find -exec rm`, and `xargs rm`. It runs any other `rm` without a prompt.
+   worktree has changes, the agent may pass `--force` once for a worktree that
+   it created, after each commit is on the remote and `git status --porcelain`
+   lists only generated files. Never pass `--force` two times.
+4. A plain `rm`, `unlink`, or `shred` of a file runs. In the bash tool, omp
+   denies the listed recursive `rm` forms, `find -delete`, `find -exec rm`,
+   and `xargs rm` ("Gaps" lists what the deny list does not cover). The
+   `file-removal.md` trigger rule fires, in bash and in eval, on each
+   recursive or directory-mode `rm` (also an abbreviated long option), on
+   `--no-preserve-root`, and on a removal of `~`, `$HOME`, `${HOME}`, `/`,
+   `.`, `..`, a device under `/dev/` other than `/dev/null`, or every file of
+   one of them.
 5. For a recursive or bulk deletion, ask the user in the main session. A
    subagent lists the paths in its final report. The user runs a recursive
    deletion by hand.
@@ -159,9 +167,9 @@ command through `sh()`.
 
 | Rule | Scope | Correct form that the rule teaches |
 | --- | --- | --- |
-| `file-removal.md` | `tool:bash`, `tool:eval` | `scratch_remove` or `docks-kit scratch remove <path>` for a temporary path; `gio trash -- <path>` or `trash <path>` for another path; no `rm`, `unlink`, or `shred`, also after a `VAR=value` prefix; `git rm -- <path>`; for a folder, `git rm -- '<dir>/*'` or `git rm --cached -- '<dir>/*'`, because omp denies `git rm -r`; `git worktree remove -- <path>`, and `--force` only after the commit and status checks; for an ovnfs checkout that the agent opened, the removal in the ovnfs checkout row of the `workspace-hygiene` skill (the rule stays quiet on `rm` after a bare `ovnfs` or after `'ovnfs'` or `"ovnfs"`); no deletion through `eval` |
+| `file-removal.md` | `tool:bash`, `tool:eval` | a plain `rm`, `unlink`, or `shred` of a file, also after a `VAR=value` prefix or a wrapper; no recursive or directory-mode removal (`-r`, `-R`, `-d`, a flag cluster with one of them, `--recursive`, `--dir`, `--no-preserve-root`); no removal of `~`, `$HOME`, `${HOME}`, `/`, `.`, `..`, a device under `/dev/` other than `/dev/null`, or every file of one of them (`/*`, `~/*`, bare `*`); `scratch_remove` or `docks-kit scratch remove <path>` for a temporary folder; `gio trash -- <path>` or `trash <path>` for another folder; `git rm -- <path>`; for a folder, `git rm -- '<dir>/*'` or `git rm --cached -- '<dir>/*'`, because omp denies `git rm -r`; no `find -delete` or `find -exec rm`; no deletion through `eval` code. A worktree or an ovnfs checkout follows its row in the `workspace-hygiene` skill |
 | `git-safety.md` | `tool:bash`, `tool:eval` | no hook skip, also through an abbreviation such as `--no-veri`; no `-f`, `f` cluster, or `--f` long option with `git push` or `git rm` (`--follow-tags` is correct); no `+<ref>` with `git push` (`git push origin +<ref>` is a force push); no `git push --mirror` or `--prune`; a literal push ref; `git push` as its own command, not chained with `&&`, `\|\|`, or `;`; `git push -u origin HEAD`; `git push origin --delete <branch-a> <branch-b>`; `git branch -d <branch>`, not `-D` or `-d --force`; `git restore -- <path>`; an ask before `git clean` without `-n` or `--dry-run` before ` -- `, `git reset --hard`, `git checkout .`, `git restore .` (`git restore --staged .` only unstages and is correct), `git stash drop`, or `git stash clear`. The git global options `-C`, `-c`, `-p`, `-P`, and `--<option>` do not hide the subcommand. A word after ` -- ` is a path, not an option |
-| `temp-and-background.md` | `tool:bash`, `tool:eval` | `scratch_new` or `docks-kit scratch new <label>` instead of `/tmp`; a server or watcher only as a named bash service or an async job; no `nohup`, `setsid`, `disown`, `tmux`, or `screen`, also after a `VAR=value` prefix; no global install (`npm`, `bun`, `pnpm`, `yarn`, `pipx`, `cargo`, `go install`, `gem install`, `uv tool install`), scheduled job, or enabled service; no Docker cleanup of a resource that the agent did not create |
+| `temp-and-background.md` | `tool:bash`, `tool:eval` | a server or watcher only as a named bash service or an async job; a test suite in single-run mode; no `nohup`, `setsid`, `disown`, `tmux`, or `screen`, also after a `VAR=value` prefix; no global install (`npm`, `bun`, `pnpm`, `yarn`, `pipx`, `cargo`, `go install`, `gem install`, `uv tool install`), scheduled job, or enabled service; no Docker cleanup of a resource that the agent did not create. Paths under `/tmp` and `mktemp` are allowed; the `workspace-hygiene` skill prefers a scratch folder, which the kit cleans up |
 | `worktree-location.md` | `tool:bash`, `tool:eval` | a worktree only at the literal absolute path `<data>/agent-worktrees/<repository>/<name>`, with `agent-worktrees` as a whole directory name. The rule fires on each `git worktree add`, also at the correct path, because a condition cannot read `$XDG_DATA_HOME` or the home directory of the user. The retry after the reminder runs |
 | `literal-paths.md` | `tool:bash`, `tool:eval` | a literal absolute path; no `~` or `$HOME`; no `HOME` assignment |
 | `remote-cleanup.md` | `tool:bash`, `tool:eval` | a remote cleanup only on a non-production target; an `ask` immediately before a production cleanup, which must be rare. Remote means SSH, `rsync --delete` to a `host:` target, `rclone` (`delete` verbs, and `sync` to a `remote:` target), `gh` (`gh <noun> delete`, `gh <noun> <x>-delete`, and `gh api -X DELETE`), a remote `docker` or `podman` (also `docker -c <context>`), a database client (`DROP TABLE`, `DATABASE`, or `SCHEMA` in `psql`, `mysql`, `sqlite3`, or `mongosh`; `dropdb`; `redis-cli FLUSHALL` or `FLUSHDB`), or a provider CLI with a cleanup verb, such as `aws s3 rb` or `neonctl branches delete` |
@@ -185,8 +193,8 @@ No repeat mode changes this. The `bash.patterns` denies and the main-session
 A condition reads text, not a parsed shell command. So these correct calls
 also fire a rule:
 
-- A quoted command word, such as `echo "rm x"` or a commit message that
-  starts with `rm`, fires `file-removal.md`.
+- A quoted command word with a dangerous argument, such as `echo "rm -r x"`
+  or a commit message that starts with `rm -r`, fires `file-removal.md`.
 - In eval code, a scan can continue past the closing quote of the `sh()`
   string to the end of the statement. For example,
   `print(sh("kubectl get pods"), "pods to delete")` fires `remote-cleanup.md`.
@@ -388,10 +396,10 @@ the home directory, and no glob can express "inside the temporary directory".
 ## Gaps
 
 - **omp, literal `*`**: omp cannot match a literal `*`, so it cannot tell a
-  glob from a file name. The kit therefore runs every `rm` that it does not
-  deny without a prompt. This includes `rm ~/*`, `rm $HOME/*`, and `rm /*`
-  without an `r` or `f` option, because a deny rule for them would also deny
-  `rm ~/notes.txt` (owner decision, 0.20.9).
+  glob from a file name. The deny list therefore runs `rm ~/*`, `rm $HOME/*`,
+  and `rm /*` without an `r` or `f` option, because a deny rule for them would
+  also deny `rm ~/notes.txt` (owner decision, 0.20.9). The `file-removal.md`
+  trigger rule interrupts these forms and a bare `rm *`, in bash and in eval.
 - **omp, whole-line matching**: omp tests deny rules against the whole command
   line too, so a pattern can span commands. For example, `rm x && cd ~`,
   `rm -i a && ls -R /tmp`, and `sudo apt update && rm x` are denied. Run `rm`
@@ -410,9 +418,14 @@ the home directory, and no glob can express "inside the temporary directory".
 - **omp, bulk-removal text**: the `* find *-delete*`, `*-exec rm *`, and
   `*xargs rm` rules also match text, so a line such as
   `echo use find with -delete` is denied. Write such text to a file instead.
-- **omp, recursive `rm` clusters**: omp matches only the listed
-  recursive-`rm` clusters: `r` or `R` alone or with `f` and `v`, plus `-ri`,
-  `-ir`, `-Ri`, and `-iR`. Another cluster runs.
+- **omp, recursive `rm` clusters**: the cluster rules of the bash deny list
+  match only the listed recursive-`rm` clusters: `r` or `R` alone or with `f`
+  and `v`, plus `-ri`, `-ir`, `-Ri`, and `-iR`. They miss another cluster,
+  such as `-rI`, though another deny rule can still match the whole command,
+  for example the rule for an `r` flag before an absolute path. The
+  `file-removal.md` trigger rule interrupts every cluster that holds `r`, `R`,
+  or `d`, and each abbreviation of `--recursive`, `--dir`, and
+  `--no-preserve-root`, in bash and in eval.
 - **`git push` beyond the listed words**: a configured `+` refspec in
   `remote.<name>.push` makes a plain `git push` force. No rule sees git
   configuration. `git push --delete` and `git push --prune` remove remote
@@ -432,8 +445,11 @@ the home directory, and no glob can express "inside the temporary directory".
 - **`git -C`**: no rule matches a git subcommand that does not follow `git`
   directly, such as `git -C . push --force origin main` or
   `git -C . push origin $b`.
-- **Programs that remove files**: no rule covers a program that removes files
-  itself, such as a Python or Node script, or a shell started by omp `eval`.
+- **Programs that remove files**: no deny rule covers a program that removes
+  files itself, such as a Python or Node script, or a shell started by omp
+  `eval`. In eval, the `file-removal.md` trigger rule interrupts deletion in
+  code (`os.remove`, `shutil.rmtree`, `fs.rm`, and the like) and the dangerous
+  `rm` forms of `sh(...)`; a plain `rm` of a file in `sh(...)` runs.
 
 ### How `gio trash` empties the trash
 

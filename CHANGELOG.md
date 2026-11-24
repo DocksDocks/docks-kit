@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-11-23 - docks-kit 0.29.0: agents can clean their own workspace
+
+### Changed
+
+- The omp `file-removal` trigger rule no longer fires on a plain `rm`,
+  `unlink`, or `shred` of a file, or on `git worktree remove --force`. It
+  still fires, in the bash tool and in eval, on a recursive or
+  directory-mode `rm` (`-r`, `-R`, `-d`, `--recursive`, `--dir`, also abbreviated), on
+  `--no-preserve-root`, and on a removal of `~`, `$HOME`, `${HOME}`, `/`,
+  `.`, `..`, a device under `/dev/`, or every file of one of them (`/*`,
+  `~/*`, bare `*`). Its `find -delete`, `find -exec rm`, `git rm -r`, and
+  code-deletion conditions stay. The omp deny list for the bash tool does
+  not change (DocksDocks/docks-kit#217).
+- The omp `temp-and-background` trigger rule no longer fires on `/tmp`
+  paths, `mktemp`, or `TMPDIR=/tmp`. Its parts for detached processes,
+  watchers, global installs, scheduled jobs, services, and Docker cleanup
+  stay. The `workspace-hygiene` skill now prefers a scratch folder instead of
+  forbidding `/tmp`.
+- The `workspace-hygiene` skill keeps an ovnfs checkout on any refusal of
+  `ovnfs rm`, gives the ovnfs name rule (1 to 64 characters from `a-z`,
+  `0-9`, `.`, `_`, and `-`, starting with a letter or a digit), and allows a
+  forced worktree removal only for a worktree that the agent created.
+
 ## 2026-11-23 - docks-kit 0.28.2: ovnfs rm passes the file-removal rule
 
 ### Fixed
@@ -11,10 +34,9 @@
 
 ### Added
 
-- The `workspace-hygiene` skill has an ovnfs checkout row: remove a
-  checkout that you opened with `ovnfs rm <name>` when its work is landed,
-  applied, or not needed; keep it while its pull request is open or when
-  `ovnfs rm` refuses; never use `-f` or `--force`.
+- The `workspace-hygiene` skill has an ovnfs checkout row; see that row for
+  when an agent removes a checkout with `ovnfs rm <name>` and when it keeps
+  one.
 
 ## 2026-11-23 - docks-kit 0.28.1: plan-reviewer on GPT-6.2 Sol
 

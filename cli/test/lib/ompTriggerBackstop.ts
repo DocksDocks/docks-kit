@@ -279,22 +279,24 @@ const DENSE_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     " a/rm ",
     "a/rm ",
     "./rm ",
-    "'ovnfs'  ",
-    "'ovnfs' rm ",
-    '"ovnfs"  ',
+    "rm ~x ",
+    "rm -x ",
+    "rm .x ",
+    "rm /dev/x ",
+    "rm x -- ",
+    "env /bin/rm x ",
+    "$(rm x)",
+    "`rm x`",
+    '\\"rm x\\" ',
+    "\\rrm x ",
+    "\rrm x ",
+    "{rm x ",
   ],
   "file-removal.md#1": ["-exec a/b ", "-exec ", " -ok x/"],
   "file-removal.md#2": ["find . ", "find . -exec ", "find -x "],
   "file-removal.md#3": ["os.remove ", "os."],
   "file-removal.md#9": ["Bun.file(", "Bun.file(x ", "Bun.file(x).delete "],
   "file-removal.md#10": [
-    "git worktree remove ",
-    "git worktree remove x ",
-    "git -C git worktree remove ",
-    "git worktree remove -- x ",
-    "git -C ",
-  ],
-  "file-removal.md#11": [
     "git rm ",
     "git rm x ",
     "git -C git rm ",
@@ -446,19 +448,14 @@ const DENSE_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "remote-cleanup.md#8": ["rclone sync ", "rclone sync x ", "rclone x sync ", "rclone sync x:y z "],
   "remote-cleanup.md#9": ["gh x ", "gh x y "],
   "remote-cleanup.md#10": ["gh api ", "gh api x ", "gh api -X "],
-  "temp-and-background.md#0": ["mkdir x ", "tee ", "touch -p "],
-  "temp-and-background.md#1": ["cp x ", "mv ", "install -d "],
-  "temp-and-background.md#2": ["git clone ", "git clone x ", "git -C "],
-  "temp-and-background.md#3": ["> x ", ">"],
-  "temp-and-background.md#4": [" -o ", " --output "],
-  "temp-and-background.md#7": ["( A=1 ", "sudo A=1 ", '\\"nohup=1 '],
-  "temp-and-background.md#8": ["( tmux -L x ", "( tmux -x "],
-  "temp-and-background.md#9": ["( screen -ls "],
-  "temp-and-background.md#10": [" --watch=false "],
-  "temp-and-background.md#11": ["npm ", "npm install ", "npm x ", "npm install -- x ", "npm i x "],
-  "temp-and-background.md#13": ["bun add ", "pnpm i x "],
-  "temp-and-background.md#19": ["crontab -l "],
-  "temp-and-background.md#20": ["systemctl -x ", "systemctl "],
+  "temp-and-background.md#0": ["( A=1 ", "sudo A=1 ", '\\"nohup=1 '],
+  "temp-and-background.md#1": ["( tmux -L x ", "( tmux -x "],
+  "temp-and-background.md#2": ["( screen -ls "],
+  "temp-and-background.md#3": [" --watch=false "],
+  "temp-and-background.md#4": ["npm ", "npm install ", "npm x ", "npm install -- x ", "npm i x "],
+  "temp-and-background.md#6": ["bun add ", "pnpm i x "],
+  "temp-and-background.md#12": ["crontab -l "],
+  "temp-and-background.md#13": ["systemctl -x ", "systemctl "],
   "worktree-location.md#0": ["git worktree ", "git -C git worktree ", "git -C "],
 };
 
@@ -532,14 +529,16 @@ const HEAD_RUNS_FOUND: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
 };
 /**
  * Heads and runs added to the derived pairs of a condition, for a scan shape
- * that its dense units do not start: the `file-removal.md#0` exception for a
- * quoted `ovnfs` walks one white-space run after the closing quote
- * (DocksDocks/docks-kit#212).
+ * that its dense units do not start: `file-removal.md#0` walks the arguments
+ * of an `rm` to its first dangerous argument, its next `rm`, or the command
+ * end (DocksDocks/docks-kit#217).
  */
 const HEAD_RUNS_ADDED: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
   "file-removal.md#0": [
-    { head: "'ovnfs'", run: " " },
-    { head: '"ovnfs"', run: " " },
+    { head: "rm ", run: " " },
+    { head: "rm ", run: "~x " },
+    { head: "rm ", run: "-x " },
+    { head: "rm ", run: "\\" },
   ],
 };
 /**
@@ -584,6 +583,8 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "-u rm ",
     "-u /bin/rm ",
     "-g\trm\t",
+    "rm rm -x ",
+    "rm x rm ~x ",
   ],
   "file-removal.md#1": [" -exec -exec ", ' -exec "-exec ', " -ok x -okdir ", " -exec rmx -exec "],
   "file-removal.md#2": [
@@ -609,13 +610,6 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "Bun.file(x).delete Bun.file(x).delete;",
   ],
   "file-removal.md#10": [
-    "git worktree remove -- -f git worktree remove ",
-    'git worktree remove "git worktree remove ',
-    "git  worktree  remove ",
-    "git -p -p worktree remove ",
-    "git -C .x worktree remove ",
-  ],
-  "file-removal.md#11": [
     "git rm git rm ",
     "git rm -- -r git rm ",
     "git rm x$(git rm x-r ",
@@ -836,43 +830,6 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "gh\tapi\t",
   ],
   "temp-and-background.md#0": [
-    "mkdir mkdir ",
-    "mkdir -p mkdir -p ",
-    "tee x/tmp tee ",
-    'touch "touch ',
-    "mkdir \\mkdir ",
-    "tee -- /tmpx tee ",
-  ],
-  "temp-and-background.md#1": [
-    "cp x /tmp > ",
-    "> /tmp ",
-    "cp /tmp >/tmp ",
-    "/tmp 2>/tmp ",
-    "-x /tmp > ",
-    "> /tmp -x ",
-    "2>/tmp/a > /tmp ",
-    "cp x /tmp -x > /tmp ",
-    "'/tmp' > ",
-    "-x /tmp ",
-  ],
-  "temp-and-background.md#2": [
-    "git clone git clone ",
-    "git clone x/tmp git clone ",
-    "git  clone ",
-    "git -p -p clone ",
-    "git -C .x clone ",
-    "git -C x -C y clone ",
-  ],
-  "temp-and-background.md#3": [">>>>", '> "> ', "> /tmpx > ", ">\t>\t"],
-  "temp-and-background.md#4": [" -o -o -o", " --output= --output ", " -o /tmpx -o ", ' -o "-o "'],
-  "temp-and-background.md#5": [
-    "mktempx mktemp_",
-    "\\mktemp1",
-    "$(mktempx $(mktemp-",
-    '"mktemp.mktemp=',
-  ],
-  "temp-and-background.md#6": ["TMPDIR=TMPDIR=", 'TMPDIR=/tmpx TMPDIR="', "TMPDIR=\\/tmp"],
-  "temp-and-background.md#7": [
     "sudo sudo ",
     "; a=b ; a=",
     "sudo x=1 sudo -u ",
@@ -880,7 +837,7 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "sudo xnohup sudo ",
     "; a=1 b=2 xnohup ",
   ],
-  "temp-and-background.md#8": [
+  "temp-and-background.md#1": [
     "-x(tmux ",
     "tmux -x(",
     "-L x(tmux ",
@@ -892,19 +849,19 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "x tmux('tmux -x ",
     "-x(tmux -L ",
   ],
-  "temp-and-background.md#9": [
+  "temp-and-background.md#2": [
     "screen -ls screen -ls ",
     "(screen -list (screen -ls ",
     "; a=b screen -ls ; ",
     "x=screen y=",
     "xscreen ",
   ],
-  "temp-and-background.md#10": [
+  "temp-and-background.md#3": [
     " --watch=false --watch=0 ",
     " --watchx --watch=false",
     " --watchAllx",
   ],
-  "temp-and-background.md#11": [
+  "temp-and-background.md#4": [
     "npm npm ",
     "npm x npm i ",
     "npm i -- -g npm i ",
@@ -912,8 +869,8 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "npm  x ",
     "npm  i ",
   ],
-  "temp-and-background.md#12": ["npm -g npm -g ", "npm -g ix npm ", "npm\t-g\t"],
-  "temp-and-background.md#13": [
+  "temp-and-background.md#5": ["npm -g npm -g ", "npm -g ix npm ", "npm\t-g\t"],
+  "temp-and-background.md#6": [
     "bun add bun add ",
     "pnpm i -- -g pnpm i ",
     "bun add x-g bun add ",
@@ -921,63 +878,63 @@ const NESTED_UNITS: Readonly<Record<string, ReadonlyArray<string>>> = {
     "bun  add ",
     "pnpm\ti\t",
   ],
-  "temp-and-background.md#14": [
+  "temp-and-background.md#7": [
     "bun -g bun -g ",
     "pnpm --global addx ",
     'bun -g "bun --global ',
     "pnpm -g $(pnpm -g -g ",
   ],
-  "temp-and-background.md#15": [
+  "temp-and-background.md#8": [
     "yarn global yarn global ",
     "yarn global addx yarn ",
     'yarn "yarn global ',
     "yarn global $(yarn global -",
   ],
-  "temp-and-background.md#16": [
+  "temp-and-background.md#9": [
     "pipx pipx install_",
     "pipx installx pipx ",
     'pipx "pipx ',
     "pipx $(pipx install=",
   ],
-  "temp-and-background.md#17": [
+  "temp-and-background.md#10": [
     "cargo cargo installx ",
     'cargo "cargo ',
     "cargo $(cargo install-",
     "cargo\tcargo\tinstall=",
   ],
-  "temp-and-background.md#18": [
+  "temp-and-background.md#11": [
     "uv tool uv tool ",
     "go gem uv installx ",
     'uv tool "uv tool ',
     "gem $(gem install-",
   ],
-  "temp-and-background.md#19": ["crontab -l crontab -l ", "xcrontab ", "crontab -l\t"],
-  "temp-and-background.md#20": [
+  "temp-and-background.md#12": ["crontab -l crontab -l ", "xcrontab ", "crontab -l\t"],
+  "temp-and-background.md#13": [
     "systemctl systemctl ",
     "systemctl -x systemctl -x ",
     "systemctl --user xenable systemctl ",
     'systemctl "systemctl ',
     "systemctl -- enablex systemctl ",
   ],
-  "temp-and-background.md#21": [
+  "temp-and-background.md#14": [
     "docker system docker system ",
     "docker system prunex ",
     'docker "docker system ',
     "docker system $(docker system -",
   ],
-  "temp-and-background.md#22": [
+  "temp-and-background.md#15": [
     "docker volume docker image ",
     "docker volume rmx ",
     'docker image "docker volume ',
     "docker volume $(docker image -",
   ],
-  "temp-and-background.md#23": [
+  "temp-and-background.md#16": [
     "docker docker rmix ",
     'docker "docker ',
     "docker $(docker rmi-",
     "docker\tdocker\trmi=",
   ],
-  "temp-and-background.md#24": [
+  "temp-and-background.md#17": [
     "docker builder docker buildx prunex ",
     'docker builder "docker buildx ',
     "docker buildx $(docker builder -",
