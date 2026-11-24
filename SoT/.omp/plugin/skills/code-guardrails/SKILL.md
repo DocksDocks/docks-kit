@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "d36780b46daa164e9a1b77401cf34f1c30d174dc59eac3ab475ca0bca163339f"
+  content_hash: "1f7430a3ed6b8167ddc97ad178df36b02725061d94fe616e93747e4303cb9be9"
 ---
 
 # Code Guardrails
@@ -45,12 +45,13 @@ and end the turn. If `ask` is not available, put the question in your final
 message and end the turn. An approval covers only the action that the user approved:
 an install approval installs the tool, and it does not create or change a config.
 To create or change a config, follow the Detect rules of the matching reference.
-When those Detect rules find no config for the linter, show the config that the reference
-gives, and ask the user before you create it, as this gate says.
-Propose a first config only when the project's lint command loads config files. When
-that command passes a flag that skips or replaces them (such as ShellCheck `--norc`,
-ESLint `--no-config-lookup`, or a `--config` or `-c` that names another file), report
-the flag, and ask before you change how the project selects rules.
+Propose a first config only for the exact file that the Verify command loads: the linter
+that owns linting reads that file by its documented discovery, and the command passes no
+flag that skips or replaces it. When the project has no lint command, use the reference's
+standalone Verify command and the file that it loads. When you cannot establish which file
+the Verify command loads, or the reference gives no config for the linter that owns
+linting, report what you found and ask; do not propose a file. When you can propose a
+file, show the config and ask before you create it, as this gate says.
 For Python, follow the Detect rules of `references/python.md` instead.
 A silent dependency or tool change is a change the user did not approve.
 
