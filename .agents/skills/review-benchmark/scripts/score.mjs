@@ -141,8 +141,8 @@ const RESULT_URL = /https?:\/\/[^\s<>()[\]{}"'`]+/g;
 const JSON_QUERY_SELECTOR = /\?q=.*$/s;
 const URI_SCHEME = /^([a-z][a-z0-9+.-]*):\/\//i;
 const WEB_SCHEMES = new Set(['http', 'https']);
-// The selector of a read at the end of a path, for example `:1-260` or `:23-54:raw`. It can also take a tail that omp
-// does not read as a selector, so a list decides on the path with its selectors (see readLists).
+// The selector of a read at the end of an internal URI, for example `:1-260` or `:23-54:raw`. A local path splits its
+// selector as omp splits it (see ompTargetPath).
 const READ_SELECTOR = /(?::[^:/]*)+$/;
 // A read selector as omp parses it (omp://tools/read.md, Selector grammar): `:raw`, `:img`, `:conflicts`, or line
 // ranges (`:N`, `:LN`, `:N-`, `:N..`, `:A-B`, `:A..B`, `:A+C`, `:-N`, and comma lists of these, with or without a
@@ -153,6 +153,19 @@ const OMP_SELECTOR = new RegExp(`:(?:raw|img|conflicts|${LINE_RANGES}(?::raw)?|r
 // A part of a line selector of omp without its `L` prefixes: `-N` (group 1), `A+C` (groups 2 and 3), `A-B` or `A..B`
 // (groups 4 and 5), `A-` or `A..` (group 4 only), and `A` (group 6).
 const LINE_PART = /^(?:-(\d+)|(\d+)\+(\d+)|(\d+)(?:-|\.\.)(\d+)?|(\d+))$/;
+// The read selector grammar of omp 19.0.0 for a local path (splitPathAndSel in packages/tui/src/tools/read.ts and
+// LINE_RANGE_CHUNK_SOURCE in packages/tui/src/tools/line-ranges.ts): line range chunks (`N`, `LN`, `N-`, `N..`, `A-B`,
+// `A..B`, `A+C`) that end in a digit, a dot, or a dash, tails (`-N`), comma lists of these, `raw`, `conflicts`, and
+// `img`.
+const SPLIT_RANGE_CHUNK = String.raw`L?\d+(?:(?:\.\.|[-+])L?(?:\d+)?)?(?<=[\d.-])`;
+const SPLIT_LIST_CHUNK = String.raw`(?:${SPLIT_RANGE_CHUNK}|-\d+)`;
+const SPLIT_RANGE_LIST = `${SPLIT_LIST_CHUNK}(?:,${SPLIT_LIST_CHUNK})*`;
+const SPLIT_SELECTOR = new RegExp(`^(?:${SPLIT_RANGE_LIST}|raw|conflicts|img)$`, 'i');
+const SPLIT_RANGES_ONLY = new RegExp(`^(?:${SPLIT_RANGE_LIST})$`, 'i');
+const SPLIT_RAW_ONLY = /^raw$/i;
+const SPLIT_BARE_LINE = /^\d+$/;
+const SPLIT_RAW_CHUNK = `(?:raw:)?${SPLIT_LIST_CHUNK}(?::raw)?`;
+const SPLIT_PER_CHUNK_RAW = new RegExp(`:(${SPLIT_RAW_CHUNK}(?:,${SPLIT_RAW_CHUNK})+)$`, 'i');
 // The own diff of a reviewer (see ownDiffFile) comes from its name. A self-review lens has the name of its lens after
 // this prefix (see prepare.mjs ARMS).
 const PANEL_LENSES = new Set(['correctness', 'spec-and-tests', 'text-and-safety']);
@@ -175,50 +188,57 @@ const BENCHMARK_REPOSITORY = {
 };
 // An invalid-run reason names this many outside targets, then the count of the others.
 const LISTED_READS = 3;
-// The instruction paths of an agent text are absolute paths. A path in backticks or quotes ends at the closing quote
-// and can hold spaces, for example in a plugin root under a folder with a space. A bare path ends at the first space or
-// quote. In the two patterns below, group 2 holds the path in quotes and group 3 the bare path.
-//
-// The path `<plugin root>/skills/[<folder>/]code-reviewer/SKILL.md` (or plan-reviewer). The groups hold the plugin
-// root.
-const REVIEWER_SKILL_TAIL = String.raw`\/skills\/(?:[^\s\x60'"/]+\/)?(?:code|plan)-reviewer\/SKILL\.md`;
-const REVIEWER_SKILL = new RegExp(
-  String.raw`([\x60'"])(\/[^\x60'"\r\n]*?)${REVIEWER_SKILL_TAIL}\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*?)${REVIEWER_SKILL_TAIL}`,
-  'g',
-);
+// The instruction paths of an agent text are absolute paths. A path in backticks or quotes ends only at the closing
+// quote of the same kind, so it can hold spaces and the other quote characters in any segment, for example a plugin
+// root under `Team's review runs` or a category folder `skills/team's/` (group 2). A bare path starts at the start of
+// the text or after white space, a quote, or an opening bracket, and ends at the first white space or quote (group 3);
+// the sentence marks at its end are no part of it. instructionPaths reads each path whole, and the readers below then
+// match the path of a skill or an agent file at its end. prepare.mjs reads reviewer skill paths only through
+// reviewerSkillPaths, so `agents` and the read scope read an agent text the same way.
+const INSTRUCTION_PATH = /([\x60'"])(\/(?:(?!\1)[^\r\n])*)\1|(?<=^|[\s\x60'"(<[])(\/[^\s\x60'"]*)/g;
+const BARE_PATH_END = /[.,;:!?)\]>]+$/;
+function instructionPaths(text) {
+  return Array.from(text.matchAll(INSTRUCTION_PATH), (match) => match[2] ?? match[3].replace(BARE_PATH_END, ''));
+}
+// The path `<plugin root>/skills/[<folder>/]code-reviewer/SKILL.md` (or plan-reviewer): group 1 is the plugin root and
+// group 2 the skill file below it.
+const REVIEWER_SKILL_PATH = /^(\/.*?)\/(skills\/(?:[^/]+\/)?(?:code|plan)-reviewer\/SKILL\.md)$/;
 // The name of the self-review agent of a configuration starts with this prefix (see prepare.mjs selfReviewAgent).
 export const SELF_REVIEW_AGENT_PREFIX = 'review-bench-selfreview-';
 // The path `<project>/.omp/agents/<self-review agent>.md`. The self-review agent has no plugin root, so its text names
-// its own agent file. The groups hold the full path.
-const SELF_REVIEW_AGENT_TAIL = String.raw`\/\.omp\/agents\/${SELF_REVIEW_AGENT_PREFIX}[^\s\x60'"/]+\.md`;
-const SELF_REVIEW_AGENT_FILE = new RegExp(
-  String.raw`([\x60'"])(\/[^\x60'"\r\n]*${SELF_REVIEW_AGENT_TAIL})\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*${SELF_REVIEW_AGENT_TAIL})(?=$|[\s\x60'")>])`,
-  'g',
-);
+// its own agent file.
+const SELF_REVIEW_AGENT_PATH = new RegExp(String.raw`\/\.omp\/agents\/${SELF_REVIEW_AGENT_PREFIX}[^/]+\.md$`);
 // The path `<self-review root>/skills/[<folder>/]code-review/SKILL.md` (or code-clarity) in the text of the
-// self-review agent of a self-review root (`prepare.mjs agents --self-review-roots`). The groups hold the root.
-const SELF_REVIEW_SKILL_TAIL = String.raw`\/skills\/(?:[^\s\x60'"/]+\/)?(?:code-review|code-clarity)\/SKILL\.md`;
-const SELF_REVIEW_SKILL = new RegExp(
-  String.raw`([\x60'"])(\/[^\x60'"\r\n]*?)${SELF_REVIEW_SKILL_TAIL}\1|` +
-    String.raw`(?<=^|[\s\x60'"(<])(\/[^\s\x60'"]*?)${SELF_REVIEW_SKILL_TAIL}`,
-  'g',
-);
-// The path of a match of one of the patterns above: in quotes, else bare.
-const instructionPath = (match) => match[2] ?? match[3];
+// self-review agent of a self-review root (`prepare.mjs agents --self-review-roots`): group 1 is the root.
+const SELF_REVIEW_SKILL_PATH = /^(\/.*?)\/skills\/(?:[^/]+\/)?(?:code-review|code-clarity)\/SKILL\.md$/;
 
-// The plugin roots that an agent text names: the folder P of each absolute path `P/skills/[<folder>/]code-reviewer/
-// SKILL.md` or `P/skills/[<folder>/]plan-reviewer/SKILL.md`, each once, in text order. readScope lets a reviewer read
-// the instructions under these roots, and `prepare.mjs agents` refuses a variant agent that names another root.
+// The reviewer skill paths of an agent text, in text order: `{ root, skill }` for each absolute path
+// `<root>/skills/[<folder>/]code-reviewer/SKILL.md` or `.../plan-reviewer/SKILL.md`, with `skill` the path below the
+// root. `prepare.mjs agents` checks the skill paths of a variant agent with it.
+export function reviewerSkillPaths(text) {
+  return instructionPaths(text).flatMap((file) => {
+    const match = REVIEWER_SKILL_PATH.exec(file);
+    return match ? [{ root: match[1], skill: match[2] }] : [];
+  });
+}
+
+// The plugin roots that an agent text names (see reviewerSkillPaths), each once, in text order. readScope lets a
+// reviewer read the instructions under these roots, and `prepare.mjs agents` refuses a variant agent that names
+// another root.
 export function reviewerPluginRoots(text) {
-  return [...new Set(Array.from(text.matchAll(REVIEWER_SKILL), instructionPath))];
+  return [...new Set(reviewerSkillPaths(text).map((item) => item.root))];
 }
 
 // The self-review roots that the text of a self-review agent names: the folder P of each absolute path
 // `P/skills/[<folder>/]code-review/SKILL.md` or `P/skills/[<folder>/]code-clarity/SKILL.md`, each once.
 export function selfReviewSkillRoots(text) {
-  return [...new Set(Array.from(text.matchAll(SELF_REVIEW_SKILL), instructionPath))];
+  const roots = instructionPaths(text).map((file) => SELF_REVIEW_SKILL_PATH.exec(file)?.[1]);
+  return [...new Set(roots.filter((root) => root !== undefined))];
+}
+
+// The self-review agent files that an agent text names, in text order.
+function selfReviewAgentFiles(text) {
+  return instructionPaths(text).filter((file) => SELF_REVIEW_AGENT_PATH.test(file));
 }
 
 function fail(message) {
@@ -653,9 +673,18 @@ function recordOnce(map, key, value, label) {
 }
 
 // `knownByCase` and `protectedByCase` map each case to the ids of its known defects and of its protected decisions.
+// The maps keep the ids of the answers as the judge wrote them, so a known-defect id can hold a space.
 function readJudgments(judgments, byBlind, knownByCase, protectedByCase) {
+  const add = (map, finding, id) => {
+    if (!map.has(finding)) map.set(finding, new Set());
+    map.get(finding).add(id);
+  };
   const verdicts = new Map();
   const ratings = new Map();
+  // `match` pairs count as found. `unknown` pairs stay, because a known defect that a run did not find can still
+  // hide behind one of them.
+  const matched = new Map();
+  const unsure = new Map();
   for (const entry of judgments.matches ?? []) {
     const finding = byBlind.get(entry.finding);
     if (!finding) fail(`judgments.json names unknown finding ${entry.finding}`);
@@ -663,13 +692,19 @@ function readJudgments(judgments, byBlind, knownByCase, protectedByCase) {
       fail(`judgments.json pairs ${entry.finding} with ${entry.known}, which is not a known defect of its case`);
     if (!MATCH_VERDICTS.has(entry.verdict)) fail(`judgments.json has match verdict ${entry.verdict}`);
     recordOnce(verdicts, `${entry.finding} ${entry.known}`, entry.verdict, `${entry.finding} and ${entry.known}`);
+    if (entry.verdict === 'match') add(matched, entry.finding, entry.known);
+    else if (entry.verdict === 'unknown') add(unsure, entry.finding, entry.known);
   }
   for (const entry of judgments.adjudications ?? []) {
     if (!byBlind.has(entry.finding)) fail(`judgments.json names unknown finding ${entry.finding}`);
     if (!RATINGS.has(entry.rating)) fail(`judgments.json has rating ${entry.rating}`);
     recordOnce(ratings, entry.finding, entry.rating, entry.finding);
   }
+  // A reargued `match` names a protected decision that the finding re-argues. It finds no known defect and does not
+  // judge the finding, so the finding still needs a `match` answer for a known defect or a rating. A reargued
+  // `unknown` is no unknown pair, because no known defect can hide behind it.
   const rearguedAnswers = new Map();
+  const reargued = new Map();
   for (const entry of judgments.reargued ?? []) {
     const finding = byBlind.get(entry.finding);
     if (!finding) fail(`judgments.json names unknown finding ${entry.finding}`);
@@ -680,27 +715,7 @@ function readJudgments(judgments, byBlind, knownByCase, protectedByCase) {
     if (!MATCH_VERDICTS.has(entry.verdict)) fail(`judgments.json has reargued verdict ${entry.verdict}`);
     const pair = `${entry.finding} ${entry.protected}`;
     recordOnce(rearguedAnswers, pair, entry.verdict, `${entry.finding} and ${entry.protected}`);
-  }
-  // `match` pairs count as found. `unknown` pairs stay, because a known defect that a run did not find can still
-  // hide behind one of them.
-  const matched = new Map();
-  const unsure = new Map();
-  for (const [pair, verdict] of verdicts) {
-    const target = verdict === 'match' ? matched : verdict === 'unknown' ? unsure : null;
-    if (!target) continue;
-    const [finding, known] = pair.split(' ');
-    if (!target.has(finding)) target.set(finding, new Set());
-    target.get(finding).add(known);
-  }
-  // A reargued `match` names a protected decision that the finding re-argues. It finds no known defect and does not
-  // judge the finding, so the finding still needs a `match` answer for a known defect or a rating. A reargued
-  // `unknown` is no unknown pair, because no known defect can hide behind it.
-  const reargued = new Map();
-  for (const [pair, verdict] of rearguedAnswers) {
-    if (verdict !== 'match') continue;
-    const [finding, id] = pair.split(' ');
-    if (!reargued.has(finding)) reargued.set(finding, new Set());
-    reargued.get(finding).add(id);
+    if (entry.verdict === 'match') add(reargued, entry.finding, entry.protected);
   }
   return { verdicts, matched, unsure, ratings, rearguedAnswers, reargued };
 }
@@ -845,6 +860,7 @@ export function loopEnds(round, { fixes, extras }) {
 // Sorts findings by the judge's answers: the known defects that they found, the known defects of their `unknown`
 // pairs, the count of `unknown` pairs, the protected decisions that they re-argue, and the ratings of the findings
 // without a `match` answer. A re-argued decision changes no other count, so the finding keeps its rating.
+// `doubtfulExtras` counts the valid extras that have an `unknown` pair: such an extra can repeat a known defect.
 function judgeFindings(findings, { matched, unsure, ratings, reargued }) {
   const result = {
     found: new Set(),
@@ -852,6 +868,7 @@ function judgeFindings(findings, { matched, unsure, ratings, reargued }) {
     unknownPairs: 0,
     reargued: new Set(),
     validExtras: 0,
+    doubtfulExtras: 0,
     wrong: 0,
     unknown: 0,
     unjudged: 0,
@@ -868,8 +885,10 @@ function judgeFindings(findings, { matched, unsure, ratings, reargued }) {
       continue;
     }
     const rating = ratings.get(finding.blind);
-    if (rating === 'valid') result.validExtras += 1;
-    else if (rating === 'wrong') result.wrong += 1;
+    if (rating === 'valid') {
+      result.validExtras += 1;
+      if (unsure.has(finding.blind)) result.doubtfulExtras += 1;
+    } else if (rating === 'wrong') result.wrong += 1;
     else if (rating === 'unknown') result.unknown += 1;
     else result.unjudged += 1;
   }
@@ -883,19 +902,19 @@ function judgeFindings(findings, { matched, unsure, ratings, reargued }) {
 // and `fixerChangedNothing`, see prepare.mjs prepareLoop) and from the fixer reply (`fixer.replies`, see
 // transcriptsCommand): `knownRepair` tells if it repaired a known defect that a finding of the round matched, with a
 // fix patch that applied or through the fixer. A patch that the tree already held and a pulled-in patch repair no
-// finding of the round. A defect that the fixer got counts only when the fixer patch changed the tree and the fixer did
-// not reply `not present` for each finding of the round that matches the defect. `extraRepair` tells if the fixer
-// repaired valid extra findings: the fix step gave valid extras to the fixer, the fixer patch changed the tree, and
-// the fixer did not reply `not present` for each of these extras.
+// finding of the round. A defect that the fixer got counts only when the fixer patch changed the tree and the fixer
+// replied `repaired` for a finding of the round that matches the defect. `extraRepair` tells if the fixer repaired
+// valid extra findings: the fix step gave valid extras to the fixer, the fixer patch changed the tree, and the fixer
+// replied `repaired` for at least one of these extras. A finding without a reply counts as not repaired.
 function scoreRound(round, knownIds, judged, meta) {
   const costs = round.blocks.map((block) => meta?.reviewers?.[block.reviewer]);
   const { found } = judgeFindings(round.findings, judged);
   const present = new Set(meta?.fixAlreadyApplied ?? []);
   const byFixer = new Set(meta?.fixedByFixer ?? []);
   const replies = meta?.fixer?.replies ?? {};
-  // The fixer repaired one of the findings `ids` when its patch changed the tree and it replied `not present` for not
-  // all of them.
-  const fixerRepaired = (ids) => !meta?.fixerChangedNothing && ids.some((id) => replies[id] !== 'not present');
+  // The fixer repaired one of the findings `ids` when its patch changed the tree and it replied `repaired` for at
+  // least one of them.
+  const fixerRepaired = (ids) => !meta?.fixerChangedNothing && ids.some((id) => replies[id] === 'repaired');
   const matching = (known) => round.findings.filter((finding) => judged.matched.get(finding.blind)?.has(known));
   const repaired = (fix) =>
     !fix.pulled &&
@@ -1027,7 +1046,9 @@ function managerStage({ findings, metaOf, judged, knownIds, config, managerConfi
 // round; its verdicts are those of its last round. A known defect is unresolved in a run when the run did not find it
 // and the judge answered `unknown` for a pair of it with at least one finding of the run. `unknownPairs` counts every
 // `unknown` pair answer of the run, also those that cannot change recall, such as a finding that may repeat a known
-// defect the run found. `reargued` lists the protected decisions of the case that a finding of the run re-argues (a
+// defect the run found. `doubtfulExtras` counts the valid extras of the run that have an `unknown` pair (see
+// judgeFindings), so the report tells such an extra from an unknown pair of a matched finding. `reargued` lists the
+// protected decisions of the case that a finding of the run re-argues (a
 // reargued `match` answer), each once, in the order of the case's list. They are no known defects, so they count in
 // neither `known` nor recall. `diffCoverages` lists the read coverage (`diffCoverage`, see transcriptsCommand) of each
 // reviewer of each round that has one, and `lowestDiffCoverage` is the lowest of them, so the Runs table shows the
@@ -1104,6 +1125,7 @@ function scoreRun(run, caseEntry, judged, metas) {
     recall: knownIds.length ? all.found.size / knownIds.length : null,
     escaped: knownIds.filter((id) => !all.found.has(id)).length,
     validExtras: all.validExtras,
+    doubtfulExtras: all.doubtfulExtras,
     wrong: all.wrong,
     unknown: all.unknown,
     unjudged: all.unjudged,
@@ -1193,6 +1215,7 @@ export function scoreRuns({ findings: findingsDoc, pairs: pairsDoc, judgments, m
     known: runsOfArm[0].known,
     recall: summarize(runsOfArm.map((run) => run.recall)),
     validExtras: mean(runsOfArm, 'validExtras'),
+    doubtfulExtras: mean(runsOfArm, 'doubtfulExtras'),
     wrong: mean(runsOfArm, 'wrong'),
     unknown: mean(runsOfArm, 'unknown'),
     unresolved: mean(runsOfArm, 'unresolved'),
@@ -1633,6 +1656,7 @@ const SUMMARY_COLUMNS = [
   ['Unknown mean', (entry) => ratio(entry.unknown), true],
   ['Unresolved mean', (entry) => ratio(entry.unresolved), true],
   ['Unknown pairs mean', (entry) => ratio(entry.unknownPairs), true],
+  ['Doubtful extras mean', (entry) => ratio(entry.doubtfulExtras), true],
   ['Re-argued mean', (entry) => ratio(entry.reargued), true],
   ['Diff read mean', (entry) => ratio(entry.diffCoverage), true],
   ['Seconds median', (entry) => oneDecimal(entry.seconds.median), true],
@@ -1654,6 +1678,7 @@ const RUN_COLUMNS = [
   ['Unjudged', (run) => run.unjudged, true],
   ['Unresolved', (run) => run.unresolved, true],
   ['Unknown pairs', (run) => run.unknownPairs, true],
+  ['Doubtful extras', (run) => run.doubtfulExtras, true],
   ['Re-argued', (run) => run.reargued.join(', ') || '-'],
   ['Diff read', (run) => ratio(run.lowestDiffCoverage), true],
   ['Seconds', (run) => oneDecimal(run.seconds), true],
@@ -1713,6 +1738,7 @@ const ANSWER_ROWS = [
   ['Unjudged per run', (run) => run.unjudged],
   ['Unknown ratings per run', (run) => run.unknown],
   ['Unknown pairs per run', (run) => run.unknownPairs],
+  ['Doubtful extras per run', (run) => run.doubtfulExtras],
 ];
 const perRunRow = ([label, value]) => [label, (runs) => ratio(perRun(runs, value))];
 const median = (runs, field) => summarize(runs.map((run) => run[field])).median;
@@ -2522,11 +2548,11 @@ export function renderReport(
     '',
     'Recall is the number of known defects that at least one reviewer of a run found, divided by the known defects of the case.',
     'Unresolved is the number of known defects that a run did not find, where the judge answered unknown for a pair of the defect with a finding of the run.',
-    'Unknown pairs is the number of unknown answers for pairs of a finding of the run and a known defect. Unresolved counts the known defects of those answers that can change recall.',
+    'Unknown pairs is the number of unknown answers for pairs of a finding of the run and a known defect. Unresolved counts the known defects of those answers that can change recall. Doubtful extras counts the valid extras that have an unknown pair, so they can repeat a known defect.',
     'Diff read is the share of the lines of the own diff of a reviewer (its focus, full, or delta diff) that its read results showed whole; a line of a focus diff also counts when a read of the full diff showed it. The Runs table gives the lowest share of the reviewers of a run. The summary and the decision tables give the mean over the reviewers of their runs. It is an observation: it makes no run invalid.',
     'Seconds is the slowest reviewer of a round, added over the rounds of a run. Tokens is the sum over the reviewers and rounds of a run. A dash means no value.',
-    'The Runs table lists every run. The summary, the configuration or arm tables, and the self-review lead leave out invalid runs: runs whose reviewer transcripts show another model, effort, or served tier than their configuration; loops whose fixer transcripts show another model, effort, or served tier than the fixer setting; runs with a reviewer or a fixer without transcript facts or without a served assistant message, also a loop round that gave findings to the fixer and has no transcript facts of its fixer (for example a repair with --fixer-patch); loops with a fixer but without a fixer setting; runs with a reviewer that read a file outside the inputs of its run; and runs with a round in which a reviewer block holds no review (missing, unreadable, or blocked).',
-    `${columnNote} The decision table covers all runs of the group. The code-loop table covers the loop runs (runs with round folders), and the single-review table covers the other runs; a table without runs is left out. A round row covers the loops that reached that round. Extra-only rounds are rounds whose previous fix step repaired valid extra findings and no known defect that a finding of the previous round matched. The fixer repaired the valid extras when it got them, its patch changed the tree, and it did not reply not present for each of them. A known defect was repaired when its fix patch applied, or when the fixer repaired it (a fixer patch that changed nothing, or a not present reply for each finding of the defect, repairs none). A patch whose fix the tree already held and a pulled-in patch repair no such defect. Fixer seconds and fixer tokens are the time and the tokens of the fix steps of a loop, apart from the loop seconds and the tokens of the reviewers; their medians cover only the loops with a fixer. An interval row gives the 90% two-level paired bootstrap interval of the difference from the reference column, over the cases that both columns ran: each resample draws the cases, then the runs of each column in each drawn case. ${referenceNote} The loop seconds interval compares loop runs only.`,
+    'The Runs table lists every run. The summary, the configuration or arm tables, and the self-review lead leave out invalid runs: runs whose reviewer transcripts show another model, effort, or served tier than their configuration; loops whose fixer transcripts show another model, effort, or served tier than the fixer setting; runs with a configuration whose reviewer or fixer has no transcript facts or no served assistant message, also a loop round of such a run that gave findings to the fixer and has no transcript facts of its fixer (for example a repair with --fixer-patch); loops with a configuration and a fixer but without a fixer setting; and, also without a configuration, runs with a reviewer or a fixer whose transcript shows a revived agent (more than one task in one transcript), runs with a reviewer that read a file outside the inputs of its run, and runs with a round in which a reviewer block holds no review (missing, unreadable, or blocked).',
+    `${columnNote} The decision table covers all runs of the group. The code-loop table covers the loop runs (runs with round folders), and the single-review table covers the other runs; a table without runs is left out. A round row covers the loops that reached that round. Extra-only rounds are rounds whose previous fix step repaired valid extra findings and no known defect that a finding of the previous round matched. The fixer repaired the valid extras when it got them, its patch changed the tree, and it replied repaired for at least one of them. A known defect was repaired when its fix patch applied, or when the fixer repaired it: its patch changed the tree, and it replied repaired for a finding of the defect. A finding without a reply of the fixer counts as not repaired. A patch whose fix the tree already held and a pulled-in patch repair no such defect. Fixer seconds and fixer tokens are the time and the tokens of the fix steps of a loop, apart from the loop seconds and the tokens of the reviewers; their medians cover only the loops with a fixer. An interval row gives the 90% two-level paired bootstrap interval of the difference from the reference column, over the cases that both columns ran: each resample draws the cases, then the runs of each column in each drawn case. ${referenceNote} The loop seconds interval compares loop runs only.`,
     `The decision table also gives the wrong findings and the unknown ratings of each column with its runs, and the reads of missing paths: reads with an error result of a path that does not exist, which make no run invalid. Against the reference column, it gives the cases whose escaped defects differ, and the one-sided exact Poisson test of more wrong findings and of more unknown ratings than the reference, with the runs of each column as the exposure. The intervals and the escaped defects per 50 known (W) are information. The decision measure is N: for each shared case with known defects, e is the mean escaped defects of the runs of the column minus those of the reference runs, divided by the known defects of the case, and N is 50 times the mean of e, so each case weighs 1. The seeded row gives the share of these cases whose defects a patch planted, when the case metadata tells it for each case. With a margin m, the not-worse row runs a one-sided betting test of the hypothesis that the mean e is m / 50 or more (Waudby-Smith and Ramdas, JRSS-B 86(1), 2024): each e goes to (e + 1) / 2 in a seeded case order, with predictable plug-in bets cut at ${BET_CAP}, and the row gives pass when the capital reaches the threshold ${whole(1 / DECISION_ALPHA)}. Its claim holds for the population of review rounds only if assumption S holds: the cases are independent draws from the review rounds that the case-building procedure gives. The equivalence row gives yes when the test of a mean e of -m / 50 or less also rejects. The fixed-corpus row holds the cases fixed and bootstraps the runs only: it is a check of these cases, not a ship decision. The neutral-data limit row gives the shared cases with known defects and the count below which no valid rule can pass a column that differs in no case, as information.`,
     'With a margin, the second judge must answer every item of the sample that its seed gives from the current answers of the first judge, or each decision row and each sequential look gives second judge incomplete and no pass. With --sequential, the sequential looks are the decision, and the not-worse and equivalence rows point to the not-worse and equivalence decisions of the looks.',
     '',
@@ -2628,6 +2654,9 @@ export const JUDGE_TREES = 'trees';
 // blind label of pairs.json, so the judge opens no arm folder.
 export const JUDGE_CONTRACTS = 'contracts';
 
+// The first line of each prompt that prepare.mjs writes names the agent of the dispatch: `agent: <name>`.
+const PROMPT_AGENT = /^agent: (\S+)(?:\n|$)/;
+
 // Every reviewer that has a prompt, every fixer prompt, and every manager prompt, in workspace order, with its
 // dispatch name, its prompt file, and the family of its case. Each round folder is a dispatch of its own; a fixer entry
 // has `fixer: true` and a manager entry `manager: true`, and a round has at most one of each.
@@ -2683,7 +2712,10 @@ function transcriptEntry(line, source, number) {
   }
 }
 
-function transcriptEntries(text, source) {
+// The records of a transcript, each line decoded once. transcriptsCommand decodes each transcript one time and gives
+// the records to each reader below (parseTranscript, transcriptFacts, checkTranscriptShape, fixerReplies,
+// transcriptSession, and toolCallResults), so a long transcript is not decoded again for each of them.
+export function transcriptEntries(text, source = 'transcript') {
   const entries = [];
   for (const [index, line] of text.split('\n').entries()) {
     if (line.trim()) entries.push(transcriptEntry(line, source, index + 1));
@@ -2753,13 +2785,13 @@ const failedRequest = (message) => message.stopReason === 'error' && (message.se
 // cache writes, and output over the assistant messages. With `model`, only the assistant messages of that model
 // count, so the messages of a fallback model stay out; with no message of `model`, seconds are null and tokens 0. A
 // failed request (see failedRequest) counts for the seconds also with another model, because its time is real wall
-// time. `model_usage` side calls never count.
-export function parseTranscript(text, source = 'transcript', model) {
+// time. `model_usage` side calls never count. `entries` are the records of the transcript (see transcriptEntries).
+export function parseTranscript(entries, source = 'transcript', model) {
   let first;
   let last;
   let lastCounted;
   let tokens = 0;
-  for (const entry of transcriptEntries(text, source)) {
+  for (const entry of entries) {
     if (entry.type !== 'message') continue;
     const time = Date.parse(entry.timestamp);
     if (entry.message?.role === 'user' && first === undefined) first = time;
@@ -2809,11 +2841,15 @@ function runtimeVersion(entry) {
 // message is setup, so it shows only through the messages after it. When the assistant messages call tools,
 // `toolCalls` lists the calls in order; a transcript without a tool call gives no `toolCalls`. A web search call whose
 // tool result is in the transcript also gets `resultUrls`: the URLs that the result cites (see resultUrls). A call
-// whose tool result is an error result (`isError: true`) gets `error: true`: the tool showed no file for it.
+// whose tool result is an error result (`isError: true`) gets `error: true`: the tool showed no file for it. A search
+// call (omp.mjs SEARCH_TOOLS) whose tool result lists what it showed (`details.files`: a local path, relative to
+// `details.cwd` or absolute, or an internal URI such as `local://3.log`) also gets `resultFiles` (see
+// searchResultFiles). They show what the search read, also after a file of its path is gone (see readScope).
 // `ompVersion` is the omp version of the last record that names one (no field without such a record). A transcript
 // with more than one user message gets `revived: true`: a revived agent appends its next task to the transcript of
-// the first one, so its time and tokens do not show one review (see invalidReasons).
-export function transcriptFacts(text, source = 'transcript') {
+// the first one, so its time and tokens do not show one review (see invalidReasons). `entries` are the records of the
+// transcript (see transcriptEntries).
+export function transcriptFacts(entries) {
   const facts = { requestedTier: null, messages: [], sideCalls: [] };
   const toolCalls = [];
   const callsById = new Map();
@@ -2822,7 +2858,7 @@ export function transcriptFacts(text, source = 'transcript') {
   let requested = null;
   let userMessages = 0;
   let ompVersion = null;
-  for (const entry of transcriptEntries(text, source)) {
+  for (const entry of entries) {
     ompVersion = runtimeVersion(entry) ?? ompVersion;
     if (entry.type === 'thinking_level_change') effort = entry.thinkingLevel ?? null;
     else if (entry.type === 'model_change' && typeof entry.model === 'string') model = entry.model;
@@ -2841,6 +2877,10 @@ export function transcriptFacts(text, source = 'transcript') {
     } else if (entry.type === 'message' && entry.message?.role === 'toolResult') {
       const call = callsById.get(entry.message.toolCallId);
       if (call?.name === WEB_SEARCH_TOOL) call.resultUrls = resultUrls(entry.message);
+      if (call && SEARCH_TOOLS.has(call.name)) {
+        const files = searchResultFiles(entry.message.details);
+        if (files.length) call.resultFiles = files;
+      }
       if (call && entry.message.isError === true) call.error = true;
     }
   }
@@ -2849,6 +2889,15 @@ export function transcriptFacts(text, source = 'transcript') {
   if (ompVersion !== null) facts.ompVersion = ompVersion;
   if (userMessages > 1) facts.revived = true;
   return toolCalls.length ? { ...facts, toolCalls } : facts;
+}
+
+// What the tool result of a search shows (`details.files`). A relative local path resolves against `details.cwd` when
+// the result names one; an absolute path and a URI stay as they are, so readScope reads a URI by its URI rules. An
+// empty list without `details.files`.
+function searchResultFiles(details) {
+  const files = Array.isArray(details?.files) ? details.files.filter((file) => typeof file === 'string' && file) : [];
+  if (typeof details?.cwd !== 'string') return files;
+  return files.map((file) => (uriScheme(file) === undefined ? path.resolve(details.cwd, file) : file));
 }
 
 // The JSON type of a value: 'null', 'array', or its `typeof`.
@@ -2874,9 +2923,9 @@ function recordValues(entry, { type, role, part }) {
 // Checks that a transcript has the shape that omp.mjs TRANSCRIPT_RECORDS lists, and stops with each difference: a
 // required record that the transcript does not have, a field `<record>.<field>` that a selected value does not have or
 // has with another type, and records of more than one omp version. score.mjs reads these records and fields, so a
-// transcript of an omp release that changed them would give wrong numbers without notice.
-export function checkTranscriptShape(text, source = 'transcript') {
-  const entries = transcriptEntries(text, source);
+// transcript of an omp release that changed them would give wrong numbers without notice. `entries` are the records of
+// the transcript (see transcriptEntries), and `source` names it in the message.
+export function checkTranscriptShape(entries, source = 'transcript') {
   const problems = [];
   for (const spec of TRANSCRIPT_RECORDS) {
     const values = entries.flatMap((entry) => recordValues(entry, spec));
@@ -2932,10 +2981,11 @@ function stringsOf(value) {
 // The fixer reply of a transcript: each finding id that the reply names, with `repaired` or `not present`; a later
 // line of an id wins. By the reply rule of omp.mjs (REPLY_TOOL), the reply is each string in the arguments of the last
 // call of the reply tool when the transcript has one, else the text of the last assistant message with text.
-export function fixerReplies(text, source) {
+// `entries` are the records of the transcript (see transcriptEntries).
+export function fixerReplies(entries) {
   let yielded;
   let said = [];
-  for (const entry of transcriptEntries(text, source)) {
+  for (const entry of entries) {
     if (entry.type !== 'message' || entry.message?.role !== 'assistant') continue;
     const content = Array.isArray(entry.message.content) ? entry.message.content : [];
     for (const item of content) {
@@ -2955,13 +3005,13 @@ export function fixerReplies(text, source) {
 // The working directory of the session of a transcript, the plugin roots that the agent text of the session names,
 // the self-review agent files that it names, and, for a self-review agent, the self-review roots that it names (see
 // selfReviewSkillRoots). omp records the agent text in the system prompt (a string or a list of strings) of the
-// `session_init` entry.
-export function transcriptSession(text, source) {
+// `session_init` entry. `entries` are the records of the transcript (see transcriptEntries).
+export function transcriptSession(entries) {
   let cwd = null;
   const pluginRoots = new Set();
   const agentFiles = new Set();
   const skillRoots = new Set();
-  for (const entry of transcriptEntries(text, source)) {
+  for (const entry of entries) {
     if (entry.type === 'session' && cwd === null && typeof entry.cwd === 'string') cwd = entry.cwd;
     if (entry.type !== 'session_init') continue;
     const prompt = [entry.systemPrompt]
@@ -2969,11 +3019,18 @@ export function transcriptSession(text, source) {
       .filter((part) => typeof part === 'string')
       .join('\n');
     for (const root of reviewerPluginRoots(prompt)) pluginRoots.add(root);
-    const files = Array.from(prompt.matchAll(SELF_REVIEW_AGENT_FILE), instructionPath);
+    const files = selfReviewAgentFiles(prompt);
     for (const file of files) agentFiles.add(file);
     if (files.length) for (const root of selfReviewSkillRoots(prompt)) skillRoots.add(root);
   }
   return { cwd, pluginRoots: [...pluginRoots], agentFiles: [...agentFiles], skillRoots: [...skillRoots] };
+}
+
+// The agent that omp ran for a transcript: the nonempty `agent` of its first `session_init` entry, or null without
+// one. transcriptsCommand compares it with the agent that the prompt of the dispatch names.
+function sessionAgent(entries) {
+  const agent = entries.find((entry) => entry.type === 'session_init')?.agent;
+  return typeof agent === 'string' && agent.trim() !== '' ? agent : null;
 }
 
 // The folder itself or a path below it.
@@ -3388,36 +3445,199 @@ function targetAllowed(target, cwd, rules, searches = false) {
   return WEB_SCHEMES.has(scheme) && webPageAllowed(target);
 }
 
-// A local path or an internal URI without its read selector, and a local path also without its JSON query selector; a
-// web URL stays as it is.
-const withoutSelector = (target) => {
+// A comma list that repeats its colon (`a:1-30,:-30`) or writes the range dash as a colon (`a:20:40,85:100`) folds into
+// one selector list, as foldListColons of omp 19.0.0 folds it; `clip.mp4:1:30` keeps its colons.
+function foldListColons(basePath, list) {
+  const chunks = list.split(',').reverse();
+  let base = basePath;
+  let dashed = false;
+  for (;;) {
+    const colon = base.lastIndexOf(':');
+    if (colon < 1) break;
+    const head = base.slice(colon + 1);
+    if (head.endsWith(',')) {
+      const repeated = head.slice(0, -1);
+      if (!SPLIT_RANGES_ONLY.test(repeated)) break;
+      chunks.push(...repeated.split(',').reverse());
+    } else {
+      const headChunks = head.split(',');
+      const start = headChunks.pop();
+      const end = chunks.at(-1);
+      if (!SPLIT_BARE_LINE.test(start) || !SPLIT_BARE_LINE.test(end)) break;
+      if (headChunks.length > 0 && !SPLIT_RANGES_ONLY.test(headChunks.join(','))) break;
+      chunks[chunks.length - 1] = `${start}-${end}`;
+      chunks.push(...headChunks.reverse());
+      dashed = true;
+    }
+    base = base.slice(0, colon);
+  }
+  if (dashed && chunks.length === 1) return { basePath, list };
+  return { basePath: base, list: chunks.reverse().join(',') };
+}
+
+// A local path split from its trailing read selector, as splitPathAndSel of omp 19.0.0 splits it: `{ path, sel }`, or
+// `{ path }` when the tail is no selector of omp (SPLIT_SELECTOR), such as `:notes`. `fold: false` keeps a colon inside
+// a list in the path.
+function splitSelector(rawPath, fold = true) {
+  const hoisted = SPLIT_PER_CHUNK_RAW.exec(rawPath);
+  if (hoisted && /raw/i.test(hoisted[1])) {
+    const chunks = hoisted[1].split(',').map((chunk) => chunk.replace(/^raw:|:raw$/gi, ''));
+    rawPath = `${rawPath.slice(0, hoisted.index)}:${chunks.join(',')}:raw`;
+  }
+  const colon = rawPath.lastIndexOf(':');
+  if (colon <= 0) return { path: rawPath };
+  const candidate = rawPath.slice(colon + 1);
+  if (!SPLIT_SELECTOR.test(candidate)) return { path: rawPath };
+  let basePath = rawPath.slice(0, colon);
+  let list;
+  let rawSuffix = '';
+  if (SPLIT_RANGES_ONLY.test(candidate)) list = candidate;
+  else if (SPLIT_RAW_ONLY.test(candidate)) {
+    const innerColon = basePath.lastIndexOf(':');
+    const inner = basePath.slice(innerColon + 1);
+    if (innerColon > 0 && SPLIT_RANGES_ONLY.test(inner)) {
+      list = inner;
+      rawSuffix = `:${candidate}`;
+      basePath = basePath.slice(0, innerColon);
+    }
+  }
+  if (list === undefined) return { path: basePath, sel: candidate };
+  if (fold) ({ basePath, list } = foldListColons(basePath, list));
+  if (!rawSuffix) {
+    const innerColon = basePath.lastIndexOf(':');
+    const inner = basePath.slice(innerColon + 1);
+    if (innerColon > 0 && SPLIT_RAW_ONLY.test(inner)) {
+      return { path: basePath.slice(0, innerColon), sel: `${inner}:${list}` };
+    }
+  }
+  return { path: basePath, sel: `${list}${rawSuffix}` };
+}
+
+// Whether omp finds a local path: `exists`, `missing`, or `unknown` for another error of the check, as
+// probeLiteralPathExists of omp 19.0.0 checks it with `lstat` (a link counts, also a dangling one). A relative path
+// without a working directory is `missing`: the check cannot find it.
+const MISSING_CODES = ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'];
+function literalProbe(target, cwd) {
+  return cachedProbe(cwd)(target);
+}
+
+// literalProbe for the working directory `cwd` that checks each file once. `probe.exists(target)` tells, as
+// `fs.existsSync` does, whether the path exists after its links: after an `lstat` of the path it reuses that result
+// (a path that is missing, or that is no link, needs no other check), else it asks `fs.existsSync` once.
+// transcriptsCommand gives one probe to the list inference and the read scope of a transcript, so the choice of
+// targets, the lists, and the scope check each file once (the files do not change while the command runs).
+function cachedProbe(cwd) {
+  const seen = new Map();
+  const followed = new Map();
+  const keyOf = (target) => ompFile(target, cwd) ?? target;
+  const probe = (target) => {
+    const key = keyOf(target);
+    if (!seen.has(key)) {
+      const file = ompFile(target, cwd);
+      let found = { probe: 'missing' };
+      if (typeof file === 'string') {
+        try {
+          found = { probe: 'exists', link: fs.lstatSync(file).isSymbolicLink() };
+        } catch (error) {
+          found = { probe: MISSING_CODES.includes(error?.code) ? 'missing' : 'unknown' };
+        }
+      }
+      seen.set(key, found);
+    }
+    return seen.get(key).probe;
+  };
+  probe.exists = (target) => {
+    const key = keyOf(target);
+    const found = seen.get(key);
+    if (found?.probe === 'missing') return false;
+    if (found?.probe === 'exists' && !found.link) return true;
+    if (!followed.has(key)) {
+      const file = ompFile(target, cwd);
+      followed.set(key, typeof file === 'string' && fs.existsSync(file));
+    }
+    return followed.get(key);
+  };
+  return probe;
+}
+
+// The local path that omp opens for a target of a read or a search, and its selector, as
+// splitPathAndSelPreferringLiteral of omp 19.0.0 decides them (grep.ts parsePathSpecs and isExclusionEntry): a target
+// without a selector of omp is its own path; else a target whose literal path exists (or cannot be checked on POSIX)
+// keeps its whole text, such as a file named `plan.md:1-20`; else the path before a colon inside a list when that path
+// exists; else the path of the selector split. Only a target with a selector of omp checks the file system, through
+// `probe` (see literalProbe and cachedProbe).
+function ompSplitTarget(target, cwd, probe = (item) => literalProbe(item, cwd)) {
+  const strict = splitSelector(target);
+  if (strict.sel === undefined) return strict;
+  if (probe(target) !== 'missing') return { path: target };
+  const unfolded = splitSelector(target, false);
+  if (unfolded.path !== strict.path && probe(unfolded.path) === 'exists') return unfolded;
+  return strict;
+}
+
+// The path of a target of a call of the tool `name` that the read scope checks first: a web URL as it is; an internal
+// URI without its read selector; a local path, for a `read` call without its JSON query selector (`?q=`, which omp
+// reads after the file; a search path keeps it), and then the path that omp opens (see ompSplitTarget).
+function ompTargetPath(target, cwd, name, probe) {
   const scheme = uriScheme(target);
   if (WEB_SCHEMES.has(scheme)) return target;
-  const read = scheme === undefined ? target.replace(JSON_QUERY_SELECTOR, '') : target;
-  return read.replace(READ_SELECTOR, '');
-};
+  if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
+  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd, probe).path;
+}
+
+// The paths that the local text `text` of a call of the tool `name` can name when it holds a selector-like tail: the
+// whole text and the paths of its selector split, folded and unfolded (see splitSelector); for a `read` call also the
+// paths of the text without its JSON query selector (`?q=`), because omp opens an existing literal file whose name
+// holds it first. omp picks one of them by the files at the time of the call (see ompSplitTarget), and the files can
+// have changed since, so the read scope does not rely on that one pick alone: each of these paths that exists when
+// transcripts runs must be allowed (see readScope), and a `!` part of a grep path is an exclusion only when none of
+// them exists (see isExclusion). A text without such a tail names only itself.
+function pathInterpretations(text, name) {
+  if (uriScheme(text) !== undefined) return [text];
+  const forms = (item) => [item, splitSelector(item).path, splitSelector(item, false).path];
+  const query = name === READ_TOOL ? text.replace(JSON_QUERY_SELECTOR, '') : text;
+  return distinct([...forms(text), ...(query === text ? [] : forms(query))]);
+}
+
+// The interpretations of `text` (see pathInterpretations) that exist now; an inconclusive check counts as existing,
+// so the read scope fails closed. A text with one interpretation gives none unless `always`: the check of its target
+// covers it. A `;` member of a search path that the whole path kept as one target has no check of its own, so it is
+// checked `always`.
+function existingInterpretations(text, name, probe, always = false) {
+  const paths = pathInterpretations(text, name);
+  if (paths.length === 1 && !always) return [];
+  return paths.filter((item) => uriScheme(item) === undefined && probe(item) !== 'missing');
+}
 
 // The targets of the `path` argument of a call of the tool `name`: for a tool whose path takes a list
-// (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector. An exclusion
-// part (see isExclusion) reads nothing, so it gives no target. A list of exclusions only searches the working
-// directory (see readScope).
-function pathTargets(name, value, cwd) {
-  if (!PATH_LIST_TOOLS.has(name)) return [value.trim()].filter(Boolean);
+// (PATH_LIST_TOOLS), its `;`-separated parts, else the whole path; each trimmed, with its read selector. A list path
+// whose path as omp opens it (see ompSplitTarget) exists, such as an existing file or folder as a whole or that path
+// with a selector, is one target, because omp keeps such a literal path before it splits a list
+// (splitDelimitedPathEntry in packages/coding-agent/src/tools/path-utils.ts of omp 19.0.0): for example a snapshot
+// folder under a workspace `bench-gpt;7`. Only a `;` splits such a path, so only a path with a `;` needs this check of
+// the file system; the path of every other tool is one target without it. An exclusion part (see isExclusion) reads
+// nothing, so it gives no target. A list of exclusions only searches the working directory (see readScope).
+function pathTargets(name, value, cwd, probe = cachedProbe(cwd)) {
+  const trimmed = value.trim();
+  if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
+  if (trimmed.includes(';') && probe.exists(ompSplitTarget(trimmed, cwd, probe).path)) return [trimmed];
   return value
     .split(';')
     .map((part) => part.trim())
-    .filter((part) => part && !isExclusion(name, part, cwd));
+    .filter((part) => part && !isExclusion(name, part, cwd, probe));
 }
 
-// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX and names no existing path is an
-// exclusion glob, as omp reads it. Without a working directory, a relative part cannot be checked, so it stays a target.
-function isExclusion(name, part, cwd) {
-  return (
-    EXCLUSION_TOOLS.has(name) &&
-    part.startsWith(EXCLUSION_PREFIX) &&
-    typeof ompFile(part, cwd) === 'string' &&
-    !ompPathExists(part, cwd)
-  );
+// A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob only when no path
+// that it can name exists (see pathInterpretations; omp 19.0.0 isExclusionEntry decides by the path that it opens): so
+// `!notes.md:1-2` and `!notes.md:20:40,85:100` of an existing `!notes.md` are search roots, `!notes.md:backup:1-2` of
+// an existing `!notes.md:backup` is one too, and `!review.diff:notes` is an exclusion when no file has that name,
+// also when `!review.diff` exists (`:notes` is no selector of omp). Without a working directory, a relative part cannot
+// be checked, so it stays a target.
+function isExclusion(name, part, cwd, probe = cachedProbe(cwd)) {
+  if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
+    return false;
+  }
+  return pathInterpretations(part, name).every((item) => probe(item) === 'missing');
 }
 
 // The parts of `text` between the delimiters that `delimiter` matches, outside `{}` and not after a backslash, as
@@ -3452,11 +3672,6 @@ function ompFile(target, cwd) {
   return typeof cwd === 'string' ? path.resolve(cwd, target) : null;
 }
 
-function ompPathExists(target, cwd) {
-  const file = ompFile(target, cwd);
-  return typeof file === 'string' && fs.existsSync(file);
-}
-
 // A local path whose file, or for a glob the folder before its first glob segment, does not exist. A URI, and a
 // relative path without a working directory, is no missing path: the check cannot find its file.
 function pathMissing(target, cwd) {
@@ -3469,19 +3684,20 @@ function pathMissing(target, cwd) {
 // the target as a list of paths (see LIST_SPLITS), each with its read selector, or null when omp reads the target as
 // one path. A target whose whole path exists, as written or without its read selector, is one path, also when it
 // holds a delimiter: for example a file whose name holds a space or a `;`, or a workspace folder with a space.
-function delimitedParts(target, cwd) {
+function delimitedParts(target, cwd, name, probe = cachedProbe(cwd)) {
   if (splitPathList(target, ANY_DELIMITER) === null) return null;
   if (uriScheme(target) !== undefined) {
     const parts = splitPathList(target, URI_DELIMITER);
     return parts !== null && parts.length > 1 && parts.every((part) => uriScheme(part) !== undefined) ? parts : null;
   }
-  if (ompPathExists(target, cwd) || ompPathExists(target.replace(OMP_SELECTOR, ''), cwd)) return null;
-  // omp reads `<file>?q=<filter>` as one file with a JSON query, also when the filter holds a delimiter.
-  if (ompPathExists(target.replace(JSON_QUERY_SELECTOR, ''), cwd)) return null;
+  if (probe.exists(target) || probe.exists(target.replace(OMP_SELECTOR, ''))) return null;
+  // omp reads `<file>?q=<filter>` of a `read` call as one file with a JSON query, also when the filter holds a
+  // delimiter; a search path has no JSON query.
+  if (name === READ_TOOL && probe.exists(target.replace(JSON_QUERY_SELECTOR, ''))) return null;
   const exists = (part) => {
     const scheme = uriScheme(part);
     if (scheme !== undefined) return !WEB_SCHEMES.has(scheme);
-    return ompPathExists(globParts(part.replace(OMP_SELECTOR, '')).base, cwd);
+    return probe.exists(globParts(part.replace(OMP_SELECTOR, '')).base);
   };
   for (const { delimiter, existing } of LIST_SPLITS) {
     const parts = splitPathList(target, delimiter);
@@ -3514,11 +3730,12 @@ function recordedParts(details) {
 }
 
 // The tool calls of the assistant messages of a transcript, in order, and the tool result message of each call, by the
-// id of the call (its `toolCallId`). readLists and diffCoverage read them.
-function toolCallResults(text, source) {
+// id of the call (its `toolCallId`). readLists and diffCoverage read them. `entries` are the records of the transcript
+// (see transcriptEntries).
+function toolCallResults(entries) {
   const calls = [];
   const results = new Map();
-  for (const entry of transcriptEntries(text, source)) {
+  for (const entry of entries) {
     const message = entry.type === 'message' ? entry.message : undefined;
     if (message?.role === 'assistant' && Array.isArray(message.content)) {
       calls.push(...message.content.filter((item) => item?.type === 'toolCall'));
@@ -3530,21 +3747,24 @@ function toolCallResults(text, source) {
 }
 
 // The list targets of the tool calls `calls` of a transcript: a map from each target (see pathTargets) that omp read
-// as a list of paths to these paths, each without its read selector. A relative path stays relative, and readScope
-// resolves it against the working directory `cwd` of the session, as omp did. For a `read` call whose tool result (in
-// `results`, see toolCallResults) records a list, the tool result decides, because it shows what omp read (see
-// recordedParts). For every other call, the files decide as they decided for omp (see delimitedParts); readLists
-// checks them when it runs, after the session. Without a record, readLists cannot see which paths omp could not read,
-// so each path of the split counts. When two calls give paths for the same target, the map keeps the paths of both.
-function readLists({ calls, results }, cwd) {
+// as a list of paths to these paths as omp wrote them, with their read selectors; readScope checks the path that omp
+// opens for each (see ompTargetPath) and its other interpretations (see pathInterpretations). A relative path stays
+// relative, and readScope resolves it against the working directory `cwd` of the session, as omp did. For a `read`
+// call whose tool result (in `results`, see toolCallResults) records a list, the tool result decides, because it
+// shows what omp read (see recordedParts). For every other call, the files decide as they decided for omp (see
+// delimitedParts); readLists checks them when it runs, after the session. Without a record, readLists cannot see which
+// paths omp could not read, so each path of the split counts. When two calls give paths for the same target, the map
+// keeps the paths of both.
+function readLists({ calls, results }, cwd, probe = cachedProbe(cwd)) {
   const lists = new Map();
   for (const call of calls) {
     const value = call.arguments?.path;
     if (typeof value !== 'string') continue;
     const recorded = call.name === READ_TOOL ? recordedParts(results.get(call.id)?.details) : null;
-    for (const target of pathTargets(call.name, value, cwd)) {
-      const parts = recorded ?? delimitedParts(target, cwd);
-      if (parts !== null) lists.set(target, distinct([...(lists.get(target) ?? []), ...parts.map(withoutSelector)]));
+    for (const target of pathTargets(call.name, value, cwd, probe)) {
+      const parts = recorded ?? delimitedParts(target, cwd, call.name, probe);
+      if (parts === null) continue;
+      lists.set(target, distinct([...(lists.get(target) ?? []), ...parts]));
     }
   }
   return lists;
@@ -3654,7 +3874,7 @@ function shownLines({ calls, results }, file, lines, cwd) {
     const result = results.get(call.id);
     if (result === undefined || result.isError === true) continue;
     const target = value.trim();
-    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd)) !== null) continue;
+    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd, READ_TOOL)) !== null) continue;
     const selector = selectorOfRead(target, file, cwd);
     if (selector !== null) for (const line of resultLines(result.details, selector, lines)) shown.add(line);
   }
@@ -3761,13 +3981,22 @@ function diffCoverage(tools, file, cwd) {
 // target `<name> without a path`; other calls without a path read no file.
 // The path of a grep, glob, or ast_grep call is a `;`-separated list of targets; the path of every other tool is one
 // target, also when it holds a `;`. When no file or folder has the path of a target, omp can read it as a list of
-// paths. `lists` maps each target that omp read as a list to these paths, each without its read selector
-// (transcriptsCommand gives it, see readLists); a list target is allowed when each of these paths is allowed. Every
-// other target is one path.
+// paths. `lists` maps each target that omp read as a list to these paths as omp wrote them, maybe with read selectors
+// (transcriptsCommand gives it, see readLists); a list target is allowed when the path that omp opens for each of
+// these paths (see ompTargetPath) and each of its other interpretations that exists are allowed. Every other target is
+// one path.
 // A web search has no path: `queries` lists its queries, each once, in call order. A query that targets the benchmark
 // repository (see targetsBenchmark) gives the outside target `web_search: <query>`, and each cited URL of its result
 // that webPageAllowed refuses gives `web_search result: <url>`. A reviewer without a web search gets no `queries`.
-// A local path also loses its JSON query selector (`?q=`), because omp reads the file before it.
+// A local path of a `read` call also loses its JSON query selector (`?q=`), because omp reads the file before it; an
+// existing file whose name holds the query is one of its interpretations (see below). A search path keeps `?q=`.
+// A search call with `resultFiles` (see transcriptFacts) also gives the outside target `<name> result: <file>` for each
+// file of its result that is not allowed. The result shows what the search read, so this rule holds also when the
+// files decide the split of its path in another way after the call (see delimitedParts).
+// A target with a selector-like tail, and the whole path of a list tool before its `;` split, can name more than one
+// path (see pathInterpretations). The read scope checks the path that omp opens (see ompTargetPath) and also each of
+// these paths that exists when transcripts runs, so the scope fails closed when omp could have opened another one: such
+// a path that is not allowed is outside, as written.
 // The reviewer setup is newer than the cases. When a case changes the file of an optional instruction read, that read
 // shows a later version of a file under review, which can show the fix. `changedFiles` are the repository paths that
 // the case changes (transcriptsCommand reads them). The rule compares keys, the paths from the skill folder name on:
@@ -3791,6 +4020,7 @@ export function readScope(
     heldSkills = [],
     changedFiles = [],
     lists = new Map(),
+    probe = cachedProbe(cwd),
   },
 ) {
   const rules = scopeRules(path.resolve(runDir), round, {
@@ -3803,7 +4033,14 @@ export function readScope(
   const outside = new Set();
   const missing = new Set();
   const queries = new Set();
-  for (const { name, path: value, query, resultUrls: cited = [], error = false } of toolCalls) {
+  for (const {
+    name,
+    path: value,
+    query,
+    resultUrls: cited = [],
+    resultFiles: shown = [],
+    error = false,
+  } of toolCalls) {
     if (name === WEB_SEARCH_TOOL) {
       if (typeof query === 'string') {
         queries.add(query);
@@ -3812,7 +4049,12 @@ export function readScope(
       for (const url of cited) if (!webPageAllowed(url)) outside.add(`${WEB_SEARCH_TOOL} result: ${url}`);
       continue;
     }
-    const targets = typeof value === 'string' ? pathTargets(name, value, cwd) : [];
+    for (const file of shown) if (!targetAllowed(file, cwd, rules)) outside.add(`${name} result: ${file}`);
+    // The file checks of `probe` are shared by the choice of targets, the pick of omp, the other interpretations, and
+    // the list inference of the transcript (transcriptsCommand gives readLists the same probe). `check` gives each
+    // path its scope verdict once per spelling: the rules read a path as it is written (a `..` after a glob segment, a
+    // `..` in an installed skill path), so two spellings of one file can differ.
+    const targets = typeof value === 'string' ? pathTargets(name, value, cwd, probe) : [];
     if (!targets.length) {
       if (SEARCH_TOOLS.has(name)) outside.add(`${name} without a path`);
       continue;
@@ -3820,15 +4062,42 @@ export function readScope(
     const refuse = (target, refused) =>
       (error && refused.every((part) => pathMissing(part, cwd)) ? missing : outside).add(target);
     const searches = SEARCH_TOOLS.has(name);
+    const verdicts = new Map();
+    const check = (item) => {
+      if (!verdicts.has(item)) verdicts.set(item, targetAllowed(item, cwd, rules, searches));
+      return verdicts.get(item);
+    };
+    // Each text whose interpretations that exist now must be allowed too, with `always` for a text that has no check
+    // of its own: the whole path of a list tool and its `;` members outside `{}`, as omp splits them (see
+    // splitPathList), the targets, and each list target as a whole and its members.
+    const alternatives = [];
+    if (PATH_LIST_TOOLS.has(name)) {
+      const members = splitPathList(value, URI_DELIMITER) ?? [];
+      if (members.length) alternatives.push([value.trim(), true]);
+      for (const member of members) alternatives.push([member, !targets.includes(member)]);
+    }
     for (const target of targets) {
       const parts = lists.get(target);
+      alternatives.push([target, parts !== undefined]);
       if (parts !== undefined) {
-        const refused = parts.filter((part) => !targetAllowed(part, cwd, rules, searches));
+        for (const part of parts) alternatives.push([part, false]);
+        const opened = distinct(parts.map((part) => ompTargetPath(part, cwd, name, probe)));
+        const refused = opened.filter((part) => !check(part));
         if (refused.length) refuse(target, refused);
         continue;
       }
-      const read = withoutSelector(target);
-      if (!targetAllowed(read, cwd, rules, searches)) refuse(read, [read]);
+      const read = ompTargetPath(target, cwd, name, probe);
+      if (!check(read)) refuse(read, [read]);
+    }
+    // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
+    // which of them omp opened (see pathInterpretations). Such a path exists, so it is outside, never missing: a refused
+    // target that went to `missing` and that the probe finds, or cannot decide, moves to `outside`.
+    for (const [text, always] of alternatives) {
+      for (const item of existingInterpretations(text, name, probe, always)) {
+        if (check(item)) continue;
+        outside.add(item);
+        missing.delete(item);
+      }
     }
   }
   const scope = { outside: [...outside] };
@@ -3978,6 +4247,8 @@ export function pairsCommand(ws, casesDir, { keys } = {}) {
 }
 
 // A key that changed after `pairs` would score the runs against an old list of known defects or protected decisions.
+// With --keys, every held-out key comes from the keys folder, so a held-out case without a key file there stops the
+// command too: pairs.json would hold the key of another folder. A dev case with inline known defects has no key file.
 function requireCurrentKeys(pairsDoc, keys) {
   const ids = (items) =>
     items
@@ -3986,7 +4257,14 @@ function requireCurrentKeys(pairsDoc, keys) {
       .join(', ') || 'none';
   for (const entry of pairsDoc.cases) {
     const key = readKeyFile(keys, entry.case);
-    if (key === undefined) continue;
+    if (key === undefined) {
+      if (entry.split === 'heldout') {
+        fail(
+          `${keyFile(keys, entry.case)} is missing: --keys reads the key of every held-out case from the keys folder; copy the key there and run score.mjs pairs again`,
+        );
+      }
+      continue;
+    }
     if (ids(key.known) !== ids(entry.known)) {
       fail(
         `pairs.json is out of date for ${entry.case}: its key has ${ids(key.known)}, but pairs.json has ${ids(entry.known)}; run score.mjs pairs again`,
@@ -4377,9 +4655,17 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // field when the reply names no finding). The manager entry of a round, under `manager.agents`, gets the same facts,
 // and `manager.seconds` and `manager.tokens` are its time and tokens; `report` checks them against the manager setting
 // of the run (see managerStage). Each entry also gets `ompVersion` and, for a transcript with more than one task,
-// `revived` (see transcriptFacts). meta.json keeps no tool calls. The command checks every dispatch name and the
-// shape of every transcript that it picks (see checkTranscriptShape) before it writes, writes what it finds, then
-// fails with the names of the dispatches that have no transcript.
+// `revived` (see transcriptFacts). meta.json keeps no tool calls. Decoding is bounded: to pick a transcript, the task
+// lookup (transcriptTask) decodes only the records of each candidate up to its first user message; then the command
+// decodes each transcript that it picks one time in full (see transcriptEntries), and every reader takes these
+// records. Before it looks for any transcript, it checks the header of every saved prompt: a prompt without its first
+// line `agent: <name>` is damaged, so the command stops before it writes, names each such prompt, and asks to restore
+// its header. Before it writes, it also checks every dispatch name, the shape of every transcript that it picks (see
+// checkTranscriptShape), and the agent of each of these transcripts: omp records the agent that it ran in the
+// `session_init` entry (see sessionAgent), and the command stops when that agent is not the agent of the prompt, or
+// when the transcript names no agent: a transcript of another agent, for example of another plan-reviewer variant
+// under the task name of this one, shows the review of another arm, so the message asks for a new dispatch. Then the
+// command writes what it finds, and fails with the names of the dispatches that have no transcript.
 export function transcriptsCommand(ws, sessionsDir) {
   const files = transcriptFiles(sessionsDir);
   const wsDir = path.resolve(ws);
@@ -4388,75 +4674,95 @@ export function transcriptsCommand(ws, sessionsDir) {
     if (!byDir.has(dispatch.dir)) byDir.set(dispatch.dir, []);
     byDir.get(dispatch.dir).push(dispatch);
   }
-  // The transcript of each dispatch that has one. Every transcript passes the shape check before a meta.json changes.
-  const picked = new Map();
+  // The agent that each saved prompt names. A damaged prompt stops the command before any transcript lookup.
+  const promptAgents = new Map();
   for (const dispatch of [...byDir.values()].flat()) {
-    const caseFolder = path.join(wsDir, dispatch.caseId);
-    const file = pickTranscript(files, dispatch.name, (candidate) =>
-      namesPathUnder(transcriptTask(candidate), caseFolder),
-    );
-    if (!file) continue;
-    checkTranscriptShape(fs.readFileSync(file, 'utf8'), file);
-    picked.set(dispatch, file);
+    promptAgents.set(dispatch, PROMPT_AGENT.exec(readText(dispatch.prompt))?.[1] ?? null);
   }
-  const updated = [];
+  const headless = [...promptAgents].filter(([, agent]) => agent === null).map(([dispatch]) => dispatch.prompt);
+  if (headless.length) {
+    fail(
+      `transcripts: ${headless.length} prompts have no agent header: ${listSome(headless, LISTED_READS)}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
+    );
+  }
+  // The update of each folder from the transcripts of its dispatches. Every transcript passes the shape check and the
+  // agent check before a meta.json changes.
+  const updates = [];
   const missing = [];
+  const otherAgents = [];
   for (const [dir, dispatches] of byDir) {
     const metaFile = path.join(dir, 'meta.json');
     const meta = fs.existsSync(metaFile) ? readJson(metaFile) : {};
-    let changed = false;
+    const results = [];
     // The case changes the same files for each reviewer of the folder, so the command reads them once, when needed.
     let changedFiles;
     for (const dispatch of dispatches) {
       const { caseId, family, arm, run, round, reviewer, name, fixer, manager } = dispatch;
       const caseFolder = path.join(wsDir, caseId);
-      const file = picked.get(dispatch);
+      const file = pickTranscript(files, name, (candidate) => namesPathUnder(transcriptTask(candidate), caseFolder));
       if (!file) {
         missing.push(name);
         continue;
       }
-      const text = fs.readFileSync(file, 'utf8');
-      const { toolCalls, ...facts } = transcriptFacts(text, file);
+      const entries = transcriptEntries(fs.readFileSync(file, 'utf8'), file);
+      checkTranscriptShape(entries, file);
+      const expected = promptAgents.get(dispatch);
+      const ran = sessionAgent(entries);
+      // A transcript without an agent, or with another agent than the prompt names, proves no arm: dispatch it again.
+      if (ran !== expected) otherAgents.push(`${name} (${file}): agent ${ran ?? 'none'}, not ${expected}`);
+      const { toolCalls, ...facts } = transcriptFacts(entries);
+      if (fixer || manager) {
+        const agent = { ...parseTranscript(entries, file), ...facts };
+        results.push({ name, reviewer, fixer, manager, agent, replies: fixer ? fixerReplies(entries) : undefined });
+        continue;
+      }
+      const entry = parseTranscript(entries, file, meta.config?.model);
+      Object.assign(entry, facts);
+      const session = transcriptSession(entries);
+      const tools = toolCallResults(entries);
+      if (toolCalls) {
+        const caseDir = path.join(ws, caseId);
+        changedFiles ??= caseChangedFiles(caseDir, family, round, dir);
+        const runDir = path.join(caseDir, arm, run);
+        // One probe for the list inference and the read scope of this transcript (see cachedProbe).
+        const probe = cachedProbe(session.cwd);
+        const lists = readLists(tools, session.cwd, probe);
+        const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots]);
+        const options = { runDir, round, changedFiles, ...session, heldSkills, lists, probe };
+        entry.readScope = readScope(toolCalls, options);
+      }
+      const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
+      const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd);
+      if (coverage !== null) entry.diffCoverage = coverage;
+      results.push({ name, reviewer, entry });
+    }
+    if (results.length) updates.push({ metaFile, meta, results });
+  }
+  if (otherAgents.length) {
+    fail(
+      `transcripts: ${otherAgents.length} transcripts show another agent than their prompt names: ${listSome(otherAgents, LISTED_READS)}; dispatch them again with the agent of the prompt`,
+    );
+  }
+  const updated = [];
+  for (const { metaFile, meta, results } of updates) {
+    for (const { name, reviewer, fixer, manager, agent, replies, entry } of results) {
       if (fixer) {
-        const agent = { ...parseTranscript(text, file), ...facts };
-        const replies = fixerReplies(text, file);
-        meta.fixer = {
-          ...meta.fixer,
-          seconds: agent.seconds,
-          tokens: agent.tokens,
-          agents: { [reviewer]: agent },
-          replies,
-        };
-        if (Object.keys(replies).length === 0) delete meta.fixer.replies;
+        meta.fixer = { ...meta.fixer, seconds: agent.seconds, tokens: agent.tokens, agents: { [reviewer]: agent } };
+        if (Object.keys(replies).length) meta.fixer.replies = replies;
+        else delete meta.fixer.replies;
       } else if (manager) {
-        const agent = { ...parseTranscript(text, file), ...facts };
         meta.manager = { ...meta.manager, seconds: agent.seconds, tokens: agent.tokens, agents: { [reviewer]: agent } };
       } else {
         meta.reviewers ??= {};
-        const entry = { ...meta.reviewers[reviewer], ...parseTranscript(text, file, meta.config?.model) };
         // The read scope, the read coverage, the omp version, and the revived mark come from this transcript only: a
         // transcript without tool calls read no file.
-        for (const field of TRANSCRIPT_ONLY_FIELDS) delete entry[field];
-        Object.assign(entry, facts);
-        const session = transcriptSession(text, file);
-        const tools = toolCallResults(text, file);
-        if (toolCalls) {
-          const caseDir = path.join(ws, caseId);
-          changedFiles ??= caseChangedFiles(caseDir, family, round, dir);
-          const runDir = path.join(caseDir, arm, run);
-          const lists = readLists(tools, session.cwd);
-          const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots]);
-          entry.readScope = readScope(toolCalls, { runDir, round, changedFiles, ...session, heldSkills, lists });
-        }
-        const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
-        const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd);
-        if (coverage !== null) entry.diffCoverage = coverage;
-        meta.reviewers[reviewer] = entry;
+        const kept = { ...meta.reviewers[reviewer] };
+        for (const field of TRANSCRIPT_ONLY_FIELDS) delete kept[field];
+        meta.reviewers[reviewer] = { ...kept, ...entry };
       }
       updated.push(name);
-      changed = true;
     }
-    if (changed) writeJson(metaFile, meta);
+    writeJson(metaFile, meta);
   }
   if (missing.length) {
     fail(`no transcript under ${sessionsDir} whose task names its case folder in ${wsDir} for: ${missing.join(', ')}`);

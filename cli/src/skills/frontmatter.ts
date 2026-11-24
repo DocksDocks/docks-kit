@@ -95,7 +95,10 @@ export const frontmatterName = (block: string): string | null =>
     ?.trim()
     .replace(/^(["'])(.*)\1$/u, "$2") ?? null;
 
-/** Each SKILL.md below `root`, sorted. The walk skips node_modules, .git, and symbolic links. */
+/**
+ * Each SKILL.md below `root`, sorted. The walk skips node_modules and .git and
+ * follows symbolic links, as the scorer and the payload build do.
+ */
 export function findSkillFiles(root: string): Array<string> {
   const out: Array<string> = [];
   const walk = (dir: string): void => {
@@ -108,11 +111,10 @@ export function findSkillFiles(root: string): Array<string> {
       });
     }
     for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.isSymbolicLink()) {
-        continue;
-      }
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
       const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
+      const stat = entry.isSymbolicLink() ? statSync(full) : entry;
+      if (stat.isDirectory()) walk(full);
       else if (entry.name === "SKILL.md") out.push(full);
     }
   };

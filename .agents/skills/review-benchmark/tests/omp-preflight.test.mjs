@@ -95,7 +95,7 @@ test('agents renders every generated agent with omp 19 frontmatter, lowercase to
   const kinds = {
     baseline: /^review-bench-baseline-(code|plan)-low\.md$/,
     candidate: /^review-bench-candidate-(code|plan)-low\.md$/,
-    variant: /^review-bench-variant-v-plan-low\.md$/,
+    variant: /^review-bench-variant-v-[0-9a-f]{12}-plan-low\.md$/,
     selfReview: /^review-bench-selfreview-(wt-)?low\.md$/,
     fixer: /^review-bench-fixer\.md$/,
     manager: /^review-bench-manager\.md$/,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { test } from 'vitest';
+import { onTestFinished, test, vi } from 'vitest';
 import * as score from '../scripts/score.mjs';
 import {
   findingsCommand,
@@ -60,9 +60,10 @@ test('readScope splits the path of grep, glob, and ast_grep on `;` and keeps the
 //
 // Changed exports:
 // - readScope takes the option `lists`: a Map from a target (the trimmed path of a call, or a `;`-part of the path of
-//   grep, glob, or ast_grep, with its read selector) to the paths that omp read for it, without read selectors. A
+//   grep, glob, or ast_grep, with its read selector) to the paths that omp read for it, each as omp wrote it, with its
+//   own read selector (plan #216: readScope checks the path that omp opens for each and its other interpretations). A
 //   target with an entry is allowed only when each of these paths is allowed, and outside lists it as the reviewer
-//   wrote it. A target without an entry is one path. The function reads no file.
+//   wrote it. A target without an entry is one path.
 // - transcriptsCommand gives readScope the lists of the transcript of the reviewer:
 //   - for a read call whose tool result has `details.displayReadTargets`, the paths of that list, except each path
 //     that a note `Could not read <path>: <reason>` in `details.notes` names (omp could not read it);
@@ -199,6 +200,132 @@ test('transcripts splits a target on `;`, on white space, and on all three delim
   ];
   assert.deepEqual(listReadScope(fixture, calls), { outside: [whiteSpace, semicolons, skills, commaName, allThree] });
 });
+// Plan #216, R67: omp keeps a search path that names an existing file or folder as a whole, as written or without its
+// line selector, before it splits the path on `;` (splitDelimitedPathEntry in path-utils.ts of omp 19.0.0). So a
+// snapshot path under a workspace `bench-gpt;7` is one target, also with a selector.
+test('a grep, glob, or ast_grep path that names an existing path as a whole is one target, also with a `;`', () => {
+  const fixture = listCase(scratch(), 'bench-gpt;7');
+  const { snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const calls = [
+    ['grep', { pattern: 'lock', path: path.join(snapshot, 'src') }],
+    ['grep', { pattern: 'lock', path: `${path.join(snapshot, 'src', 'a.mjs')}:1-20` }],
+    ['glob', { path: snapshot }],
+    ['ast_grep', { pattern: 'lock()', path: path.join(snapshot, 'src', 'a.mjs') }],
+  ];
+  assert.deepEqual(listReadScope(fixture, calls), { outside: [] });
+});
+// Code review round 8 of plan #216: one `transcripts` call shares its file checks between the choice of targets, the
+// list inference, and the read scope, so the ranged grep under `bench-gpt;7` checks its literal path once.
+test('transcripts checks the literal path of a ranged search under a `;` workspace once', () => {
+  const fixture = listCase(scratch(), 'bench-gpt;7');
+  const { snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const literal = `${path.join(snapshot, 'src', 'a.mjs')}:1-20`;
+  const lstat = vi.spyOn(fs, 'lstatSync');
+  const exists = vi.spyOn(fs, 'existsSync');
+  onTestFinished(() => {
+    lstat.mockRestore();
+    exists.mockRestore();
+  });
+  assert.deepEqual(listReadScope(fixture, [['grep', { pattern: 'lock', path: literal }]]), { outside: [] });
+  const checks = [...lstat.mock.calls, ...exists.mock.calls].filter(([file]) => file === literal).length;
+  assert.equal(checks, 1);
+});
+// Plan #216, R61: the split of a search path depends on the files at the time of the call, so the files that the
+// tool result shows decide too. A file outside the inputs that the search showed stays outside after it is gone.
+test('a search result file outside the inputs is outside, also when the file is gone after the call', () => {
+  const fixture = listCase(scratch(), 'bench');
+  const { live, snapshot } = fixture;
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const a = path.join(snapshot, 'src', 'a.mjs');
+  const gone = path.join(live, 'src', 'gone.mjs');
+  // Both files existed at the call, so omp split the path on white space; gone.mjs is gone now. The result names a
+  // file relative to its `cwd`.
+  const calls = [['grep', { pattern: 'lock', path: `${a} ${gone}` }]];
+  const results = { 'call-1': { cwd: live, files: [a, 'src/gone.mjs'] } };
+  assert.deepEqual(listReadScope(fixture, calls, results), { outside: [`grep result: ${gone}`] });
+  // A result that shows only files of the inputs adds no target.
+  assert.deepEqual(listReadScope(fixture, calls, { 'call-1': { cwd: live, files: [a] } }), { outside: [] });
+  // omp can show an internal URI in a search result, for example a spilled output. It stays a URI, which the URI
+  // rules of the read scope allow, and does not resolve against the `cwd` of the result.
+  const spilled = { 'call-1': { cwd: live, files: [a, 'local://3.log'] } };
+  assert.deepEqual(listReadScope(fixture, calls, spilled), { outside: [] });
+});
+// Plan #216, R67 redesign: the read scope does not rely on one emulation of how omp reads a selector-like tail. Every
+// path that a target can name and that exists when transcripts runs must be allowed: the whole text, the text before a
+// `;` split and each `;` member (also when the whole path wins now), each member of a grouped read, and the selector
+// splits. A JSON query (`?q=`) belongs to `read` only: a search path keeps it, and a read also checks an existing file
+// whose name holds it. Each call below runs in the case folder, the working directory of the session, and succeeds;
+// each search matches nothing, so its result has `files: []`, as omp writes it.
+test('every existing interpretation of a search path must be allowed, so an ambiguous tail fails closed', () => {
+  const fixture = listCase(scratch(), 'bench');
+  const { ws, sessions, caseDir, round1 } = fixture;
+  put(caseDir, 'plan.md', '# Plan\n');
+  put(caseDir, 'review.diff', '');
+  const scopeOf = (target, name = 'grep', details = { cwd: caseDir, files: [] }, isError = false) => {
+    const calls = [[name, name === 'grep' ? { pattern: 'lock', path: target } : { path: target }]];
+    const options = { cwd: caseDir, results: { 'call-1': details }, isError };
+    put(sessions, 'Code7C1LowR1K1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, options));
+    assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
+    return readJson(path.join(round1, 'meta.json')).reviewers.full.readScope;
+  };
+  // A file `plan.md;plan.md` exists, and the selector split of the whole path names it.
+  put(caseDir, 'plan.md;plan.md', 'x\n');
+  assert.deepEqual(scopeOf('plan.md;plan.md:20:40,85:100'), { outside: ['plan.md;plan.md'] });
+  // A file named with the whole text exists; `?q=x` is no JSON query of a search.
+  put(caseDir, 'plan.md?q=x;extra:1-20', 'x\n');
+  assert.deepEqual(scopeOf('plan.md?q=x;extra:1-20'), { outside: ['plan.md?q=x;extra:1-20'] });
+  // Two allowed inputs stay in scope.
+  assert.deepEqual(scopeOf('plan.md;review.diff'), { outside: [] });
+  // An allowed snapshot file has the whole path now, but its `;` member `extra.mjs` exists outside the inputs.
+  put(caseDir, 'snapshot/a.mjs;extra.mjs', 'x\n');
+  put(caseDir, 'extra.mjs', 'x\n');
+  assert.deepEqual(scopeOf('snapshot/a.mjs;extra.mjs'), { outside: ['extra.mjs'] });
+  // Code review round 7: omp splits a search path only at the `;` outside `{}`, so `extra{one;two}.mjs` is one member.
+  put(caseDir, 'snapshot/a.mjs;extra{one;two}.mjs', 'x\n');
+  put(caseDir, 'extra{one;two}.mjs', 'x\n');
+  assert.deepEqual(scopeOf('snapshot/a.mjs;extra{one;two}.mjs'), { outside: ['extra{one;two}.mjs'] });
+  // A grouped read shows the allowed literal `alias.md:1-2`, but `alias.md` is a link out of the inputs.
+  put(caseDir, 'snapshot/alias.md:1-2', 'x\n');
+  put(path.dirname(ws), 'secret.md', 'x\n');
+  fs.symlinkSync(path.join(path.dirname(ws), 'secret.md'), path.join(caseDir, 'snapshot', 'alias.md'));
+  put(caseDir, 'snapshot/b.md', 'x\n');
+  const grouped = { displayReadTargets: ['snapshot/alias.md:1-2', 'snapshot/b.md'] };
+  assert.deepEqual(scopeOf('snapshot/alias.md:1-2,snapshot/b.md', 'read', grouped), {
+    outside: ['snapshot/alias.md'],
+  });
+  // omp opens an existing literal `plan.md?q=x` before it reads a JSON query of plan.md.
+  put(caseDir, 'plan.md?q=x', 'x\n');
+  assert.deepEqual(scopeOf('plan.md?q=x', 'read', {}), { outside: ['plan.md?q=x'] });
+  // A grouped read of two allowed members: a literal file with the whole text now exists outside the inputs.
+  put(caseDir, 'review.diff;plan.md', 'x\n');
+  assert.deepEqual(scopeOf('review.diff;plan.md', 'read', { displayReadTargets: ['review.diff', 'plan.md'] }), {
+    outside: ['review.diff;plan.md'],
+  });
+  // A failed read of a dangling link `outside.md:1-2`: lstat finds it, so it is outside, not missing.
+  fs.symlinkSync(path.join(caseDir, 'gone.md'), path.join(caseDir, 'outside.md:1-2'));
+  assert.deepEqual(scopeOf('outside.md:1-2', 'read', {}, true), { outside: ['outside.md:1-2'] });
+});
+// Plan #216, R68: decoding is bounded. To pick a transcript, the task lookup decodes each record of a candidate up to
+// its first user message; then transcripts decodes the picked transcript one time in full and gives its records to
+// every reader. So each record up to the task is decoded twice and each later record once; a reader that decoded the
+// transcript again would add one to each count.
+test('transcripts decodes the task prefix once for the lookup and each transcript once in full', () => {
+  const { ws, sessions, live, caseDir, snapshot } = listCase(scratch(), 'bench');
+  put(snapshot, 'src/a.mjs', 'text\n');
+  const a = path.join(snapshot, 'src', 'a.mjs');
+  const results = { 'call-1': { displayReadTargets: [a] } };
+  const text = toolTranscript(caseDir, 30, [['read', { path: a }]], undefined, { cwd: live, results });
+  put(sessions, 'Code7C1LowR1K1Full.jsonl', text);
+  const lines = text.split('\n');
+  const task = lines.findIndex((line) => JSON.parse(line).message?.role === 'user');
+  const parse = vi.spyOn(JSON, 'parse');
+  onTestFinished(() => parse.mockRestore());
+  assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C1LowR1K1Full']);
+  const decodes = (line) => parse.mock.calls.filter(([value]) => value === line).length;
+  assert.deepEqual(lines.map(decodes), lines.map((_, index) => (index <= task ? 2 : 1)));
+});
 test('readScope records each web search query, and a query that targets the benchmark repository is outside', () => {
   const call = (name, args) => ({ type: 'toolCall', id: name, name, arguments: args });
   const reply = assistantLine(5, 'openai-codex', 'gpt-6.1-sol', 'default', { input: 10 });
@@ -208,7 +335,7 @@ test('readScope records each web search query, and a query that targets the benc
     call('read', { path: `${SCOPE_CASE}/plan.md` }),
   ];
   const text = jsonl([{ type: 'message', timestamp: isoAt(0), message: { role: 'user' } }, reply]);
-  assert.deepEqual(score.transcriptFacts(text, 'search.jsonl').toolCalls, [
+  assert.deepEqual(score.transcriptFacts(score.transcriptEntries(text, 'search.jsonl')).toolCalls, [
     { name: 'web_search', path: null, query: 'node lock release finally' },
     { name: 'web_search', path: null, query: null },
     { name: 'read', path: `${SCOPE_CASE}/plan.md` },
@@ -298,7 +425,7 @@ test('a web search whose result cites a page of the benchmark repository is outs
     result('s1', `The toggle is documented in the plugin README (${cited}).`),
     result('s2', `Anonymous volumes stay after down: ${docs}.`),
   ]);
-  const toolCalls = score.transcriptFacts(text, 'search.jsonl').toolCalls;
+  const toolCalls = score.transcriptFacts(score.transcriptEntries(text, 'search.jsonl')).toolCalls;
   assert.deepEqual(toolCalls, [
     { name: 'web_search', path: null, query: 'docks-kit fast mode', resultUrls: [cited] },
     { name: 'web_search', path: null, query: 'compose anonymous volumes', resultUrls: [docs] },
@@ -372,14 +499,15 @@ test('a failed request without a served tier stays out of the model and tier che
   // A failed request of the configured model, then a failed request of a fallback model at second 61.
   const failedFallback = error(assistantLine(61, 'anthropic', 'claude-opus-5-5', null, { input: 0 }));
   const failing = jsonl([...head, reply(5, 'priority'), error(reply(40, null)), failedFallback]);
-  assert.deepEqual(score.transcriptFacts(failing, 'failing.jsonl').messages, [
+  const failingEntries = score.transcriptEntries(failing, 'failing.jsonl');
+  assert.deepEqual(score.transcriptFacts(failingEntries).messages, [
     { model: MODEL, effort: 'xhigh', servedTier: 'priority' },
     { model: MODEL, effort: 'xhigh', servedTier: null, failed: true },
     { model: 'anthropic/claude-opus-5-5', effort: 'xhigh', servedTier: null, failed: true },
   ]);
   // The time of the failed requests is real wall time: the seconds run to the last failed request, also of another
   // model. The tokens count the messages of the configured model only.
-  assert.deepEqual(parseTranscript(failing, 'failing.jsonl', MODEL), { seconds: 60, tokens: 20 });
+  assert.deepEqual(parseTranscript(failingEntries, 'failing.jsonl', MODEL), { seconds: 60, tokens: 20 });
   // Every request failed: no model served the reviewer.
   const noReply = jsonl([...head, error(reply(5, null))]);
   // A message that stopped on an error but has a served tier was served, so the checks keep it.

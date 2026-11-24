@@ -62,9 +62,10 @@ import {
 //
 // prepare.mjs:
 // - prepareAgents takes `variants` (`--variants <name>=<git ref>[,...]`) and `full-only` (`--full-only <name,...>`).
-//   For each variant, it extracts plugins/plan-lifecycle at the ref into the folder `variant-<name>-plugin` next to
-//   the baseline copy (in the parent folder of the baseline dir). For each variant and configuration, it writes the
-//   agent `review-bench-variant-<name>-plan-<config>`: renderAgent of plugins/plan-lifecycle/agents/plan-reviewer.md
+//   For each variant, it extracts plugins/plan-lifecycle at the ref into the folder `variant-<name>-<commit>-plugin`
+//   next to the baseline copy (in the parent folder of the baseline dir), `<commit>` being the first 12 characters of
+//   the commit of the ref. For each variant and configuration, it writes the agent
+//   `review-bench-variant-<name>-<commit>-plan-<config>`: renderAgent of plugins/plan-lifecycle/agents/plan-reviewer.md
 //   at the ref, with the model and the effort of the configuration and the variant folder as the plugin root. The
 //   agent gets the tier override of the configuration. The list of configurations gets `variants`: one
 //   { name, ref, sha, delta } per variant, in --variants order. delta is false for a --full-only name. These refusals
@@ -93,8 +94,10 @@ import {
 
 // The variants of variantOptions and their refs.
 const VARIANT_REFS = { 16: 'v16', a: 'cand-a' };
-// The plugin root of a variant: `agents` extracts it next to the baseline copy.
-const variantRoot = (root, name) => path.join(root, `variant-${name}-plugin`);
+// The plugin root of a variant at the commit `sha`: `agents` extracts it next to the baseline copy.
+const variantRoot = (root, name, sha) => path.join(root, `variant-${name}-${sha.slice(0, 12)}-plugin`);
+// The agent of a variant at the commit `sha` and the configuration `config`.
+const variantAgent = (name, sha, config) => `review-bench-variant-${name}-${sha.slice(0, 12)}-plan-${config}`;
 test('agents --variants writes an agent per variant and configuration from the plan reviewer at its ref', () => {
   const fixture = variantRepo();
   const { root, repo, project, agentDir, shas } = fixture;
@@ -114,15 +117,15 @@ test('agents --variants writes an agent per variant and configuration from the p
       .filter((file) => file.startsWith('review-bench-variant-'))
       .sort(),
     Object.keys(VARIANT_REFS)
-      .flatMap((name) => list.configs.map((config) => `review-bench-variant-${name}-plan-${config.name}.md`))
+      .flatMap((name) => list.configs.map((config) => `${variantAgent(name, shas[VARIANT_REFS[name]], config.name)}.md`))
       .sort(),
   );
   const overrides = tierOverrides(project);
   for (const [name, ref] of Object.entries(VARIANT_REFS)) {
-    const pluginRoot = variantRoot(root, name);
+    const pluginRoot = variantRoot(root, name, shas[ref]);
     const atRef = (file) => gitIn(repo, 'show', `${ref}:plugins/plan-lifecycle/${file}`);
     for (const { name: config, model, effort, tier } of list.configs) {
-      const agent = `review-bench-variant-${name}-plan-${config}`;
+      const agent = variantAgent(name, shas[ref], config);
       const text = readText(path.join(agentDir, `${agent}.md`));
       // The agent text at the ref, with the model and the effort of the configuration and the variant plugin root.
       const rendered = prepare.renderAgent(atRef('agents/plan-reviewer.md'), {
@@ -147,8 +150,8 @@ test('agents --variants writes an agent per variant and configuration from the p
       assert.equal(readText(path.join(pluginRoot, file)), atRef(file));
     }
   }
-  assert.equal(fs.existsSync(path.join(variantRoot(root, 'a'), VARIANT_DELTA)), true);
-  assert.equal(fs.existsSync(path.join(variantRoot(root, '16'), VARIANT_DELTA)), false);
+  assert.equal(fs.existsSync(path.join(variantRoot(root, 'a', shas['cand-a']), VARIANT_DELTA)), true);
+  assert.equal(fs.existsSync(path.join(variantRoot(root, '16', shas.v16), VARIANT_DELTA)), false);
   // clean removes the variant agents and their tier overrides with the other generated files.
   const clean = spawnSync(BUN_RUNTIME, [PREPARE_SCRIPT, 'clean', '--project', project], { encoding: 'utf8' });
   assert.equal(clean.status, 0, clean.stderr);
@@ -296,8 +299,8 @@ test('case builds variant arms in full mode, and in delta mode on plan-delta cas
   const full = promptOf(planCase, 'P1');
   assert.ok(full.split('\n').includes('Round mode: full.'));
   assert.deepEqual(built('plan-3', 'P1'), { agent: 'agent: review-bench-candidate-plan-low', body: full });
-  assert.deepEqual(built('plan-3', 'V16'), { agent: 'agent: review-bench-variant-16-plan-low', body: full });
-  assert.deepEqual(built('plan-3', 'Va'), { agent: 'agent: review-bench-variant-a-plan-low', body: full });
+  assert.deepEqual(built('plan-3', 'V16'), { agent: `agent: ${variantAgent('16', base, 'low')}`, body: full });
+  assert.deepEqual(built('plan-3', 'Va'), { agent: `agent: ${variantAgent('a', head, 'low')}`, body: full });
   // On a plan-delta case, Va gets the delta-mode prompt of Pd. V16 has no delta mode, so it gets the full-mode prompt
   // of P0.
   const deltaPaths = prepare.workspacePaths(path.join(ws, 'plan-4'), deltaCase);
@@ -305,10 +308,10 @@ test('case builds variant arms in full mode, and in delta mode on plan-delta cas
   assert.ok(delta.split('\n').includes('Round mode: delta.'));
   assert.ok(delta.split('\n').includes(`Plan diff: ${deltaPaths.planDiff}`));
   assert.ok(fs.existsSync(deltaPaths.planDiff));
-  assert.deepEqual(built('plan-4', 'Va'), { agent: 'agent: review-bench-variant-a-plan-low', body: delta });
+  assert.deepEqual(built('plan-4', 'Va'), { agent: `agent: ${variantAgent('a', head, 'low')}`, body: delta });
   const deltaFull = promptOf(deltaCase, 'P0');
   assert.ok(deltaFull.split('\n').includes('Round mode: full.'));
-  assert.deepEqual(built('plan-4', 'V16'), { agent: 'agent: review-bench-variant-16-plan-low', body: deltaFull });
+  assert.deepEqual(built('plan-4', 'V16'), { agent: `agent: ${variantAgent('16', base, 'low')}`, body: deltaFull });
   assert.deepEqual(
     namesCommand(ws)
       .map((entry) => entry.name)
@@ -318,9 +321,9 @@ test('case builds variant arms in full mode, and in delta mode on plan-delta cas
 });
 test('transcripts lets a variant reviewer read its own plugin root and no other variant root', () => {
   const fixture = variantRepo();
-  const { root, repo, agentDir } = fixture;
+  const { root, repo, agentDir, shas } = fixture;
   agentsOnBun(variantOptions(fixture), repo);
-  const agent = 'review-bench-variant-a-plan-low';
+  const agent = variantAgent('a', shas['cand-a'], 'low');
   const agentFile = path.join(agentDir, `${agent}.md`);
   assert.ok(fs.existsSync(agentFile), `agents wrote no ${agent}.md`);
   const ws = path.join(root, 'ws');
@@ -331,8 +334,8 @@ test('transcripts lets a variant reviewer read its own plugin root and no other 
   put(caseDir, 'plan.md', '# Plan 3\n');
   put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
   put(run, 'meta.json', { config: CONFIGS.low });
-  const own = variantRoot(root, 'a');
-  const other = variantRoot(root, '16');
+  const own = variantRoot(root, 'a', shas['cand-a']);
+  const other = variantRoot(root, '16', shas.v16);
   const ownReads = [
     ['read', { path: `${own}/skills/plan-reviewer/SKILL.md` }],
     ['read', { path: `${own}/${VARIANT_DELTA}:1-40` }],
@@ -359,6 +362,54 @@ test('transcripts lets a variant reviewer read its own plugin root and no other 
   put(sessions, 'Plan3VaLowR1Plan.jsonl', transcript);
   assert.deepEqual(transcriptsCommand(ws, sessions), ['Plan3VaLowR1Plan']);
   assert.deepEqual(readJson(path.join(run, 'meta.json')).reviewers.plan.readScope, { outside });
+});
+// Plan #216, R51: the variants of a mixed queue share the model, effort, and tier, so only the agent that omp ran
+// tells them apart. transcripts refuses a transcript of another agent than the prompt names before it writes.
+test('transcripts refuses a transcript whose agent is another variant than the prompt names', () => {
+  const fixture = variantRepo();
+  const { root, repo, agentDir, shas } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const agent = variantAgent('a', shas['cand-a'], 'low');
+  const swapped = variantAgent('16', shas.v16, 'low');
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'Va-low', 'run-1');
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
+  put(run, 'meta.json', { config: CONFIGS.low });
+  // The dispatch ran the V16 agent under the task name of the Va prompt, and the reviewer read only its own root.
+  const ownRoot = variantRoot(root, '16', shas.v16);
+  const calls = [['read', { path: `${ownRoot}/skills/plan-reviewer/SKILL.md` }]];
+  const transcript = toolTranscript(caseDir, 30, calls, swapped)
+    .split('\n')
+    .map((line) => {
+      const entry = JSON.parse(line);
+      if (entry.type === 'session_init') {
+        entry.systemPrompt = ['You are a coding assistant.', readText(path.join(agentDir, `${swapped}.md`))];
+      }
+      return JSON.stringify(entry);
+    })
+    .join('\n');
+  const file = path.join(sessions, 'Plan3VaLowR1Plan.jsonl');
+  put(sessions, 'Plan3VaLowR1Plan.jsonl', transcript);
+  const before = readText(path.join(run, 'meta.json'));
+  assert.throws(() => transcriptsCommand(ws, sessions), {
+    message: `transcripts: 1 transcripts show another agent than their prompt names: Plan3VaLowR1Plan (${file}): agent ${swapped}, not ${agent}; dispatch them again with the agent of the prompt`,
+  });
+  assert.equal(readText(path.join(run, 'meta.json')), before);
+  // A transcript without a session_init agent is refused too.
+  put(
+    sessions,
+    'Plan3VaLowR1Plan.jsonl',
+    transcript
+      .split('\n')
+      .filter((line) => JSON.parse(line).type !== 'session_init')
+      .join('\n'),
+  );
+  assert.throws(() => transcriptsCommand(ws, sessions), /: agent none, not /);
+  assert.equal(readText(path.join(run, 'meta.json')), before);
 });
 test('report --reference compares every arm column with the named folder, and report needs it', () => {
   const { ws, cases } = roundWorkspace([
@@ -490,28 +541,59 @@ test('agents --contract-overlay records the contract change of a variant against
 });
 test('agents refuses colliding plugin copies, bad variant options, and unusable refs before it writes', () => {
   const fixture = variantRepo();
-  const { root, repo, project } = fixture;
+  const { root, repo, project, shas } = fixture;
   const tagCommit = (tag, files) => {
     for (const [file, content] of Object.entries(files)) put(repo, file, content);
     gitIn(repo, 'add', '-A');
     gitIn(repo, 'commit', '-q', '--allow-empty', '-m', tag);
     gitIn(repo, 'tag', tag);
   };
-  // A commit that does not change the plan contract, an agent that names no reviewer skill, and an agent that also
-  // names the reviewer skill of another plugin root. Each commit is on HEAD, which has the kit layout.
+  // A commit that does not change the plan contract, an agent that names no reviewer skill, an agent that also names
+  // the reviewer skill of another plugin root, an agent that names its skill only in a frontmatter field that
+  // renderAgent drops, an agent that names only a longer path, an agent that names the code-reviewer skill only, an
+  // agent whose plan-reviewer skill the commit does not hold, and one whose skill path is a folder. Each commit is on
+  // HEAD, which has the kit layout.
   const agentFile = `${KIT_ROOT}/agents/plan-reviewer.md`;
+  const skillFile = `${KIT_ROOT}/skills/plan-reviewer/SKILL.md`;
   const noSkill = '---\nname: plan-reviewer\ndescription: Reviews plans.\n---\n\n# Plan Reviewer\n';
   const otherRoot = `${variantAgentText('other')}Also load \`/opt/x/skills/plan-reviewer/SKILL.md\`.\n`;
+  const frontmatterSkill = [
+    '---',
+    'name: plan-reviewer',
+    'description: Reviews plans.',
+    'autoload-skills: skill://plan-reviewer/SKILL.md',
+    '---',
+    '',
+    '# Plan Reviewer',
+    '',
+  ].join('\n');
+  const bakSkill = variantAgentText('bak').replace('plan-reviewer/SKILL.md', 'plan-reviewer/SKILL.md.bak');
+  const codeSkill = variantAgentText('code').replace('skill://plan-reviewer', 'skill://code-reviewer');
   tagCommit('same-contract', {});
   tagCommit('no-skill', { [agentFile]: noSkill });
   tagCommit('other-root', { [agentFile]: otherRoot });
+  tagCommit('frontmatter-skill', { [agentFile]: frontmatterSkill });
+  tagCommit('bak-skill', { [agentFile]: bakSkill, [`${skillFile}.bak`]: '# Backup\n' });
+  tagCommit('code-skill', { [agentFile]: codeSkill });
+  fs.rmSync(path.join(repo, skillFile));
+  tagCommit('no-plan-skill', { [agentFile]: variantAgentText('gone') });
+  tagCommit('folder-skill', { [agentFile]: variantAgentText('folder'), [`${skillFile}/README.md`]: '# Folder\n' });
+  // A Git symlink (mode 120000) is a blob too, so `git cat-file -t` takes it; this one points to no file.
+  fs.rmSync(path.join(repo, skillFile), { recursive: true });
+  fs.symlinkSync('missing.md', path.join(repo, skillFile));
+  tagCommit('link-skill', { [agentFile]: variantAgentText('link') });
+  // treeState cannot read the dangling link; the commit keeps it.
+  fs.rmSync(path.join(repo, skillFile));
+  // A dot segment can name a file outside the skill folder, which git resolves; the named path must be the exact entry.
+  const dotSkill = legacyVariantAgentText('dot').replace('skills/plan-reviewer/', 'skills/../plan-reviewer/');
+  tagCommit('dot-skill', { [agentFile]: dotSkill, [`${KIT_ROOT}/plan-reviewer/SKILL.md`]: '# Outside\n' });
   const ownSkill = (ref) =>
     `variant a: ${agentFile} at ${ref} must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`;
   const refusals = [
     // A variant copy in the folder of the baseline copy would replace the baseline plugin of the baseline agents.
     [
-      { 'baseline-dir': variantRoot(root, 'a') },
-      `the baseline copy and the copy of variant a both go to ${variantRoot(root, 'a')}; give another --baseline-dir`,
+      { 'baseline-dir': variantRoot(root, 'a', shas['cand-a']) },
+      `the baseline copy and the copy of variant a both go to ${variantRoot(root, 'a', shas['cand-a'])}; give another --baseline-dir`,
     ],
     [{ variants: '' }, '--variants has an empty entry: '],
     [{ variants: '16=v16,' }, '--variants has an empty entry: 16=v16,'],
@@ -531,6 +613,22 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
     ],
     [{ variants: '16=v16,a=no-skill' }, ownSkill('no-skill')],
     [{ variants: '16=v16,a=other-root' }, ownSkill('other-root')],
+    [{ variants: '16=v16,a=frontmatter-skill' }, ownSkill('frontmatter-skill')],
+    [{ variants: '16=v16,a=bak-skill' }, ownSkill('bak-skill')],
+    [{ variants: '16=v16,a=code-skill' }, ownSkill('code-skill')],
+    [
+      { variants: '16=v16,a=no-plan-skill' },
+      `variant a: ${agentFile} at no-plan-skill names ${skillFile}, which is not a file at no-plan-skill`,
+    ],
+    [
+      { variants: '16=v16,a=folder-skill' },
+      `variant a: ${agentFile} at folder-skill names ${skillFile}, which is not a file at folder-skill`,
+    ],
+    [
+      { variants: '16=v16,a=link-skill' },
+      `variant a: ${agentFile} at link-skill names ${skillFile}, which is not a file at link-skill`,
+    ],
+    [{ variants: '16=v16,a=dot-skill' }, ownSkill('dot-skill')],
   ];
   const options = variantOptions(fixture);
   const state = treeState(root);
@@ -550,18 +648,18 @@ test('agents refuses colliding plugin copies, bad variant options, and unusable 
 });
 test('agents --variants takes an --out folder whose parent has a space and keeps the same-root check', () => {
   const fixture = variantRepo();
-  const { root, repo, agentDir } = fixture;
+  const { root, repo, agentDir, shas } = fixture;
   const skill = 'skills/plan-reviewer/SKILL.md';
   // Without --baseline-dir, the plugin copies go to the parent of --out, whose path has a space.
   const parent = path.join(root, 'review runs');
   const options = { ...variantOptions(fixture), 'baseline-dir': undefined, out: path.join(parent, 'heldout') };
   agentsOnBun(options, repo);
   assert.ok(fs.existsSync(path.join(parent, 'baseline-plugin', skill)));
-  for (const name of Object.keys(VARIANT_REFS)) {
-    const pluginRoot = path.join(parent, `variant-${name}-plugin`);
+  for (const [name, ref] of Object.entries(VARIANT_REFS)) {
+    const pluginRoot = variantRoot(parent, name, shas[ref]);
     assert.ok(fs.existsSync(path.join(pluginRoot, skill)));
     for (const config of ['low', 'xhigh']) {
-      const text = readText(path.join(agentDir, `review-bench-variant-${name}-plan-${config}.md`));
+      const text = readText(path.join(agentDir, `${variantAgent(name, shas[ref], config)}.md`));
       assert.ok(text.includes(`\`${pluginRoot}/${skill}\``));
       // The read scope takes the plugin root with its space from the path in backticks.
       assert.deepEqual(score.reviewerPluginRoots(text), [pluginRoot]);
@@ -578,6 +676,235 @@ test('agents --variants takes an --out folder whose parent has a space and keeps
   gitIn(repo, 'tag', 'other-space');
   const message = `variant a: ${agentFile} at other-space must name its reviewer skill as skill://plan-reviewer/SKILL.md, or at a ref before the native omp packages as ${LEGACY_PLUGIN_ROOT}/skills/[<folder>/]plan-reviewer/SKILL.md, and name no other plugin root`;
   assert.throws(() => agentsOnBun({ ...options, variants: '16=v16,a=other-space' }, repo), { message });
+});
+// Plan #216, R59: a path in backticks ends at the closing backtick, so it can hold an apostrophe. Both callers of
+// reviewerPluginRoots take such a root: `agents --variants` keeps the same-root check, and the read scope of
+// `transcripts` takes the root (see score-read-scope.test.mjs).
+test("agents --variants takes an --out folder whose parent has an apostrophe, as in Team's review runs", () => {
+  const fixture = variantRepo();
+  const { root, repo, agentDir, shas } = fixture;
+  const skill = 'skills/plan-reviewer/SKILL.md';
+  const parent = path.join(root, "Team's review runs");
+  const options = { ...variantOptions(fixture), 'baseline-dir': undefined, out: path.join(parent, 'heldout') };
+  agentsOnBun(options, repo);
+  for (const [name, ref] of Object.entries(VARIANT_REFS)) {
+    const pluginRoot = variantRoot(parent, name, shas[ref]);
+    const text = readText(path.join(agentDir, `${variantAgent(name, shas[ref], 'low')}.md`));
+    assert.ok(text.includes(`\`${pluginRoot}/${skill}\``));
+    assert.deepEqual(score.reviewerPluginRoots(text), [pluginRoot]);
+  }
+});
+// Code review round 1 of plan #216: `agents --variants` and the read scope share the parser of score.mjs
+// (reviewerSkillPaths), so a quoted reviewer skill path keeps an apostrophe in its category folder, and agents checks
+// that the commit holds that skill file.
+test("agents --variants takes a variant whose reviewer skill sits in a category folder with an apostrophe", () => {
+  const fixture = variantRepo();
+  const { root, repo, agentDir } = fixture;
+  const skill = "skills/team's/plan-reviewer/SKILL.md";
+  const agent = legacyVariantAgentText('team').replace('skills/plan-reviewer/', "skills/team's/plan-reviewer/");
+  put(repo, `${KIT_ROOT}/agents/plan-reviewer.md`, agent);
+  put(repo, `${KIT_ROOT}/${skill}`, '# Plan reviewer team\n');
+  gitIn(repo, 'add', '-A');
+  gitIn(repo, 'commit', '-q', '-m', 'team skill');
+  gitIn(repo, 'tag', 'team-skill');
+  const sha = gitIn(repo, 'rev-parse', 'team-skill').trim();
+  agentsOnBun({ ...variantOptions(fixture), variants: '16=v16,a=team-skill' }, repo);
+  const pluginRoot = variantRoot(root, 'a', sha);
+  const text = readText(path.join(agentDir, `${variantAgent('a', sha, 'low')}.md`));
+  assert.ok(text.includes(`\`${pluginRoot}/${skill}\``));
+  assert.deepEqual(score.reviewerPluginRoots(text), [pluginRoot]);
+  assert.ok(fs.existsSync(path.join(pluginRoot, skill)));
+});
+// A variant copy and the agents of a variant belong to the commit of the variant, so a setup at another commit
+// replaces no copy that agents of another setup read, and a prompt for the old commit names an agent that is gone.
+test('agents keeps the variant copy of a commit when another setup prepares the variant at another commit', () => {
+  const fixture = variantRepo();
+  const { root, repo, agentDir } = fixture;
+  const options = { ...variantOptions(fixture), variants: 'a=cand-a', 'full-only': undefined };
+  agentsOnBun({ ...options, 'baseline-dir': path.join(root, 'b1-plugin') }, repo);
+  const agentFile = fs
+    .readdirSync(agentDir)
+    .find((file) => file.startsWith('review-bench-variant-a-') && file.endsWith('-plan-low.md'));
+  const [pluginRoot] = score.reviewerPluginRoots(readText(path.join(agentDir, agentFile)));
+  // A second setup under the same parent folder, with a at HEAD.
+  const project = path.join(root, 'project2');
+  fs.mkdirSync(project);
+  agentsOnBun({ ...options, variants: 'a=HEAD', project, 'baseline-dir': path.join(root, 'b2-plugin') }, repo);
+  assert.equal(readText(path.join(pluginRoot, 'skills/plan-reviewer/SKILL.md')), '# Plan reviewer A\n');
+  // The first setup at HEAD removes the agent that the prompts for cand-a name.
+  agentsOnBun({ ...options, variants: 'a=HEAD', 'baseline-dir': path.join(root, 'b1-plugin') }, repo);
+  assert.equal(fs.existsSync(path.join(agentDir, agentFile)), false);
+});
+test('agents refuses a --baseline-dir that holds the copy of a variant, and the copy keeps its bytes', () => {
+  const fixture = variantRepo();
+  const { root, repo, shas } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const copy = variantRoot(root, 'a', shas['cand-a']);
+  // A second setup puts its baseline copy of v16 in the folder of the copy of variant a at cand-a.
+  const project = path.join(root, 'project2');
+  fs.mkdirSync(project);
+  const state = treeState(root);
+  const second = { ...variantOptions(fixture), variants: undefined, 'full-only': undefined, project };
+  const holds = (dir, role, sha) =>
+    `${dir} holds the ${role} plugin copy at ${sha.slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`;
+  assert.throws(() => agentsOnBun({ ...second, 'baseline-dir': copy }, repo), {
+    message: holds(copy, 'variant', shas['cand-a']),
+  });
+  assert.deepEqual(treeState(root), state);
+  // The marker of an earlier version of this script holds only the commit; the folder name gives the role.
+  const legacy = path.join(root, 'variant-a-plugin');
+  put(legacy, '.review-bench-ref', `${shas['cand-a']}\n`);
+  put(legacy, 'skills/plan-reviewer/SKILL.md', '# Plan reviewer A\n');
+  const legacyState = treeState(root);
+  assert.throws(() => agentsOnBun({ ...second, 'baseline-dir': legacy }, repo), {
+    message: holds(legacy, 'variant', shas['cand-a']),
+  });
+  assert.deepEqual(treeState(root), legacyState);
+});
+test('agents refuses a copy folder inside another plugin copy and a replacement that would delete a copy inside it', () => {
+  const fixture = variantRepo();
+  const { root, repo, shas } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const baselineCopy = path.join(root, 'baseline-plugin');
+  // A second setup puts its baseline copy inside the baseline copy of the first, so its variant copies go there too.
+  const project = path.join(root, 'project2');
+  fs.mkdirSync(project);
+  const inner = path.join(baselineCopy, 'inner');
+  const state = treeState(root);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': inner }, repo), {
+    message: `${inner} is inside the plugin copy ${baselineCopy}, which a refresh of that copy would delete; pass another --out or --baseline-dir`,
+  });
+  assert.deepEqual(treeState(root), state);
+  // A --baseline-dir through a symlink, here to a folder of a variant copy, also when the destination does not exist
+  // yet, or one that is a symlink, here inside a variant copy to an empty folder outside it: agents refuses each path
+  // with a symbolic link.
+  const linked = (dir) =>
+    `${dir} is or passes through a symbolic link; pass a real folder for --out or --baseline-dir`;
+  const variantCopy = variantRoot(root, 'a', shas['cand-a']);
+  const copyState = treeState(variantCopy);
+  const link = path.join(root, 'via');
+  fs.symlinkSync(path.join(variantCopy, 'skills'), link);
+  const viaBaseline = path.join(link, 'baseline-plugin');
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': viaBaseline }, repo), {
+    message: linked(viaBaseline),
+  });
+  assert.equal(fs.existsSync(path.join(variantCopy, 'skills', 'baseline-plugin')), false);
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(outside);
+  const destination = path.join(variantCopy, 'dest');
+  fs.symlinkSync(outside, destination);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), project, 'baseline-dir': destination }, repo), {
+    message: linked(destination),
+  });
+  assert.equal(fs.readlinkSync(destination), outside);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.deepEqual(treeState(project), {});
+  // treeState reads a symlink to a folder as a file, so the links go before the next state.
+  fs.rmSync(link);
+  fs.rmSync(destination);
+  fs.rmdirSync(outside);
+  assert.deepEqual(treeState(variantCopy), copyState);
+  // A copy that an earlier version left inside the baseline copy stays when the first setup moves to another baseline.
+  const nested = path.join(baselineCopy, `variant-a-${shas['cand-a'].slice(0, 12)}-plugin`);
+  put(nested, '.review-bench-ref', `variant ${shas['cand-a']}\n`);
+  put(nested, 'skills/plan-reviewer/SKILL.md', '# Plan reviewer A\n');
+  const nestedState = treeState(root);
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), 'baseline-ref': 'cand-a' }, repo), {
+    message: `${baselineCopy} holds the plugin copy ${nested}, which replacing ${baselineCopy} would delete; move that copy, or pass another --out or --baseline-dir`,
+  });
+  assert.deepEqual(treeState(root), nestedState);
+});
+// The commands run on the repository of their own checkout, so these tests put the scripts into the fixture repository
+// and run the copy with a fake omp first on PATH.
+const agentsCommand = (script, project, ...args) =>
+  spawnSync(
+    BUN_RUNTIME,
+    [script, 'agents', '--model', MODEL, '--efforts', 'low', '--tiers', 'default', '--project', project, ...args],
+    { encoding: 'utf8', env: fakeOmp().env },
+  );
+// The setup of variant a at cand-a, with the baseline copy of v16 in `<root>/baseline-plugin`.
+const variantSetup = (root) => [
+  '--baseline-ref',
+  'v16',
+  '--baseline-dir',
+  path.join(root, 'baseline-plugin'),
+  '--variants',
+  'a=cand-a',
+];
+test('the agents command refuses a --baseline-dir on a variant copy and leaves the tree as it was', () => {
+  const { root, repo, project, shas } = variantRepo();
+  const script = copyScripts(repo);
+  const first = agentsCommand(script, project, ...variantSetup(root));
+  assert.equal(first.status, 0, first.stderr);
+  const copy = variantRoot(root, 'a', shas['cand-a']);
+  assert.ok(fs.existsSync(path.join(copy, 'skills/plan-reviewer/SKILL.md')));
+  // A second setup in another project gives the folder of that copy as its --baseline-dir.
+  const project2 = path.join(root, 'project2');
+  fs.mkdirSync(project2);
+  // The state of the setups: the folders next to the repository, whose scripts copy links the CLI source.
+  const setups = () => ({
+    folders: fs.readdirSync(root).sort(),
+    ...Object.fromEntries(
+      ['baseline-plugin', path.basename(copy), 'project', 'project2'].map((name) => [
+        name,
+        treeState(path.join(root, name)),
+      ]),
+    ),
+  });
+  const state = setups();
+  const second = agentsCommand(script, project2, '--baseline-ref', 'v16', '--baseline-dir', copy);
+  assert.equal(second.status, 1, second.stderr);
+  const message = `${copy} holds the variant plugin copy at ${shas['cand-a'].slice(0, 12)}, which the agents of another setup can read; remove it, or pass another --out or --baseline-dir`;
+  assert.ok(second.stderr.includes(message), second.stderr);
+  assert.deepEqual(setups(), state);
+});
+test('the case command names the commit-pinned agent of a variant in the prompt of its arm', () => {
+  const { root, repo, project, agentDir, shas } = variantRepo();
+  const script = copyScripts(repo);
+  const agents = agentsCommand(script, project, ...variantSetup(root));
+  assert.equal(agents.status, 0, agents.stderr);
+  const cases = path.join(root, 'cases');
+  const ws = path.join(root, 'ws');
+  const planCase = {
+    id: 'plan-3',
+    kind: 'plan',
+    split: 'dev',
+    issue: 3,
+    round: 1,
+    plan: 'plan-3-plan.md',
+    repo_ref: shas.v16,
+    known: [],
+  };
+  put(cases, 'dev/plan-3.json', planCase);
+  put(cases, 'dev/plan-3-plan.md', '# Plan 3\n\nStep 1 and step 2.\n');
+  const args = ['--case', path.join(cases, 'dev', 'plan-3.json'), '--arms', 'Va', '--runs', '1', '--out', ws];
+  const build = spawnSync(BUN_RUNTIME, [script, 'case', ...args, '--configs', 'low', '--project', project], {
+    encoding: 'utf8',
+  });
+  assert.equal(build.status, 0, build.stderr);
+  const agent = `review-bench-variant-a-${shas['cand-a'].slice(0, 12)}-plan-low`;
+  const prompt = readText(path.join(ws, 'plan-3', 'Va-low', 'run-1', 'prompts', 'plan.txt'));
+  assert.equal(prompt.split('\n')[0], `agent: ${agent}`);
+  assert.ok(fs.existsSync(path.join(agentDir, `${agent}.md`)));
+});
+test('agents keeps the previous setup and its plugin copies when a new agent does not render', () => {
+  const fixture = variantRepo();
+  const { root, repo } = fixture;
+  agentsOnBun(variantOptions(fixture), repo);
+  const baseline = treeState(path.join(root, 'baseline-plugin'));
+  // A variant agent without a frontmatter name passes the checks of the variants but does not render.
+  const noName = '---\ndescription: Reviews plans.\n---\n\nLoad and follow `skill://plan-reviewer/SKILL.md`.\n';
+  put(repo, `${KIT_ROOT}/agents/plan-reviewer.md`, noName);
+  gitIn(repo, 'commit', '-q', '-am', 'no name');
+  gitIn(repo, 'tag', 'no-name');
+  const state = treeState(root);
+  // The call also gives another baseline ref, whose copy would replace the baseline copy of the previous setup.
+  const change = { 'baseline-ref': 'cand-a', variants: '16=v16,a=no-name' };
+  const message = 'the agent frontmatter has no name';
+  assert.throws(() => agentsOnBun({ ...variantOptions(fixture), ...change }, repo), { message });
+  // The agents, the tier overrides, the baseline copy, and every variant copy stay as they were.
+  assert.deepEqual(treeState(path.join(root, 'baseline-plugin')), baseline);
+  assert.deepEqual(treeState(root), state);
 });
 // B1 and B0 describe the lens or review the whole diff again, as the released reviewer of plan #98 needed. B3 and Bd
 // give the baseline reviewer the prompt of the candidate arms, so a comparison measures only the reviewer files (#113).
@@ -641,7 +968,7 @@ test('case gives each run of an overlay variant a contract copy, its record, and
     const meta = readJson(path.join(runDir('plan-3', 'Va', run), 'meta.json'));
     assert.deepEqual(meta, { config: CONFIGS.low, managerConfig: MANAGER_SETTING, contractOverlay: 'applied' });
     assert.deepEqual(prompt('plan-3', 'Va', run), {
-      agent: 'agent: review-bench-variant-a-plan-low',
+      agent: `agent: ${variantAgent('a', gitIn(repo, 'rev-parse', 'cand-a').trim(), 'low')}`,
       body: p1.replace(SNAPSHOT_CONTRACT_RULE, copyContractRule(copy)),
     });
   }
@@ -892,9 +1219,9 @@ test('the contract overlay finds the plan contract in the categorized and the fl
   assert.deepEqual(diffChanges(variants[0].contractDiff), ['-Rule 2.', '+Rule 2 of old-cand.']);
   assert.deepEqual(diffChanges(variants[1].contractDiff), ['-Rule 7.', '+Rule 7 moved.']);
   // Both agent forms name the skill of the variant copy: the plugin root variable at old-cand, a skill:// URI at moved.
-  for (const name of ['o', 'm']) {
-    const text = readText(path.join(agentDir, `review-bench-variant-${name}-plan-low.md`));
-    assert.deepEqual(score.reviewerPluginRoots(text), [variantRoot(root, name)]);
+  for (const [name, ref] of Object.entries({ o: 'old-cand', m: 'moved' })) {
+    const text = readText(path.join(agentDir, `${variantAgent(name, shas[ref], 'low')}.md`));
+    assert.deepEqual(score.reviewerPluginRoots(text), [variantRoot(root, name, shas[ref])]);
   }
 
   const ws = path.join(root, 'ws');
@@ -1034,7 +1361,8 @@ test('case --extend adds arm folders to a case folder and keeps its snapshot and
   // contract copy.
   const prompt = (arm) => promptFileParts(path.join(caseDir, `${arm}-low`, 'run-1', 'prompts', 'plan.txt'));
   const p1 = prompt('P1').body;
-  assert.deepEqual(prompt('V16'), { agent: 'agent: review-bench-variant-16-plan-low', body: p1 });
+  const v16 = gitIn(repo, 'rev-parse', 'v16').trim();
+  assert.deepEqual(prompt('V16'), { agent: `agent: ${variantAgent('16', v16, 'low')}`, body: p1 });
   const copy = path.join(caseDir, 'Va-low', 'run-1', 'plan-contract.md');
   assert.equal(readText(copy), '# Plan contract A\n');
   const meta = readJson(path.join(caseDir, 'Va-low', 'run-1', 'meta.json'));

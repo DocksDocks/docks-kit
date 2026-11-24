@@ -32,6 +32,7 @@ import {
   parseTranscript,
   pickTranscript,
   scoreRuns,
+  transcriptEntries,
   transcriptFacts,
   transcriptsCommand,
   transcriptSession,
@@ -128,7 +129,7 @@ test('each fixture was written by an omp release that is not below the omp verif
 });
 
 test('every fixture passes the transcript shape check of score.mjs transcripts', () => {
-  for (const file of fixtureFiles()) checkTranscriptShape(fixtureText(file), file);
+  for (const file of fixtureFiles()) checkTranscriptShape(transcriptEntries(fixtureText(file), file), file);
 });
 
 test('the shape check names a renamed thinking level field and a retyped usage field of a fixture', () => {
@@ -136,18 +137,21 @@ test('the shape check names a renamed thinking level field and a retyped usage f
   const renamed = text.replace('"thinkingLevel":', '"thinkingLevelName":');
   assert.notEqual(renamed, text);
   assert.throws(
-    () => checkTranscriptShape(renamed, 'renamed.jsonl'),
+    () => checkTranscriptShape(transcriptEntries(renamed, 'renamed.jsonl'), 'renamed.jsonl'),
     /^Error: renamed\.jsonl does not have the transcript shape of scripts\/omp\.mjs: thinking_level_change\.thinkingLevel is missing\./,
   );
   const retyped = text.replace('"usage":{"input":7209,"output":45,', '"usage":{"input":7209,"output":"45",');
   assert.notEqual(retyped, text);
   assert.throws(
-    () => checkTranscriptShape(retyped, 'retyped.jsonl'),
+    () => checkTranscriptShape(transcriptEntries(retyped, 'retyped.jsonl'), 'retyped.jsonl'),
     /: assistant\.message\.usage\.output is of type string, not number\./,
   );
   // Records of two omp versions in one transcript stop the check too.
   const mixed = text.replace('"runtime":{"version":"19.1.1"}', '"runtime":{"version":"19.1.2"}');
-  assert.throws(() => checkTranscriptShape(mixed, 'mixed.jsonl'), /its records name more than one omp version/);
+  assert.throws(
+    () => checkTranscriptShape(transcriptEntries(mixed, 'mixed.jsonl'), 'mixed.jsonl'),
+    /its records name more than one omp version/,
+  );
 });
 
 test('the shape check names a missing and a retyped runtime.version of the records that score.mjs reads', () => {
@@ -158,12 +162,12 @@ test('the shape check names a missing and a retyped runtime.version of the recor
       .join('\n');
   const withoutRuntime = rewrite(({ runtime: _runtime, ...entry }) => entry);
   assert.throws(
-    () => checkTranscriptShape(withoutRuntime, 'unversioned.jsonl'),
+    () => checkTranscriptShape(transcriptEntries(withoutRuntime, 'unversioned.jsonl'), 'unversioned.jsonl'),
     /: model_change\.runtime\.version is missing; thinking_level_change\.runtime\.version is missing; assistant\.runtime\.version is missing; toolResult\.runtime\.version is missing\./,
   );
   const retyped = rewrite((entry) => (entry.runtime ? { ...entry, runtime: { version: 19 } } : entry));
   assert.throws(
-    () => checkTranscriptShape(retyped, 'retyped.jsonl'),
+    () => checkTranscriptShape(transcriptEntries(retyped, 'retyped.jsonl'), 'retyped.jsonl'),
     /: model_change\.runtime\.version is of type number, not string; thinking_level_change\.runtime\.version is of type number, not string; assistant\.runtime\.version is of type number, not string; toolResult\.runtime\.version is of type number, not string\./,
   );
 });
@@ -171,18 +175,19 @@ test('the shape check names a missing and a retyped runtime.version of the recor
 test('the probe reviewer fixture gives the pinned model, effort, and tier, the tokens of omp, and the reply text', () => {
   const file = 'ProbeC1LowR1Full.jsonl';
   const text = fixtureText(file);
-  const timing = parseTranscript(text, file, TERRA);
+  const entries = transcriptEntries(text, file);
+  const timing = parseTranscript(entries, file, TERRA);
   assert.deepEqual(timing, { seconds: 3.7, tokens: 17956 });
   assert.equal(timing.tokens, totalTokens(text, TERRA));
   const pinned = { model: TERRA, effort: 'low', servedTier: 'default' };
-  assert.deepEqual(transcriptFacts(text, file), {
+  assert.deepEqual(transcriptFacts(entries), {
     requestedTier: 'default',
     messages: [pinned, pinned],
     sideCalls: [],
     ompVersion: '19.1.1',
     toolCalls: [{ name: 'read', path: `${PROBE_PLUGIN}/skills/code-reviewer/SKILL.md` }],
   });
-  assert.deepEqual(transcriptSession(text, file), {
+  assert.deepEqual(transcriptSession(entries), {
     cwd: CHECKOUT,
     pluginRoots: [PROBE_PLUGIN],
     agentFiles: [],
@@ -195,40 +200,44 @@ test('the probe reviewer fixture gives the pinned model, effort, and tier, the t
     '### Code review round unspecified\n\nCode-review: blocked\n\nMissing review inputs: round mode, issue number, plan export, diff paths, and base-instructions folder.\n\n## Standards\n\nNone.\n\n## Spec\n\nNone.';
   assert.deepEqual(lastReply(text), [reply]);
   assert.ok(!text.includes('"name":"yield"'));
-  assert.deepEqual(fixerReplies(text, file), {});
+  assert.deepEqual(fixerReplies(entries), {});
   const repaired = text.replace(
     `"text":${JSON.stringify(reply)}`,
     '"text":"- `code-7/C1-low/run-1/round-1/full#1`: repaired"',
   );
   assert.notEqual(repaired, text);
-  assert.deepEqual(fixerReplies(repaired, file), { 'code-7/C1-low/run-1/round-1/full#1': 'repaired' });
+  assert.deepEqual(fixerReplies(transcriptEntries(repaired, file)), {
+    'code-7/C1-low/run-1/round-1/full#1': 'repaired',
+  });
 });
 
 test('the probe manager fixture gives the manager setting and its reply text', () => {
   const file = 'ProbeC1LowR1Manager1.jsonl';
   const text = fixtureText(file);
-  assert.deepEqual(parseTranscript(text, file, SOL), { seconds: 5.1, tokens: 5342 });
-  assert.equal(parseTranscript(text, file, SOL).tokens, totalTokens(text, SOL));
-  assert.deepEqual(transcriptFacts(text, file), {
+  const entries = transcriptEntries(text, file);
+  assert.deepEqual(parseTranscript(entries, file, SOL), { seconds: 5.1, tokens: 5342 });
+  assert.equal(parseTranscript(entries, file, SOL).tokens, totalTokens(text, SOL));
+  assert.deepEqual(transcriptFacts(entries), {
     requestedTier: 'priority',
     messages: [{ model: SOL, effort: 'high', servedTier: 'priority' }],
     sideCalls: [],
     ompVersion: '19.1.1',
   });
   assert.deepEqual(lastReply(text), ['ready']);
-  assert.deepEqual(transcriptSession(text, file), { cwd: CHECKOUT, pluginRoots: [], agentFiles: [], skillRoots: [] });
+  assert.deepEqual(transcriptSession(entries), { cwd: CHECKOUT, pluginRoots: [], agentFiles: [], skillRoots: [] });
 });
 
 test('the failed-request fixture keeps both failed requests out of the model and tier checks and shows the fallbacks', () => {
   const file = 'FailProbeFlex.jsonl';
   const text = fixtureText(file);
-  checkTranscriptShape(text, file);
+  const entries = transcriptEntries(text, file);
+  checkTranscriptShape(entries, file);
   // The codex API refused the tier flex of the agent. omp then wrote a retry-fallback model_change to another model,
   // with its own thinking level, and the request of that model stopped on the same error with no served tier. A
   // second fallback to an Anthropic model served the reply. The facts show the fallbacks in the models of the
   // messages, and the requested tier of the family of the last model: the session asks for an OpenAI tier only.
   const config = { name: 'low-flex', model: TERRA, effort: 'low', tier: 'flex' };
-  assert.deepEqual(transcriptFacts(text, file), {
+  assert.deepEqual(transcriptFacts(entries), {
     requestedTier: null,
     messages: [
       { model: TERRA, effort: 'high', servedTier: null, failed: true },
@@ -246,7 +255,7 @@ test('the failed-request fixture keeps both failed requests out of the model and
   );
   // The time of the failed requests is real wall time, also of the fallback model; no message of the configured
   // model has tokens.
-  assert.deepEqual(parseTranscript(text, file, TERRA), { seconds: 0.6, tokens: 0 });
+  assert.deepEqual(parseTranscript(entries, file, TERRA), { seconds: 0.6, tokens: 0 });
   // Neither failed request counts as a message of another model or of another served tier: only the served message
   // of the second fallback model makes the run invalid, by its model and its effort.
   const fixture = judgedArm(CODE_KNOWN.slice(0, 1), [[]], [transcriptEntry(text, TERRA)]);
@@ -260,9 +269,10 @@ test('the failed-request fixture keeps both failed requests out of the model and
 test('the code-reviewer fixture records its reads, the column cut, and a middle cut with head and tail ranges', () => {
   const file = 'CodeReview213R9.jsonl';
   const text = fixtureText(file);
-  assert.deepEqual(parseTranscript(text, file, SOL62), { seconds: 55.9, tokens: 354375 });
-  assert.equal(parseTranscript(text, file, SOL62).tokens, totalTokens(text, SOL62));
-  const facts = transcriptFacts(text, file);
+  const entries = transcriptEntries(text, file);
+  assert.deepEqual(parseTranscript(entries, file, SOL62), { seconds: 55.9, tokens: 354375 });
+  assert.equal(parseTranscript(entries, file, SOL62).tokens, totalTokens(text, SOL62));
+  const facts = transcriptFacts(entries);
   assert.equal(facts.requestedTier, 'priority');
   assert.deepEqual(
     [...new Set(facts.messages.map((message) => JSON.stringify(message)))],
@@ -302,9 +312,10 @@ test('the nested dispatch fixture is picked by its child name and keeps its side
   );
   const text = fs.readFileSync(nested, 'utf8');
   const file = path.basename(nested);
-  assert.deepEqual(parseTranscript(text, file, LUNA), { seconds: 14.7, tokens: 25868 });
-  assert.equal(parseTranscript(text, file, LUNA).tokens, totalTokens(text, LUNA));
-  const facts = transcriptFacts(text, file);
+  const entries = transcriptEntries(text, file);
+  assert.deepEqual(parseTranscript(entries, file, LUNA), { seconds: 14.7, tokens: 25868 });
+  assert.equal(parseTranscript(entries, file, LUNA).tokens, totalTokens(text, LUNA));
+  const facts = transcriptFacts(entries);
   assert.equal(facts.requestedTier, 'priority');
   assert.deepEqual(
     [...new Set(facts.messages.map((message) => JSON.stringify(message)))],
@@ -326,15 +337,16 @@ test('the nested dispatch fixture is picked by its child name and keeps its side
     facts.toolCalls.filter((call) => call.error).map((call) => call.path),
     [`${HOME}/checkouts/pins/cli/src/engine-native/no-such-file.ts`],
   );
-  assert.equal(transcriptSession(text, file).cwd, CHECKOUT);
+  assert.equal(transcriptSession(entries).cwd, CHECKOUT);
 });
 
 test('the main-session fixture marks more than one task as revived and lists its model_usage side calls', () => {
   const file = 'main-session.jsonl';
   const text = fixtureText(file);
-  assert.deepEqual(parseTranscript(text, file, OPUS), { seconds: 411.5, tokens: 652565 });
-  assert.equal(parseTranscript(text, file, OPUS).tokens, totalTokens(text, OPUS));
-  const facts = transcriptFacts(text, file);
+  const entries = transcriptEntries(text, file);
+  assert.deepEqual(parseTranscript(entries, file, OPUS), { seconds: 411.5, tokens: 652565 });
+  assert.equal(parseTranscript(entries, file, OPUS).tokens, totalTokens(text, OPUS));
+  const facts = transcriptFacts(entries);
   assert.equal(facts.revived, true);
   assert.equal(facts.requestedTier, null);
   assert.deepEqual(

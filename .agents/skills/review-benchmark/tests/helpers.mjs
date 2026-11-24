@@ -503,7 +503,8 @@ export function roundWorkspace(runs) {
 // known defect and the valid extras, and `fixAlreadyApplied` with the matched defects that an earlier round of the
 // run fixed, whose fix the tree still holds. As `case --loop` and `transcripts` write them, round 1 of a loop gets the
 // fixer setting (`fixerConfig`), and a round whose fix step gives valid extras to the fixer gets the transcript facts
-// of a fixer that used this setting (`fixer.agents`).
+// of a fixer that used this setting (`fixer.agents`) and its reply `repaired` for each finding of the round
+// (`fixer.replies`): the score counts a repair by the fixer only with that reply.
 export function gridFixture(cases, runs) {
   const blocks = [];
   const findings = [];
@@ -554,7 +555,11 @@ export function gridFixture(cases, runs) {
       const fixes = matched.map((known) => ({ known, patch: `${spec.case}.${known}.fix.patch` }));
       metas[folder].fix = { fixes, extras, rejections: [] };
       if (extras.length) {
-        metas[folder].fixer = { ...metas[folder].fixer, agents: { 'fixer-1': provenCost(FIXER_SETTING, fixer, 0) } };
+        metas[folder].fixer = {
+          ...metas[folder].fixer,
+          agents: { 'fixer-1': provenCost(FIXER_SETTING, fixer, 0) },
+          replies: Object.fromEntries(answers.map((_, n) => [`${folder}/full#${n + 1}`, 'repaired'])),
+        };
       }
       const present = matched.filter((known) => fixed.has(known));
       if (present.length) metas[folder].fixAlreadyApplied = present;
@@ -995,10 +1000,10 @@ export function policyLoops(count, arms = Object.keys(POLICY_ARMS)) {
   return { repo, ws, cases, caseData, caseDir, run };
 }
 // The meta.json reviewer entry of a transcript, as `score.mjs transcripts` writes it for the configured model `model`.
-export const transcriptEntry = (text, model = MODEL) => ({
-  ...parseTranscript(text, 'reviewer.jsonl', model),
-  ...score.transcriptFacts(text, 'reviewer.jsonl'),
-});
+export const transcriptEntry = (text, model = MODEL) => {
+  const entries = score.transcriptEntries(text, 'reviewer.jsonl');
+  return { ...parseTranscript(entries, 'reviewer.jsonl', model), ...score.transcriptFacts(entries) };
+};
 export const PREPARE_SCRIPT = path.join(SCRIPTS_DIR, 'prepare.mjs');
 // The delta reference of the plan-reviewer skill, relative to a plugin root.
 export const VARIANT_DELTA = 'skills/plan-reviewer/references/delta.md';

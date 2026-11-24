@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-11-24 - docks-kit 0.29.4: tested omp 19.1.1 and pi-intercom 0.19.0 pins
+
+### Changed
+
+- The omp `verified` pin in `SoT/toolchain.json` is 19.1.1. The floor stays
+  19.0.0. omp 19.1.1 lists each model selector of the kit roles exactly,
+  loads every key of `SoT/.omp/config.yml` with the kit value, and gives the
+  same approval outcome for each kit `bash.patterns` rule.
+- `docks-kit sync` installs pi-intercom 0.19.0 (before: 0.14.0) with
+  `omp install pi-intercom@0.19.0`. On omp 19.1.1, the 0.19.0 broker started
+  under Bun, by hand and through the kit `brokerCommand: bun`, and it listed
+  the connected omp session.
+- The review-benchmark omp fixtures are real omp 19.1.1 transcripts: a new
+  probe reviewer and manager, a failed-request probe on the tier `flex`, a
+  code-reviewer run, a nested dispatch, and a main-session slice. The
+  fixture tests follow the new facts.
+
 ## 2026-11-24 - docks-kit 0.29.3: skill examples and recipes follow their own rules
 
 ### Fixed
