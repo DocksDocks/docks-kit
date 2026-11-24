@@ -4,8 +4,8 @@ description: Use when a task creates or ends with worktrees, temporary files or 
 user-invocable: false
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-23"
-  content_hash: "07691495184f3e83b10a762dd0a8361300af3e1a732cbf59d7f9218ebd11864e"
+  updated: "2026-11-24"
+  content_hash: "7b0ea0813e53b0731f02a9cbb60ec8e00cde71459f040d03221cf6b05f1c35d0"
 ---
 
 # Workspace hygiene
@@ -23,7 +23,7 @@ For each resource, write its path, id, port, or remote name.
 
 | Class | Create | Remove | Keep when |
 |---|---|---|---|
-| Git worktree | `<data>/agent-worktrees/<repo>/<name>`; reuse a worktree of the same branch | for a worktree that you created: `git worktree remove -- <path>`, then `git worktree prune`; one `--force` only after the commits are on the remote and the changes are generated files | its pull request is open; you did not create it |
+| Git worktree | `<data>/agent-worktrees/<repo>/<name>`; reuse a worktree of the same branch | for a worktree that you created: run `git -C <path> status --porcelain --ignored --untracked-files=all` first, then `git worktree remove -- <path>`, then `git worktree prune`; one `--force` only after the commits are on the remote and that status command lists only generated files of the task | its pull request is open; you did not create it; the status command fails, or it lists a file that the task did not produce, such as a `.env` |
 | ovnfs checkout | `ovnfs new --name <name>` in the folder, without `--state` and without `OVNFS_STATE`; pick a new name for the task that ovnfs accepts: 1 to 64 characters from `a-z`, `0-9`, `.`, `_`, and `-`, starting with a letter or a digit; the branch name can give a hint, shortened and with each other character replaced by `-`; work in the path that it prints | `ovnfs rm <name>` when its work is landed, applied, or not needed; never `-f` or `--force` | its pull request is open; `ovnfs rm` refuses, for any reason (name the reason in your final answer); the name may no longer belong to the checkout that you opened; you opened it with `--state` or `OVNFS_STATE` |
 | Temporary file or directory | prefer a directory from `scratch_new` or `docks-kit scratch new <label>`, which the kit deletes after 7 idle days; put each temporary file inside it | `scratch_remove`, or `docks-kit scratch remove <path>`; `gio trash` does not work on a `tmpfs` `/tmp` | a later step reads it |
 | Test artifacts (coverage, test results, traces, screenshots, videos) | inside the worktree, git-ignored | removed with the worktree; in the user's checkout, `gio trash -- <path>` | the user asked for them |
@@ -37,7 +37,7 @@ For each resource, write its path, id, port, or remote name.
 | Global install | only on request | the matching uninstall command | the user asked for it |
 | Git stash or local branch | avoid stash; if you must stash, give a unique message with `-m`; one branch per plan | find the short ID that the reminder names with `git stash list --format='%h %gd %gs'`; pop that entry by its `stash@{n}` name, in the worktree where you made it, only when its message is a unique message that you gave with `-m`; otherwise do not pop or drop it, and name it in your final answer; when that worktree is removed, do not pop the entry in another worktree, and name it in your final answer; never apply, pop, or drop a stash entry that you did not create; `git branch -d <branch>` after the merge | the branch has an open pull request |
 | Remote test resource (database branch, preview deployment, fork, cloud instance) | only for the task | the provider's delete command, only for a development or preview target; ask first for production | the user asked for it |
-| Package or tool cache | the tool's default location | do not prune; report the size | always |
+| Package or tool cache | a cache for this task only: a scratch directory, when the tool can take a cache location; a shared cache: the tool's default location | a task cache goes with its scratch directory; do not prune a shared cache; report its size | the shared cache, always |
 
 ## Production resources
 

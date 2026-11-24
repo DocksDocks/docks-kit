@@ -7,21 +7,30 @@
 - The omp `file-removal` trigger rule no longer fires on a plain `rm`,
   `unlink`, or `shred` of a file, or on `git worktree remove --force`. It
   still fires, in the bash tool and in eval, on a recursive or
-  directory-mode `rm` (`-r`, `-R`, `-d`, `--recursive`, `--dir`, also abbreviated), on
-  `--no-preserve-root`, and on a removal of `~`, `$HOME`, `${HOME}`, `/`,
-  `.`, `..`, a device under `/dev/`, or every file of one of them (`/*`,
-  `~/*`, bare `*`). Its `find -delete`, `find -exec rm`, `git rm -r`, and
-  code-deletion conditions stay. The omp deny list for the bash tool does
-  not change (DocksDocks/docks-kit#217).
+  directory-mode `rm` (`-r`, `-R`, `-d`, `--recursive`, `--dir`, also
+  abbreviated), on `--no-preserve-root`, and on a removal of `~`, `$HOME`,
+  `${HOME}`, `/`, `.`, `..`, a device under `/dev/` other than `/dev/null`,
+  `/dev/zero`, `/dev/random`, and `/dev/urandom`, or every file of one of
+  them (`/*`, `~/*`, bare `*`), also when a redirection follows without a
+  space. Its `find -delete`, `find -exec rm`, `git rm -r`, and code-deletion
+  conditions stay. Its text now says to remove only what the task created.
+  The omp deny list for the bash tool does not change
+  (DocksDocks/docks-kit#217).
 - The omp `temp-and-background` trigger rule no longer fires on `/tmp`
   paths, `mktemp`, or `TMPDIR=/tmp`. Its parts for detached processes,
   watchers, global installs, scheduled jobs, services, and Docker cleanup
-  stay. The `workspace-hygiene` skill now prefers a scratch folder instead of
-  forbidding `/tmp`.
+  stay. The `workspace-hygiene` skill, the hygiene reminder, and the
+  `scratch_new` tool now prefer a scratch folder instead of forbidding
+  `/tmp`; a cache for one task goes in a scratch folder when the tool can
+  take a cache location.
 - The `workspace-hygiene` skill keeps an ovnfs checkout on any refusal of
   `ovnfs rm`, gives the ovnfs name rule (1 to 64 characters from `a-z`,
   `0-9`, `.`, `_`, and `-`, starting with a letter or a digit), and allows a
-  forced worktree removal only for a worktree that the agent created.
+  forced worktree removal only for a worktree that the agent created. Before
+  any worktree removal, the skill and the guide run
+  `git -C <path> status --porcelain --ignored --untracked-files=all` and keep
+  a worktree when the command fails or lists a file that the task did not
+  produce.
 
 ## 2026-11-23 - docks-kit 0.28.2: ovnfs rm passes the file-removal rule
 

@@ -1,11 +1,12 @@
 # Command guards
 
 The kit ships one destructive-command policy to omp.
-The short rule for agents: **a plain `rm` of a file is fine; a removal that can
-take a whole folder or the home folder is not**. Remove a folder with
-`gio trash -- <path>` on Linux or `trash <path>` on macOS, and a temporary
-folder with `docks-kit scratch remove <path>`. To remove a path from the git
-index, run `git rm -- <path>`.
+The short rule for agents: **remove only what the task created; a plain `rm`
+of a file is fine; a removal that can take a whole folder or the home folder
+is not**. Remove a folder with `gio trash -- <path>` on Linux or
+`trash <path>` on macOS, and a temporary folder with
+`docks-kit scratch remove <path>`. To remove a path from the git index, run
+`git rm -- <path>`.
 
 The policy keeps only deny rules. Where omp's critical-command check acts,
 the form is denied. omp also denies a `$` or a backtick after `git push`,
@@ -111,32 +112,45 @@ block them. The omp `git-safety.md` trigger rule forbids each hook skip.
 
 ## How an agent removes files
 
-1. Remove a temporary file or directory with the `scratch_remove` tool or
+1. Remove only what the task created. A file or a folder that the agent did
+   not create stays, also in a worktree that the agent reuses.
+2. A plain `rm`, `unlink`, or `shred` of a file is allowed. The
+   `file-removal.md` trigger rule stays quiet on it; other rules still apply,
+   for example `literal-paths.md` on `~` or `$HOME` in the path.
+3. Remove a temporary directory with the `scratch_remove` tool or
    `docks-kit scratch remove <path>`. The command removes only a path inside
    the scratch root, the system temporary directory, or `/var/tmp`.
    `gio trash` does not trash on a system internal mount, such as a `tmpfs`
    `/tmp`.
-2. Move every other file or directory to the trash with `gio trash -- <path>`
-   on Linux or `trash <path>` on macOS. The `--` ends option parsing, so `gio`
+4. Move every other directory to the trash with `gio trash -- <path>` on
+   Linux or `trash <path>` on macOS. The `--` ends option parsing, so `gio`
    reads every later argument as a path, and a path such as `--empty` cannot
    empty the trash.
-3. To remove a path from the git index, run `git rm -- <path>`. To remove a
-   worktree, run `git worktree remove -- <path>`. When git refuses because the
-   worktree has changes, the agent may pass `--force` once for a worktree that
-   it created, after each commit is on the remote and `git status --porcelain`
-   lists only generated files. Never pass `--force` two times.
-4. A plain `rm`, `unlink`, or `shred` of a file runs. In the bash tool, omp
-   denies the listed recursive `rm` forms, `find -delete`, `find -exec rm`,
-   and `xargs rm` ("Gaps" lists what the deny list does not cover). The
-   `file-removal.md` trigger rule fires, in bash and in eval, on each
-   recursive or directory-mode `rm` (also an abbreviated long option), on
-   `--no-preserve-root`, and on a removal of `~`, `$HOME`, `${HOME}`, `/`,
-   `.`, `..`, a device under `/dev/` other than `/dev/null`, or every file of
-   one of them.
-5. For a recursive or bulk deletion, ask the user in the main session. A
+5. To remove a path from the git index, run `git rm -- <path>`. Remove only a
+   worktree that the agent created, with `git worktree remove -- <path>`, as
+   the `workspace-hygiene` Git worktree row says; that rule applies to a
+   normal and to a forced removal. Git deletes the ignored files of the
+   worktree in both forms, so the agent first runs
+   `git -C <path> status --porcelain --ignored --untracked-files=all` and
+   keeps the worktree when the command fails or lists a file that the task
+   did not produce, such as a `.env`. When git refuses because the worktree
+   has changes, the agent may pass `--force` once, after each commit is on the
+   remote and the same `git -C <path> status --porcelain --ignored
+   --untracked-files=all` lists only generated files of the task. When it
+   lists another file, the agent keeps the worktree. Never pass `--force` two
+   times.
+6. In the bash tool, omp denies the listed recursive `rm` forms,
+   `find -delete`, `find -exec rm`, and `xargs rm` ("Gaps" lists what the deny
+   list does not cover). The `file-removal.md` trigger rule fires, in bash and
+   in eval, on each recursive or directory-mode `rm` (also an abbreviated long
+   option), on `--no-preserve-root`, and on a removal of `~`, `$HOME`,
+   `${HOME}`, `/`, `.`, `..`, a device under `/dev/` other than `/dev/null`,
+   `/dev/zero`, `/dev/random`, and `/dev/urandom`, or every file of one of
+   them.
+7. For a recursive or bulk deletion, ask the user in the main session. A
    subagent lists the paths in its final report. The user runs a recursive
    deletion by hand.
-6. Write literal absolute paths. Never use `~` or `$HOME`, and never set or
+8. Write literal absolute paths. Never use `~` or `$HOME`, and never set or
    export `HOME`.
 
 The kit plugin trigger rules `file-removal.md` and `literal-paths.md` carry
@@ -167,7 +181,7 @@ command through `sh()`.
 
 | Rule | Scope | Correct form that the rule teaches |
 | --- | --- | --- |
-| `file-removal.md` | `tool:bash`, `tool:eval` | a plain `rm`, `unlink`, or `shred` of a file, also after a `VAR=value` prefix or a wrapper; no recursive or directory-mode removal (`-r`, `-R`, `-d`, a flag cluster with one of them, `--recursive`, `--dir`, `--no-preserve-root`); no removal of `~`, `$HOME`, `${HOME}`, `/`, `.`, `..`, a device under `/dev/` other than `/dev/null`, or every file of one of them (`/*`, `~/*`, bare `*`); `scratch_remove` or `docks-kit scratch remove <path>` for a temporary folder; `gio trash -- <path>` or `trash <path>` for another folder; `git rm -- <path>`; for a folder, `git rm -- '<dir>/*'` or `git rm --cached -- '<dir>/*'`, because omp denies `git rm -r`; no `find -delete` or `find -exec rm`; no deletion through `eval` code. A worktree or an ovnfs checkout follows its row in the `workspace-hygiene` skill |
+| `file-removal.md` | `tool:bash`, `tool:eval` | only what the task created; a plain `rm`, `unlink`, or `shred` of a file, also after a `VAR=value` prefix or a wrapper; no recursive or directory-mode removal (`-r`, `-R`, `-d`, a flag cluster with one of them, `--recursive`, `--dir`, `--no-preserve-root`, also abbreviated); no removal of `~`, `$HOME`, `${HOME}`, `/`, `.`, `..`, a device under `/dev/` other than `/dev/null`, `/dev/zero`, `/dev/random`, and `/dev/urandom`, or every file of one of them (`/*`, `~/*`, bare `*`); `scratch_remove` or `docks-kit scratch remove <path>` for a temporary folder; `gio trash -- <path>` or `trash <path>` for another folder; `git rm -- <path>`; for a folder, `git rm -- '<dir>/*'` or `git rm --cached -- '<dir>/*'`, because omp denies `git rm -r`; no `find -delete` or `find -exec rm`; no deletion through `eval` code. A worktree or an ovnfs checkout follows its row in the `workspace-hygiene` skill |
 | `git-safety.md` | `tool:bash`, `tool:eval` | no hook skip, also through an abbreviation such as `--no-veri`; no `-f`, `f` cluster, or `--f` long option with `git push` or `git rm` (`--follow-tags` is correct); no `+<ref>` with `git push` (`git push origin +<ref>` is a force push); no `git push --mirror` or `--prune`; a literal push ref; `git push` as its own command, not chained with `&&`, `\|\|`, or `;`; `git push -u origin HEAD`; `git push origin --delete <branch-a> <branch-b>`; `git branch -d <branch>`, not `-D` or `-d --force`; `git restore -- <path>`; an ask before `git clean` without `-n` or `--dry-run` before ` -- `, `git reset --hard`, `git checkout .`, `git restore .` (`git restore --staged .` only unstages and is correct), `git stash drop`, or `git stash clear`. The git global options `-C`, `-c`, `-p`, `-P`, and `--<option>` do not hide the subcommand. A word after ` -- ` is a path, not an option |
 | `temp-and-background.md` | `tool:bash`, `tool:eval` | a server or watcher only as a named bash service or an async job; a test suite in single-run mode; no `nohup`, `setsid`, `disown`, `tmux`, or `screen`, also after a `VAR=value` prefix; no global install (`npm`, `bun`, `pnpm`, `yarn`, `pipx`, `cargo`, `go install`, `gem install`, `uv tool install`), scheduled job, or enabled service; no Docker cleanup of a resource that the agent did not create. Paths under `/tmp` and `mktemp` are allowed; the `workspace-hygiene` skill prefers a scratch folder, which the kit cleans up |
 | `worktree-location.md` | `tool:bash`, `tool:eval` | a worktree only at the literal absolute path `<data>/agent-worktrees/<repository>/<name>`, with `agent-worktrees` as a whole directory name. The rule fires on each `git worktree add`, also at the correct path, because a condition cannot read `$XDG_DATA_HOME` or the home directory of the user. The retry after the reminder runs |
@@ -449,7 +463,8 @@ the home directory, and no glob can express "inside the temporary directory".
   files itself, such as a Python or Node script, or a shell started by omp
   `eval`. In eval, the `file-removal.md` trigger rule interrupts deletion in
   code (`os.remove`, `shutil.rmtree`, `fs.rm`, and the like) and the dangerous
-  `rm` forms of `sh(...)`; a plain `rm` of a file in `sh(...)` runs.
+  `rm` forms of `sh(...)`. It stays quiet on a plain `rm` of a file in
+  `sh(...)`; other rules still apply, such as `literal-paths.md` on `~`.
 
 ### How `gio trash` empties the trash
 

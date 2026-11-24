@@ -539,6 +539,8 @@ const HEAD_RUNS_ADDED: Readonly<Record<string, ReadonlyArray<HeadRun>>> = {
     { head: "rm ", run: "~x " },
     { head: "rm ", run: "-x " },
     { head: "rm ", run: "\\" },
+    { head: "rm -", run: "r" },
+    { head: "rm ", run: "a>" },
   ],
 };
 /**
