@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "8abc87847c17fed8a1c9d0ea5be7191765c9b9727265c859255f20d97acc2fef"
+  content_hash: "d36780b46daa164e9a1b77401cf34f1c30d174dc59eac3ab475ca0bca163339f"
 ---
 
 # Code Guardrails
@@ -47,6 +47,10 @@ an install approval installs the tool, and it does not create or change a config
 To create or change a config, follow the Detect rules of the matching reference.
 When those Detect rules find no config for the linter, show the config that the reference
 gives, and ask the user before you create it, as this gate says.
+Propose a first config only when the project's lint command loads config files. When
+that command passes a flag that skips or replaces them (such as ShellCheck `--norc`,
+ESLint `--no-config-lookup`, or a `--config` or `-c` that names another file), report
+the flag, and ask before you change how the project selects rules.
 For Python, follow the Detect rules of `references/python.md` instead.
 A silent dependency or tool change is a change the user did not approve.
 
