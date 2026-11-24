@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-24"
-  content_hash: "10ee05e67c5bfbaf9f8f70d55d218a8938c4bec16f02951598c02f99ecf95d80"
+  content_hash: "8955cef86e5c803cfe56b1437d0cd5d4365f3083ebf03c099c7a8fae8198f073"
 ---
 
 # Code Guardrails
@@ -271,8 +271,9 @@ When git grep exits with 1, no file matched, and the scan succeeds. A higher git
 status, any error output from git grep or `tr` (such as a file that git cannot read),
 or a failure of `tr`, `awk`, or `sort` means that the scan failed: the block prints an
 error, stops, and returns a nonzero status. Do not read the empty output of a failed
-scan as "no repeated values". The scan holds the matches in memory and uses no
-temporary file, so a very large match stream uses more memory.
+scan as "no repeated values". The scan holds the matches in memory and writes no
+temporary file of its own, so a very large match stream uses more memory. `sort` can
+still use its own temporary files for a large input.
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
