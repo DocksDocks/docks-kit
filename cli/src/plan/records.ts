@@ -70,36 +70,39 @@ const EMPHASIZED_MACHINE_PATH = new RegExp(
 function blankCodeSpans(text: string): string {
   if (!text.includes("`")) return text;
   // The result has the length of `text`, so an offset into it is an offset into `text`.
-  return text
-    .split("\n")
-    .map((line) => {
-      const parts: Array<string> = [];
-      let copied = 0;
-      let index = 0;
-      while (index < line.length) {
-        if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
-          index += 2;
-          continue;
-        }
-        if (line[index] !== "`") {
-          index += 1;
-          continue;
-        }
-        const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
-        const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
-        if (!close) {
-          index += run.length;
-          continue;
-        }
-        const end = index + run.length + close.index + run.length;
-        parts.push(line.slice(copied, index), " ".repeat(end - index));
-        copied = end;
-        index = end;
+  let changed = false;
+  const lines = text.split("\n").map((line) => {
+    if (!line.includes("`")) return line;
+    let parts: Array<string> | undefined;
+    let copied = 0;
+    let index = 0;
+    while (index < line.length) {
+      if (line[index] === "\\" && (line[index + 1] === "`" || line[index + 1] === "\\")) {
+        index += 2;
+        continue;
       }
-      parts.push(line.slice(copied));
-      return parts.join("");
-    })
-    .join("\n");
+      if (line[index] !== "`") {
+        index += 1;
+        continue;
+      }
+      const run = /^`+/.exec(line.slice(index))?.[0] ?? "`";
+      const close = new RegExp(`(?<!\`)${run}(?!\`)`).exec(line.slice(index + run.length));
+      if (!close) {
+        index += run.length;
+        continue;
+      }
+      const end = index + run.length + close.index + run.length;
+      parts ??= [];
+      parts.push(line.slice(copied, index), " ".repeat(end - index));
+      copied = end;
+      index = end;
+    }
+    if (parts === undefined) return line;
+    changed = true;
+    parts.push(line.slice(copied));
+    return parts.join("");
+  });
+  return changed ? lines.join("\n") : text;
 }
 const SECTIONS = [
   "Goal",
