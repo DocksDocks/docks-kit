@@ -21,6 +21,8 @@ import {
   issueSummaries,
   linkSubIssue,
   ownedPreWriteIssue,
+  preWriteIssue,
+  refuseChangedIssue,
   parseJson,
   pullRequestNodes,
   readPullRequest,
@@ -87,6 +89,7 @@ import {
   parentRecord,
   recorded,
   reviewVerdicts,
+  trustedComments,
   type GrantState,
 } from "./reviews";
 import { PlanFiles, PlanWaits, type PlanProcess, type PlanRepository } from "./services";
@@ -109,6 +112,8 @@ export type PlanServices = PlanProcess | PlanRepository | PlanFiles | PlanWaits;
 const PLAN_LIST_ARGS =
   ',labels:["plan"],states:[OPEN,CLOSED],orderBy:{field:CREATED_AT,direction:DESC}';
 const PLAN_LIST_LIMIT = 500;
+// The open plans, in the order of the plan list, for the body classification of `list`.
+const OPEN_PLAN_ARGS = ',labels:["plan"],states:[OPEN],orderBy:{field:CREATED_AT,direction:DESC}';
 // GitHub closes a plan for a merged pull request a while after the merge. `archive` reads an open plan up to
 // CLOSE_WAIT_READS times until it reads closed, and `reopen` until GitHub records the close by that pull request.
 // Between reads they pause for the next entry of CLOSE_WAIT_PAUSES_MS, and the last entry repeats: about 60 s in all.
@@ -178,8 +183,14 @@ const readPlanIssue = Effect.fn("plan.readPlanIssue")(function* (
     const owners = issue.assignees.map((owner) => owner.login);
     const foreign = owners.find((owner) => owner !== login);
     if (foreign) return yield* refuse(`plan #${issue.number} is owned by ${foreign}`);
+    // `list` finds plans by the base label, so a write keeps an open plan findable.
+    if (!isClosed(issue) && !issue.labels.some((label) => token(label.name) === "plan"))
+      return yield* refuse(
+        `plan #${issue.number} lacks the plan label; add it with \`gh issue edit ${issue.number} --add-label plan\``,
+      );
     // The write claims an unassigned plan for the acting viewer.
     if (!owners.length) issue.claimantId = viewerId;
+    issue.actingLogin = login;
   }
   const parsed = yield* attempt(() => parsePlan(issue.body));
   const read: PlanRead = {
@@ -203,11 +214,13 @@ function workStarted(issue: PlanIssue, recordStatus: string): boolean {
 const writeMarker = (issue: PlanIssue, status: string): string =>
   contractVersion(issue.body) === 5 || !workStarted(issue, status) ? MARKER : LEGACY_MARKER;
 
-// A child plan needs a parent that the acting login owns alone and that is still open as a plan (E1).
+// A child plan needs a parent that the acting login owns alone and that is still open as a plan with its base `plan`
+// label, so that `list` finds it (E1).
 function openPlanOf(issue: PlanIssue, login: string | undefined): boolean {
   return (
     contractVersion(issue.body) > 0 &&
     String(issue.state).toUpperCase() === "OPEN" &&
+    issue.labels.some((label) => token(label.name) === "plan") &&
     PLAN_STATUSES.has(statusFromIssueOf(issue)) &&
     issue.assignees.length === 1 &&
     issue.assignees[0].login === login
@@ -276,8 +289,9 @@ const createPlan = Effect.fn("plan.new")(function* (args: ReadonlyArray<string>)
     parentValue === undefined
       ? undefined
       : yield* attempt(() => parseIssueNumber(parentValue, "parent issue"));
-  const snapshotOptions = { acting: true, labelLookup: true };
-  const { labelIds } =
+  // `new` creates the issue with label names and `@me`, so it reads no node ids (#213, R20).
+  const snapshotOptions = { acting: true, labelLookup: true, namesOnly: true };
+  const { missingLabels } =
     parent === undefined
       ? yield* readRepositorySnapshot(snapshotOptions)
       : yield* readSnapshot(parent, snapshotOptions).pipe(
@@ -287,8 +301,8 @@ const createPlan = Effect.fn("plan.new")(function* (args: ReadonlyArray<string>)
           ),
         );
   const { nameWithOwner } = yield* currentRepository();
-  for (const [label, id] of labelIds ?? [])
-    if (id === null) yield* runGh(["label", "create", label, "--repo", nameWithOwner]);
+  for (const label of missingLabels)
+    yield* runGh(["label", "create", label, "--repo", nameWithOwner]);
   const goalLines = goal.split("\n");
   const goalText = blankFencedRegions(goal)
     .split("\n")
@@ -377,16 +391,27 @@ const showPlan = Effect.fn("plan.show")(function* (args: ReadonlyArray<string>) 
   yield* printLine(metadata);
   const unfinished =
     status === "finished" ? parsed.steps.find((step) => !terminal(step.status)) : undefined;
-  const extra = unfinished
-    ? [
-        `plan is closed as completed while step ${unfinished.id} is ${unfinished.status}; closed by ${describeCloser(issue.closer)}; reopen the issue if work remains`,
-      ]
-    : [];
+  const extra = unfinished ? [unfinishedStepAdvice(issue, unfinished)] : [];
   if (stuckClosed(issue)) extra.push(STUCK_ADVICE);
   if (status === "finished") extra.push(...closedChildAdvice(issue, parsed));
   extra.push(...budgetAdvice(issue.body, parsed, issue.comments.length), ...grant.advice);
   yield* printAdvice(issue.body, status, extra);
 });
+
+// The repair for a plan closed as completed while a step is open. A plain reopen right after a close can leave the plan
+// stuck (#90), so the advice names the helper's own paths: the step, when the merged work finished it; `reopen --pr` for
+// a v3 or v4 plan that a pull request closed; a new plan for a v5 plan, because `new --parent` refuses a closed parent.
+function unfinishedStepAdvice(issue: PlanIssue, step: Step): string {
+  const closed = `plan is closed as completed while step ${step.id} is ${step.status}; closed by ${describeCloser(issue.closer)}`;
+  const finish = `run step ${issue.number} ${step.id} done if the merged work finished it`;
+  const rest =
+    contractVersion(issue.body) === 5
+      ? "otherwise open a new plan with new for the remaining work"
+      : issue.closer?.__typename === "PullRequest"
+        ? `otherwise run reopen ${issue.number} --pr ${issue.closer.number}`
+        : "otherwise reopen the plan by hand only if that close was a mistake";
+  return `${closed}; ${finish}; ${rest}`;
+}
 
 const childStatuses = (children: ReadonlyArray<IssueSummary>): Map<number, string> =>
   new Map(children.map((child) => [child.number, statusFromIssueOf(child)]));
@@ -605,31 +630,74 @@ const listPlans = Effect.fn("plan.list")(function* (args: ReadonlyArray<string>)
   const selected = (yield* attempt(() => parseOptions(args, new Set(["--status"])))).values.get(
     "--status",
   );
-  // One GraphQL query per 100 plans; like every snapshot, it names the repository through gh's {owner}/{repo}.
-  const query = `query($owner:String!,$name:String!,$after:String){repository(owner:$owner,name:$name){${issueConnectionSelection("issues", ISSUE_SUMMARY_FIELDS, PLAN_LIST_ARGS, true)}}}`;
-  const page = (variables: Readonly<Record<string, string>> = {}) =>
-    graphql(query, variables).pipe(
-      Effect.map((data) => field(field(data, "repository"), "issues")),
-    );
+  // One GraphQL query per 100 plans; like every snapshot, it names the repository through gh's {owner}/{repo}. The first
+  // page also tells whether the repository has issues, as `gh issue list` refused a repository without them.
+  const query = `query($owner:String!,$name:String!,$after:String){repository(owner:$owner,name:$name){nameWithOwner hasIssuesEnabled ${issueConnectionSelection("issues", ISSUE_SUMMARY_FIELDS, PLAN_LIST_ARGS, true)}}}`;
+  const repository = (variables: Readonly<Record<string, string>> = {}) =>
+    graphql(query, variables).pipe(Effect.map((data) => field(data, "repository")));
+  const first = yield* repository();
+  if (field(first, "hasIssuesEnabled") === false)
+    return yield* refuse(`issues are disabled in ${String(field(first, "nameWithOwner"))}`);
   const nodes = yield* connectionNodes(
-    yield* page(),
+    field(first, "issues"),
     "plan issues",
-    (after) => page({ after }),
+    (after) => repository({ after }).pipe(Effect.map((data) => field(data, "issues"))),
     PLAN_LIST_LIMIT,
   );
   const issues = yield* issueSummaries(nodes.slice(0, PLAN_LIST_LIMIT), "plan issues");
+  const unreadable = yield* unmarkedOpenPlans(
+    issues.filter((issue) => issue.state.toUpperCase() !== "CLOSED").map((issue) => issue.number),
+  );
   issues.sort(
     (a, b) =>
       Number(a.state.toUpperCase() === "CLOSED") - Number(b.state.toUpperCase() === "CLOSED") ||
       a.number - b.number,
   );
   for (const issue of issues) {
-    const status = statusFromIssueOf(issue);
+    const status = unreadable.has(issue.number) ? "unreadable" : statusFromIssueOf(issue);
     if (!selected || status === token(selected))
       yield* printLine(`${status}\t#${issue.number}\t${issue.title}`);
   }
   if (issues.length >= PLAN_LIST_LIMIT)
     yield* printLine("advice: list stopped at 500 plans; more plans may exist");
+});
+
+// The open plans of `numbers`, the retained open rows of `list`, whose body has no contract marker: `show` refuses them
+// as unreadable, so `list` names them so too. Only open bodies are read, newest first as `list` reads them, 100 to a
+// request. A retained row whose body the pages miss changed while `list` read; the list refuses rather than guess.
+const unmarkedOpenPlans = Effect.fn("plan.unmarkedOpenPlans")(function* (
+  numbers: ReadonlyArray<number>,
+) {
+  const unmarked = new Set<number>();
+  if (numbers.length === 0) return unmarked;
+  const query = `query($owner:String!,$name:String!,$after:String){repository(owner:$owner,name:$name){${issueConnectionSelection("issues", "number body", OPEN_PLAN_ARGS, true)}}}`;
+  const page = (variables: Readonly<Record<string, string>> = {}) =>
+    graphql(query, variables).pipe(
+      Effect.map((data) => field(field(data, "repository"), "issues")),
+    );
+  const nodes = yield* connectionNodes(
+    yield* page(),
+    "open plan bodies",
+    (after) => page({ after }),
+    numbers.length,
+  );
+  const bodies = new Map<number, string>();
+  for (const node of nodes) {
+    const number = field(node, "number");
+    const text = field(node, "body");
+    if (typeof number !== "number" || typeof text !== "string")
+      return yield* new GraphqlError({
+        message: "gh api graphql returned malformed open plan bodies",
+      });
+    bodies.set(number, text);
+  }
+  for (const number of numbers) {
+    const text = bodies.get(number);
+    if (text === undefined)
+      return yield* refuse("the plan list changed while list read it; run list again");
+    if (!contractVersion(text)) unmarked.add(number);
+  }
+  return unmarked;
 });
 
 // GitHub closes a plan for its merged pull request a while after the merge, so an archive takes the plan open and
@@ -670,14 +738,15 @@ const changedChild = Effect.fn("plan.changedChild")(function* (issue: PlanIssue)
   return work;
 });
 
-// A rerun cannot take a close back, so the close runs only while the plan keeps the snapshot body, no other owner, and
-// the snapshot children with their statuses: a child that reopened or a new child is open work.
+// A rerun cannot take a close back, so the close runs only while the plan keeps the snapshot children with their
+// statuses (a child that reopened or a new child is open work) and the snapshot body, state, labels, and owners. The
+// issue is read last, right before the close.
 const refuseChangedBeforeClose = Effect.fn("plan.refuseChangedBeforeClose")(function* (
   plan: PlanRead,
 ) {
-  const current = yield* ownedPreWriteIssue(plan.issue.number, plan.login);
-  if (current.body !== plan.issue.body || (yield* changedChild(plan.issue)))
+  if (yield* changedChild(plan.issue))
     return yield* refuse("plan issue changed remotely; re-read and retry");
+  yield* refuseChangedIssue(plan.issue, yield* preWriteIssue(plan.issue.number));
 });
 
 // The open work of a plan that reads closed as completed, as one child and its status, or undefined when it shows none.
@@ -775,7 +844,9 @@ const claimBeforeClose = Effect.fn("plan.claimBeforeClose")(function* (plan: Pla
 // Post the archive `record` on a plan that archive did not close itself, unless a rerun posted it already.
 const postRecordOnce = Effect.fn("plan.postRecordOnce")(function* (plan: PlanRead, record: string) {
   if (recorded(plan.issue, record)) return;
-  const { id } = yield* ownedPreWriteIssue(plan.issue.number, plan.login);
+  const current = yield* preWriteIssue(plan.issue.number);
+  yield* refuseChangedIssue(plan.issue, current);
+  const { id } = current;
   yield* graphqlData([
     "-f",
     "query=mutation($issue:ID!,$body:String!){addComment(input:{subjectId:$issue,body:$body}){clientMutationId}}",
@@ -823,8 +894,16 @@ const archiveParent = Effect.fn("plan.archiveParent")(function* (number: number)
       nameWithOwner,
     ]);
     yield* checkAfterOwnClose(number, children);
-  } else yield* postRecordOnce(plan, record);
-  yield* writeIssueIfUnchanged(plan.issue, { remove: labelsToRemove(plan.issue.labels) });
+  } else {
+    // A trusted record needs one owner, so the claim lands before the record.
+    yield* claimBeforeClose(plan);
+    yield* postRecordOnce(plan, record);
+  }
+  yield* writeIssueIfUnchanged(plan.issue, {
+    remove: labelsToRemove(plan.issue.labels),
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+  });
   yield* printLine(`plan #${number} finished (all ${children.length} children finished)`);
 });
 
@@ -842,6 +921,12 @@ const archivePlan = Effect.fn("plan.archive")(function* (args: ReadonlyArray<str
   );
   if (!pullRequest.merged)
     return yield* refuse(`pull request #${pullRequest.number} is not merged`);
+  // GitHub marks a pull request merged when its head commit reaches the base branch another way (an indirect merge),
+  // so the landing proof is a merge commit that the pull request's own merge made.
+  if (!pullRequest.landedByItself)
+    return yield* refuse(
+      `pull request #${pullRequest.number} did not land by its own merge: its merge commit is missing, is its head commit, or belongs to another pull request`,
+    );
   // Each read is a snapshot for the write: it checks ownership, decides the claim, and must still be archivable. A plan
   // that reads closed as completed while a child shows open work, such as after a failed read that followed archive's
   // close, is reopened safely before the archive refusals.
@@ -898,8 +983,15 @@ const archivePlan = Effect.fn("plan.archive")(function* (args: ReadonlyArray<str
       nameWithOwner,
     ]);
     yield* checkAfterOwnClose(number, observed.issue.children);
-  } else yield* postRecordOnce(observed, record);
-  yield* writeIssueIfUnchanged(observed.issue, { remove: labelsToRemove(observed.issue.labels) });
+  } else {
+    yield* claimBeforeClose(observed);
+    yield* postRecordOnce(observed, record);
+  }
+  yield* writeIssueIfUnchanged(observed.issue, {
+    remove: labelsToRemove(observed.issue.labels),
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+  });
   yield* printLine(`plan #${number} finished (closed by ${pullRequest.url})`);
 });
 
@@ -912,7 +1004,13 @@ const retirePlan = Effect.fn("plan.retire")(function* (args: ReadonlyArray<strin
     return yield* refuse("retire requires a single-line --reason");
   const { issue, status } = yield* readPlanIssue(value, true);
   if (isClosed(issue)) return yield* refuse(`cannot retire a ${status} plan`);
-  yield* writeIssueIfUnchanged(issue, { remove: labelsToRemove(issue.labels) });
+  // The pre-write read runs even when nothing is removed or claimed: a rerun cannot take the close back.
+  const remove = labelsToRemove(issue.labels);
+  const wrote = remove.length > 0 || issue.claimantId !== undefined;
+  yield* writeIssueIfUnchanged(issue, { remove, verify: true });
+  issue.claimantId = undefined;
+  // After its own write, retire reads the plan once more right before the close, which then holds no phase label.
+  if (wrote) yield* writeIssueIfUnchanged(issue, { verify: true, phases: [] });
   const { nameWithOwner } = yield* currentRepository();
   yield* runGh([
     "issue",
@@ -960,44 +1058,77 @@ const closedByPullRequest = Effect.fn("plan.closedByPullRequest")(function* (
   return true;
 });
 
-// One write request reopens the plan, posts `comment`, and claims an unassigned plan. It changes no label that the plan
-// holds, so a label that someone adds meanwhile survives. Only when the read right before the write shows no phase
-// label, as after a finished archive, does the same request add `plan:ongoing`. GitHub labels have no compare-and-set,
-// so a phase label can still change around the write: the read after it must show an open plan with exactly one phase
-// label. A plan that reads closed again was closed by someone after the write, and the refusal names `command`, whose
-// rerun reads that close and decides again. An open plan with no phase label or with more than one is refused with the
-// repair through `status`. A reopen compares no body, so the pre-write read is its last ownership check: an owner that
-// appeared after the snapshot is refused, and the claim follows that read. The last field returns the stored state,
-// which shows whether GitHub left the plan stuck.
+/** One top-level field of a write request: the mutation, its input, and the field of its payload. */
+interface MutationCall {
+  readonly name: string;
+  readonly input: string;
+  readonly payload: string;
+}
+
+// The first write request reopens the plan and claims an unassigned plan, so the claim lands with the state change. It
+// changes no label that the plan holds, so a label that someone adds meanwhile survives; only when the read right before
+// the write shows no phase label, as after a finished archive, does it add `plan:ongoing`. A reopen compares no body,
+// so the pre-write read is its ownership check: an owner that appeared after the snapshot is refused, and the claim
+// follows that read. GitHub runs later fields after a failed field, so `comment` goes in a second request, after the
+// reopen landed: a failed reopen posts no "Reopened:" comment. The read after the first request must show an open plan
+// with exactly one phase label; a plan that reads closed again was closed by someone after the write, and the refusal
+// names `command`, whose rerun reads that close and decides again. Right before the comment, the plan must hold the
+// snapshot body, the expected phase label, the base label, and only its owner.
 const writeReopen = Effect.fn("plan.writeReopen")(function* (
   plan: PlanRead,
   comment: string,
   command: string,
 ) {
   const { issue, login, viewerId, labelIds } = plan;
-  const { id, assignees } = yield* ownedPreWriteIssue(issue.number, login);
-  const claims = assignees.length === 0;
-  const restoresPhase = !(yield* readSnapshot(issue.number)).issue.labels.some((label) =>
-    isPhaseLabel(label.name),
-  );
+  const phases = (yield* readSnapshot(issue.number)).issue.labels
+    .map((label) => token(label.name))
+    .filter(isPhaseLabel);
+  const restoresPhase = phases.length === 0;
   const phaseLabelId = restoresPhase
     ? (labelIds?.get("plan:ongoing") ?? (yield* createdLabelId("plan:ongoing")))
     : undefined;
-  const stored = "{... on Issue{state stateReason}}";
-  const fields = [
-    "reopenIssue(input:{issueId:$issue}){clientMutationId}",
+  // The read right before the reopen: the observed close, the body, the base label that the open plan needs, the phase
+  // labels of the label read, and the owners. Ownership follows this read: an owner that appeared is refused by name.
+  const before = yield* preWriteIssue(issue.number);
+  yield* attempt(() =>
+    refuseStuck({
+      number: issue.number,
+      state: before.state,
+      stateReason: before.stateReason ?? null,
+    }),
+  );
+  const { id, assignees } = yield* refuseChangedIssue(issue, before, { phases, base: true });
+  const claims = assignees.length === 0;
+  const stored = `{... on Issue{state stateReason assignees(first:100){nodes{id}}}}`;
+  const write: ReadonlyArray<MutationCall> = [
+    { name: "reopenIssue", input: "issueId:$issue", payload: "issue" },
     ...(restoresPhase
-      ? ["addLabelsToLabelable(input:{labelableId:$issue,labelIds:$labels}){clientMutationId}"]
+      ? [
+          {
+            name: "addLabelsToLabelable",
+            input: "labelableId:$issue,labelIds:$labels",
+            payload: "labelable",
+          },
+        ]
       : []),
-    `addComment(input:{subjectId:$issue,body:$body}){${claims ? "clientMutationId" : `subject${stored}`}}`,
+    ...(claims
+      ? [
+          {
+            name: "addAssigneesToAssignable",
+            input: "assignableId:$issue,assigneeIds:$assignees",
+            payload: "assignable",
+          },
+        ]
+      : []),
   ];
-  if (claims)
-    fields.push(
-      `addAssigneesToAssignable(input:{assignableId:$issue,assigneeIds:$assignees}){assignable${stored}}`,
-    );
+  const last = write[write.length - 1];
+  // The last field returns the stored state, which shows whether GitHub left the plan stuck.
+  const fields = write.map(
+    ({ name, input, payload }) =>
+      `${name}(input:{${input}}){${name === last.name ? `${payload}${stored}` : "clientMutationId"}}`,
+  );
   const declarations = [
     "$issue:ID!",
-    "$body:String!",
     ...(restoresPhase ? ["$labels:[ID!]!"] : []),
     ...(claims ? ["$assignees:[ID!]!"] : []),
   ];
@@ -1006,21 +1137,26 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
     `query=mutation(${declarations.join(",")}){${fields.join(" ")}}`,
     "-f",
     `issue=${id}`,
-    "-f",
-    `body=${comment}`,
     ...(restoresPhase ? ["-f", `labels[]=${phaseLabelId}`] : []),
     ...(claims ? ["-f", `assignees[]=${viewerId}`] : []),
   ]).pipe(
     // GitHub answers the reopen of a stuck plan with "Could not reopen the issue." (#90); the request is not retried.
-    Effect.tapError(() =>
+    // Any other failure is reported with what the plan reads now; no comment was posted.
+    Effect.catch((error) =>
       readSnapshot(issue.number).pipe(
-        Effect.flatMap((snapshot) => attempt(() => refuseStuck(snapshot.issue))),
+        Effect.flatMap(({ issue: now }) =>
+          attempt(() => refuseStuck(now)).pipe(
+            Effect.andThen(
+              refuse(
+                `the reopen of plan #${issue.number} failed (${error.message}); it reads ${String(now.state).toLowerCase()} with phase labels ${phaseList(now.labels)} and owners ${now.assignees.map((owner) => owner.login).join(", ") || "none"}; no comment was posted; ${reopenRecovery(now, issue.number, command, comment)}`,
+              ),
+            ),
+          ),
+        ),
       ),
     ),
   );
-  const payload = claims
-    ? field(field(data, "addAssigneesToAssignable"), "assignable")
-    : field(field(data, "addComment"), "subject");
+  const payload = field(field(data, last.name), last.payload);
   const state = field(payload, "state");
   const stateReason = field(payload, "stateReason");
   if (typeof state !== "string" || (stateReason !== null && typeof stateReason !== "string"))
@@ -1028,6 +1164,14 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
       message: "gh api graphql returned malformed stored plan issue",
     });
   yield* attempt(() => refuseStuck({ number: issue.number, state, stateReason }));
+  if (claims) {
+    const owners = field(field(payload, "assignees"), "nodes");
+    if (!Array.isArray(owners) || !owners.some((owner) => field(owner, "id") === viewerId))
+      return yield* refuse(
+        `plan #${issue.number} reopened, but its claim did not land; no comment was posted; run status ${issue.number} ongoing to claim it, then post this comment as the plan owner: ${comment}`,
+      );
+    issue.confirmedOwner = login;
+  }
   // The status comes from a fresh read, which must show an open plan with exactly one phase label.
   const current = (yield* readSnapshot(issue.number)).issue;
   const status = statusFromIssueOf(current);
@@ -1040,7 +1184,74 @@ const writeReopen = Effect.fn("plan.writeReopen")(function* (
     return yield* refuse(
       `plan issue state differs after reopen; run status ${issue.number} ongoing to repair the phase labels`,
     );
+  yield* refuseChangedIssue(issue, yield* preWriteIssue(issue.number), {
+    state: "OPEN",
+    phases: restoresPhase ? ["plan:ongoing"] : phases,
+  }).pipe(
+    Effect.catchTag("PlanRefusal", (refusal) =>
+      refuse(
+        `plan #${issue.number} reopened, but ${refusal.message}; no comment was posted; once the plan is open with one phase label and its owner, post this comment as the plan owner: ${comment}`,
+      ),
+    ),
+  );
+  yield* postReopenComment(issue, id, comment, command);
   yield* printLine(`plan #${issue.number} reopened: ${status}`);
+});
+
+// The next step after a reopen request that failed: on a closed plan the rerun; on an open plan the repair through
+// `status`, which claims an unassigned plan and sets one phase label, and then the comment, which only an owner can post
+// as a trusted record.
+function reopenRecovery(now: PlanIssue, number: number, command: string, comment: string): string {
+  if (isClosed(now)) return `run ${command} again`;
+  const post = `post this comment as the plan owner: ${comment}`;
+  return now.assignees.length === 1 && PLAN_STATUSES.has(statusFromIssueOf(now))
+    ? post
+    : `run status ${number} ongoing to repair the phase label and the claim, then ${post}`;
+}
+
+const phaseList = (labels: ReadonlyArray<{ readonly name: string }>): string =>
+  labels
+    .map((label) => token(label.name))
+    .filter(isPhaseLabel)
+    .join(", ") || "none";
+
+// The second write of a reopen. When it fails, the comments show whether it landed: a trusted comment with its text that
+// is newer than the close that this reopen observed belongs to this attempt.
+const postReopenComment = Effect.fn("plan.postReopenComment")(function* (
+  issue: PlanIssue,
+  id: string,
+  comment: string,
+  command: string,
+) {
+  yield* graphqlData([
+    "-f",
+    "query=mutation($issue:ID!,$body:String!){addComment(input:{subjectId:$issue,body:$body}){clientMutationId}}",
+    "-f",
+    `issue=${id}`,
+    "-f",
+    `body=${comment}`,
+  ]).pipe(
+    Effect.catch((error) =>
+      readSnapshot(issue.number, { comments: true }).pipe(
+        Effect.flatMap(({ issue: now }) => {
+          const since = Date.parse(issue.closedEventAt ?? "");
+          const landed = trustedComments(now).some(
+            (entry) =>
+              entry.body === comment &&
+              (!Number.isFinite(since) || Date.parse(entry.createdAt) > since),
+          );
+          if (landed) return Effect.void;
+          if (isClosed(now))
+            return refuse(
+              `plan #${issue.number} closed again after the reopen, and its reopen comment did not post (${error.message}); run ${command} again`,
+            );
+          return refuse(
+            `plan #${issue.number} is open again, but its reopen comment did not post (${error.message}); post this comment as the plan owner: ${comment}`,
+          );
+        }),
+      ),
+    ),
+  );
 });
 
 interface SettleOptions {
@@ -1112,7 +1323,7 @@ const reopenPlan = Effect.fn("plan.reopen")(function* (args: ReadonlyArray<strin
     );
     return;
   }
-  // Each read is a snapshot for the write: it checks ownership and decides the claim.
+  // Each read is a snapshot for the write and checks ownership; writeReopen decides the claim from its pre-write read.
   const read = () => readPlanIssue(String(number), true, { closure: true, labelLookup: true });
   const waits = yield* PlanWaits;
   let observed = yield* read();

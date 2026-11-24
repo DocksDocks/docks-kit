@@ -897,10 +897,10 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
       const { parent, child } = closableParent(context);
       expectSuccess(archive(context, String(parent)), "archive the parent");
       context.updateIssue(child, (entry) => Object.assign(entry, REOPENED_CHILD));
-      // The label lands after the read of the labels, right before the reopen write, which adds `plan:ongoing`.
-      context.schedule(parent, {
-        afterReads: reads(context, parent) + 3,
-        labels: ["plan", "plan:blocked"],
+      // The label lands after the read right before the reopen write, which adds `plan:ongoing`. A label that lands
+      // before that read is refused before any write (#213, decision (e)).
+      context.updateState((state) => {
+        state.beforeMutationOnce = { issue: parent, labels: ["plan", "plan:blocked"] };
       });
       const result = archive(context, String(parent));
       refuse(result, repairHint(parent));
@@ -1007,11 +1007,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
         state: "OPEN",
         stateReason: "REOPENED",
         labels: ["plan", "plan:ongoing"],
-        comments: [
-          parentRecord([child]),
-          reopenedComment(parent, child),
-          reopenedComment(parent, child),
-        ],
+        // The first attempt refused before its comment, so only the rerun's comment is posted.
+        comments: [parentRecord([child]), reopenedComment(parent, child)],
       });
     },
     SPAWN_TIMEOUT_MS,

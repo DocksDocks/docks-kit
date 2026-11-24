@@ -294,8 +294,9 @@ agents define the exact block they return, and that block follows these rules.
 - On each line, the helper ignores Markdown emphasis (`*`, `_`), code marks,
   blockquote markers, and list markers when it reads a kind or a verdict.
 - The helper reads blocks, verdicts, and severities only above the line
-  `#### Manager response to round <k>`, in every contract version. So a finding
-  that the response quotes cannot change the verdict.
+  `#### Manager response to round <k>` outside a fenced code block, in every
+  contract version. So a finding that the response quotes cannot change the
+  verdict. A fence inside a quote or a list item ends with its container.
 
 | Verdict input | Plan result | Code result |
 |---|---|---|
@@ -303,7 +304,9 @@ agents define the exact block they return, and that block follows these rules.
 | `repair`, `changes`, `fixes-required` | `repair` | `fixes-required` |
 | `blocked` | `blocked` | `blocked` |
 
-The verdict of a block is its first verdict line of the comment's kind. A later
+The verdict of a block is its first verdict line of the comment's kind. A line
+inside a fenced code block, also in a quote or a list item, is no block heading
+and no verdict line. A later
 verdict line in the same block is prose, such as a quoted verdict of an earlier
 round. A verdict line of the other kind does not count. A later block without a
 verdict line is part of the block before it. The first block needs a verdict
@@ -684,11 +687,12 @@ merge into the default branch closes the issue. For a partial pull request:
    plan issue is listed, say in the merge question that the merge closes the
    issue and that you will reopen it.
 2. After the merge, run `reopen <n> --pr <pr>`. The helper waits until GitHub
-   records the close by that pull request, then waits 10 s more. It reopens the
-   plan with the comment
-   `Reopened: partial pull request #<pr> closed this plan through its linked branch. Work continues.`,
-   claims an unassigned plan and restores `plan:ongoing` when the plan has no
-   phase label, in the same write, and prints the status. Never
+   records the close by that pull request, then waits 10 s more. One write
+   reopens the plan, claims an unassigned plan, and restores `plan:ongoing` when
+   the plan has no phase label; a second write posts the comment
+   `Reopened: partial pull request #<pr> closed this plan through its linked branch. Work continues.`.
+   When the second write fails, the helper names the comment to post. It
+   prints the status. Never
    reopen the issue by hand right after the merge.
 3. Run `show <n>` again. Continue only when the status is `ongoing`.
 
@@ -843,10 +847,13 @@ two targets.
 Run `archive <n> --pr <pr>` after the landing merge, when every step is
 terminal. `<pr>` is the landing pull request. Archive requires terminal steps
 and a trusted latest Code-review pass. It also requires proof from that pull
-request. The pull request merged into the default branch of this repository,
-and its description carries a GitHub closing keyword for this issue. A title
+request. The pull request merged into the default branch of this repository
+through its own merge: its merge commit is not its head commit, and GitHub
+associates that commit with the pull request, so an indirect merge is no proof.
+Its description carries a GitHub closing keyword for this issue. A title
 or sidebar link is not proof. A merge into another branch is not proof. Archive
-checks the base branch first, then the description, and names the failed check.
+checks the merge, then the base branch, then the description, and names the
+failed check.
 For a description without the keyword, ask the repository owner before you edit
 the merged pull request. If the owner approves, add `Closes #<n>` to its
 description, then run archive again. Otherwise, stop and report.

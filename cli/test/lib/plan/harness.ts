@@ -153,7 +153,8 @@ type PullRequestOptions = {
 };
 
 // Pull request 100 + `number` as the fake gh stores it in state.prs. Like a pull request from the plan's linked branch,
-// it lists the plan in closingIssuesReferences unless `closes` is false. It merged into `base` unless `merged` is false.
+// it lists the plan in closingIssuesReferences unless `closes` is false. It merged into `base` unless `merged` is false,
+// through its own squash merge: a merge commit other than its head commit that GitHub associates with it.
 function pullRequestEntry(
   number: number,
   { merged = true, closes = true, base = "main", description }: PullRequestOptions = {},
@@ -169,6 +170,8 @@ function pullRequestEntry(
     ...(description !== undefined && { body: description }),
     repository: "DocksDocks/fixture",
     closingIssuesReferences: closes ? [number] : [],
+    headRefOid: `head${pr}`,
+    mergeCommit: merged ? { oid: `merge${pr}`, associatedPullRequests: [pr] } : null,
   };
 }
 

@@ -57,23 +57,65 @@ function verdictFor(kind: ReviewKind, alias: string): Verdict | undefined {
 // quotes findings, so the parser reads no block heading, verdict, or severity from its heading line to the end.
 const MANAGER_RESPONSE_HEADING = /^ {0,3}#### Manager response to round \d+[ \t]*$/;
 
+// A fence opens with three or more backticks or tildes, also inside a quote or a list item, and closes with at least as
+// many of the same character (GFM). The lines from the opening fence to the closing fence are examples. A fence that
+// opened inside a quote or a list item also ends where that container ends: at a line without `>`, or at a line that is
+// not indented under the list item.
+const FENCE = /^(`{3,}|~{3,})/;
+const QUOTE = /^\s*>/;
+const LIST_ITEM = /^\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+/;
+function fencedLines(rawLines: ReadonlyArray<string>): Array<boolean> {
+  let open:
+    | { readonly fence: string; readonly quoted: boolean; readonly listed: boolean }
+    | undefined;
+  return rawLines.map((line) => {
+    const content = line
+      .trim()
+      .replace(/^(?:>\s*)+/, "")
+      .replace(/^(?:[-+*]|\d+[.)])\s+/, "");
+    const fence = FENCE.exec(content)?.[1];
+    const leftContainer =
+      open !== undefined &&
+      ((open.quoted && !QUOTE.test(line)) ||
+        (open.listed && !open.quoted && line.trim() !== "" && !/^\s/.test(line)));
+    if (leftContainer) open = undefined;
+    if (open === undefined) {
+      if (fence) open = { fence, quoted: QUOTE.test(line), listed: LIST_ITEM.test(line) };
+      return fence !== undefined;
+    }
+    if (
+      fence &&
+      fence[0] === open.fence[0] &&
+      fence.length >= open.fence.length &&
+      !content.slice(fence.length).trim()
+    )
+      open = undefined;
+    return true;
+  });
+}
+
 export function parseReviewComment(
   body: unknown,
 ): { kind: ReviewKind; verdict: Verdict } | undefined {
   if (typeof body !== "string") return undefined;
   const commentLines = body.trim().split(/\r?\n/);
+  // A fenced example holds no heading, verdict, or response delimiter. Severity still reads every line, as the contract
+  // says.
+  const fencedComment = fencedLines(commentLines);
   const response = commentLines.findIndex(
-    (line, index) => index > 0 && MANAGER_RESPONSE_HEADING.test(line),
+    (line, index) => index > 0 && !fencedComment[index] && MANAGER_RESPONSE_HEADING.test(line),
   );
   const rawLines = response < 0 ? commentLines : commentLines.slice(0, response);
-  const lines = rawLines.map(reviewText);
+  const fenced = fencedComment.slice(0, rawLines.length);
+  const allLines = rawLines.map(reviewText);
+  const lines = allLines.map((line, index) => (fenced[index] ? "" : line));
   const heading = REVIEW_HEADING.exec(lines[0]);
   if (!heading) return undefined;
   const kind: ReviewKind = heading[1].toLowerCase() === "plan" ? "plan" : "code";
   const blocks: Array<Array<string>> = [[]];
   for (const [index, line] of lines.entries()) {
     if (index === 0) continue;
-    if (blockHeadingKind(rawLines[index]) === kind) blocks.push([]);
+    if (!fenced[index] && blockHeadingKind(rawLines[index]) === kind) blocks.push([]);
     else blocks[blocks.length - 1].push(line);
   }
   const firstVerdict = (block: ReadonlyArray<string>): RegExpExecArray | undefined =>
@@ -92,7 +134,7 @@ export function parseReviewComment(
   let verdict = verdicts.reduce((worst, next) =>
     VERDICT_SEVERITY[next] > VERDICT_SEVERITY[worst] ? next : worst,
   );
-  if (kind === "code" && verdict === "pass" && lines.some(severeFinding))
+  if (kind === "code" && verdict === "pass" && allLines.some(severeFinding))
     verdict = "fixes-required";
   return { kind, verdict };
 }

@@ -52,7 +52,7 @@ describe("plan records", () => {
   it.skipIf(!PLAN_CLI_HOST_SUPPORTED)(
     "edit writes the normalized body to the remote issue and to the export provenance",
     () => {
-      const { issue, createPlan, exported, edit } = planCliContext();
+      const { run, issue, createPlan, exported } = planCliContext();
       // Normalization must reach the remote body, not just the local export.
       const irregular = body("Done")
         .replace("## Goal", "## goal")
@@ -68,11 +68,13 @@ describe("plan records", () => {
       expect(normalized.body.includes("—")).toBe(false);
       expect(normalized.body).toMatch(/Fix the parser - preserve records\./);
       const normalization = createPlan("normalization", irregular);
-      const normalizedEdit = edit(normalization);
+      // One export, one edit of that file, and the same `.origin` read afterward: only `edit` can have refreshed it
+      // (#213, R22).
+      const normalizedFile = exported(normalization);
+      const normalizedEdit = run("edit", String(normalization), "--file", normalizedFile);
       expectSuccess(normalizedEdit, "normalize edit");
       expect(issue(normalization).body).toBe(normalized.body);
       expect(normalizedEdit.stdout).toMatch(/^advice: .*mode/im);
-      const normalizedFile = exported(normalization);
       expect(readFileSync(`${normalizedFile}.origin`, "utf8")).toBe(
         `${createHash("sha256").update(normalized.body).digest("hex")}\n`,
       );
@@ -145,6 +147,8 @@ describe("plan records", () => {
         named("/home/<user>/log.txt", "/home/<user>/y"),
       ],
       ["Twice /home/a/x, /home/a/x then /tmp/y;", named("/home/a/x", "/tmp/y")],
+      // Markdown emphasis and an unpadded table cell do not hide a path (#213, R7).
+      ["Bold **/tmp/cache/x** and a cell |/home/u/x|", named("/tmp/cache/x", "/home/u/x")],
       ["Routes /login/, `/wp-json/<namespace>/v1/items/123`, /search/transfer/user", []],
       ["TMPDIR=/tmp node t.mjs, /usr/bin/php8.5, #!/usr/bin/env node, x > /dev/null", []],
       ["Pick `A`/`B`, awk '/^## /{f=0}', __DIR__ . '/vendor/autoload.php'", []],

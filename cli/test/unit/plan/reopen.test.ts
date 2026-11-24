@@ -87,8 +87,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       });
       expect(
         context.writes().length,
-        "the reopen, the comment, and the claim land in one request",
-      ).toBe(1);
+        "the reopen and the claim land in one request, and the comment in a second",
+      ).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -110,8 +110,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       expect(stored(context, plan.number).labels).toStrictEqual(["plan", "plan:ongoing"]);
       expect(
         context.writes().length,
-        "the reopen, the label, and the comment land in one request",
-      ).toBe(1);
+        "the reopen and the label land in one request, and the comment in a second",
+      ).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -139,7 +139,9 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
         assignees: ["plan-agent"],
         comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
-      expect(context.writes().length).toBe(1);
+      expect(context.writes().length).toBe(2);
+      // An owned plan gets no claim, not even one that leaves the owner list as it is.
+      expect(context.issue(plan.number).assigneeWrites ?? 0).toBe(0);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -346,15 +348,41 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
         state.reopenLeavesClosed = true;
       });
       refuse(reopen(context, plan), stuckRefusal(plan.number));
-      // The one request ran every field: the comment and the claim landed, and only the state stuck.
+      // The reopen request ran every field: the claim landed and only the state stuck. The comment, a second request,
+      // is not posted, so no "Reopened:" comment claims work that cannot continue.
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
         state: "CLOSED",
         stateReason: "REOPENED",
         assignees: ["plan-agent"],
-        comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
       expect(context.writes().length).toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen names the comment to post when the comment request fails after the reopen landed",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("comment request fails");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.addCommentErrorOnce = "Something went wrong while executing your query.";
+      });
+      const result = reopen(context, plan);
+      refuse(
+        result,
+        `plan #${plan.number} is open again, but its reopen comment did not post (gh api graphql failed: gh: Something went wrong while executing your query.); post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(result.stdout, "no reopened status is reported").toBe("");
+      // The reopen and the claim landed in the first request; the comment did not.
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+        assignees: ["plan-agent"],
+      });
+      expect(context.writes().length).toBe(2);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -407,16 +435,14 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
       const result = reopen(context, plan);
       expectSuccess(result, "reopen after the new close");
       expect(result.stdout).toBe(`plan #${plan.number} reopened: ongoing\n`);
+      // The first attempt refused before its comment, so only the rerun's comment is posted.
       expect(stored(context, plan.number)).toStrictEqual({
         ...ONGOING,
         stateReason: "REOPENED",
         assignees: ["plan-agent"],
-        comments: [
-          { author: "plan-agent", body: reopenComment(plan.pr) },
-          { author: "plan-agent", body: reopenComment(plan.pr) },
-        ],
+        comments: [{ author: "plan-agent", body: reopenComment(plan.pr) }],
       });
-      expect(context.writes().length).toBe(2);
+      expect(context.writes().length).toBe(3);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -426,16 +452,54 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan reopen", () => {
     () => {
       const context = planCliContext();
       const plan = context.partialMerge("reopen answered with an error");
-      // Another reopen races GitHub's close after the helper's second read, so the issue is stuck at the write.
-      context.schedule(
-        plan.number,
-        { afterReads: 0, ...closedBy(plan.closer) },
-        { afterReads: 2, stateReason: "REOPENED" },
-      );
+      // Another reopen races GitHub's close after the helper's last read, so the issue is stuck at the write.
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.beforeMutationOnce = { issue: plan.number, stateReason: "REOPENED" };
+      });
       refuse(reopen(context, plan), stuckRefusal(plan.number));
       const { state, stateReason } = context.issue(plan.number);
       expect([state, stateReason]).toStrictEqual(["CLOSED", "REOPENED"]);
       expect(context.writes().length, "the helper does not retry the reopen").toBe(1);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen refuses before any write when the plan changed after the settle read",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("reclosed as not planned before the reopen");
+      // A close as not planned lands after the settle read and before the read right before the reopen.
+      context.schedule(
+        plan.number,
+        { afterReads: 0, ...closedBy(plan.closer) },
+        { afterReads: 3, stateReason: "NOT_PLANNED" },
+      );
+      refuse(reopen(context, plan), "plan issue changed remotely; re-read and retry");
+      expect(context.issue(plan.number).state).toBe("CLOSED");
+      expect(context.writes(), "no reopen and no comment").toStrictEqual([]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen posts no comment when its claim did not land",
+    () => {
+      const context = planCliContext();
+      const plan = context.partialMerge("claim dropped by the reopen write");
+      context.schedule(plan.number, { afterReads: 0, ...closedBy(plan.closer) });
+      context.updateState((state) => {
+        state.mutationDropsAssigneesOnce = true;
+      });
+      refuse(
+        reopen(context, plan),
+        `plan #${plan.number} reopened, but its claim did not land; no comment was posted; run status ${plan.number} ongoing to claim it, then post this comment as the plan owner: ${reopenComment(plan.pr)}`,
+      );
+      expect(stored(context, plan.number)).toStrictEqual({
+        ...ONGOING,
+        stateReason: "REOPENED",
+      });
     },
     SPAWN_TIMEOUT_MS,
   );

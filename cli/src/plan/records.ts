@@ -43,7 +43,7 @@ export const PLAN_LABELS = [
 // a Windows drive, or a network share. URL routes, slash prose, and portable system paths such as
 // /usr/bin/env or a bare /tmp do not match (#71). The match runs to the next space or delimiter.
 const MACHINE_PATH =
-  /(?<=^|[\s("'`[{=:;,>]|file:\/\/)(?:\/(?:home|Users|root|mnt|media|Volumes|run\/(?:user|media))\/[^\s/`'")]|\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s/`'")]|\/(?:private\/)?var\/folders\/|[A-Za-z]:[\\/]|\\\\[\w.$-]+\\[\w.$-])[^\s`'"()[\]{}|,;]*/gm;
+  /(?<=^|[\s("'`[{=:;,>*|]|file:\/\/)(?:\/(?:home|Users|root|mnt|media|Volumes|run\/(?:user|media))\/[^\s/`'")]|\/(?:private\/)?(?:tmp|var\/tmp)\/[^\s/`'")]|\/(?:private\/)?var\/folders\/|[A-Za-z]:[\\/]|\\\\[\w.$-]+\\[\w.$-])[^\s`'"()[\]{}|,;]*/gm;
 const SECTIONS = [
   "Goal",
   "Research",
@@ -349,7 +349,8 @@ export function normalizePlan(
     table(sections.get("Acceptance") ?? "", ACCEPTANCE_HEADER).rows,
   );
   const machinePaths = new Set(
-    Array.from(cleaned.matchAll(MACHINE_PATH), ([match]) => match.replace(/[.:]+$/, "")),
+    // A path ends before closing emphasis and trailing sentence marks.
+    Array.from(cleaned.matchAll(MACHINE_PATH), ([match]) => match.replace(/[.:*]+$/, "")),
   );
   for (const machinePath of machinePaths)
     advice.push(`body contains an absolute machine path: ${machinePath}`);

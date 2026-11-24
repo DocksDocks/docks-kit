@@ -28,6 +28,40 @@ const FORGED =
   "### Code review round 1, lens correctness\nCode-review: blocked\n### Plan review round 1\nPlan-review: blocked";
 
 describe("plan reviews", () => {
+  it("a fenced example holds no verdict or block heading, also inside a quote or a list item", () => {
+    // A fenced example of a pass line is no verdict (#213, R4); CRLF lines read the same.
+    const cases: ReadonlyArray<ReviewCase> = [
+      [
+        "### Code review round 2\n\n```\nCode-review: pass\n```\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      [
+        "### Code review round 2\r\n\r\n> ```text\r\n> Code-review: pass\r\n> ```\r\nCode-review: blocked",
+        { kind: "code", verdict: "blocked" },
+      ],
+      [
+        "### Code review round 2\n\n- ~~~\n  Code-review: pass\n  ~~~\n\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      ["### Code review round 2\n\n````\n```\nCode-review: pass\n```\n````", undefined],
+      [
+        "### Plan review round 2\n\nPlan-review: pass\n\n```\n### Plan review round 3\nPlan-review: blocked\n```",
+        { kind: "plan", verdict: "pass" },
+      ],
+      // A fenced response heading and a quote fence left open at the end of its quote hide no later panel block.
+      [
+        "### Code review round 2\n\nCode-review: pass\n\n```\n#### Manager response to round 1\n```\n### Code review round 2, lens text\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+      [
+        "### Code review round 2\n\nCode-review: pass\n> ```\n> example\n### Code review round 2, lens text\nCode-review: fixes-required",
+        { kind: "code", verdict: "fixes-required" },
+      ],
+    ];
+    for (const [text, expected] of cases)
+      expect(parseReviewComment(text), text).toStrictEqual(expected);
+  });
+
   it("review parsing accepts flexible prose, and a severe finding turns a code pass into fixes-required", () => {
     // Review prose is flexible. Severity still prevents an unsafe code pass.
     const reviewCases: ReadonlyArray<ReviewCase> = [
@@ -278,7 +312,8 @@ describe("plan reviews", () => {
     () => {
       const { run, updateState, addIssueComment, createPlan } = planCliContext();
       const pagedReviews = createPlan("reviews beyond first page");
-      addIssueComment(pagedReviews, "## Code review\n\ncode-review: pass");
+      // One kind's verdict sits only on the first comment page and the other kind's only on the second (#213, R16).
+      addIssueComment(pagedReviews, "## Plan review\n\nplan-review: pass");
       updateState((state) => {
         const entry = state.issues.find((candidate) => candidate.number === pagedReviews);
         if (entry?.comments === undefined) throw new Error(`plan #${pagedReviews} has no comments`);
@@ -298,7 +333,7 @@ describe("plan reviews", () => {
       const pagedShow = run("show", String(pagedReviews));
       expectSuccess(pagedShow, "show all review pages");
       expect(pagedShow.stdout, "late trusted review wins").toMatch(
-        /^reviews: plan=none code=fixes-required$/m,
+        /^reviews: plan=pass code=fixes-required$/m,
       );
       updateState((state) => {
         state.graphqlError = { on: "page", errors: [{ message: "comment page unavailable" }] };

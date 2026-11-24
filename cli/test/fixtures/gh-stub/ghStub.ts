@@ -609,6 +609,30 @@ function pullRequestObject(reference: StubReference): GqlObject {
     mergedAt: pullRequest?.mergedAt ?? reference.mergedAt ?? null,
     baseRefName: pullRequest?.baseRefName ?? reference.baseRefName ?? null,
     repository: repositoryObject(repo),
+    headRefOid: pullRequest?.headRefOid ?? `head${reference.number}`,
+    mergeCommit: pullRequest?.mergeCommit
+      ? mergeCommitObject(pullRequest.mergeCommit, repo)
+      : null,
+  };
+}
+
+// The merge commit of a pull request fixture, with its associated pull requests as one page.
+function mergeCommitObject(
+  commit: { oid: string; associatedPullRequests?: Array<number> },
+  repo: string,
+): GqlObject {
+  return {
+    __typename: "Commit",
+    oid: commit.oid,
+    associatedPullRequests: (selection) =>
+      graphqlPage(
+        (commit.associatedPullRequests ?? []).map((number) =>
+          pullRequestObject({ number, repository: repo }),
+        ),
+        selection,
+        {},
+        PAGE_ARGUMENTS,
+      ),
   };
 }
 
@@ -752,6 +776,12 @@ function respondMutation(query: string, variables: VariableRecord): never {
   // The fault flags that faulted `gh issue edit` fault the write request before any field runs.
   if (state.issueEditError) die(state.issueEditError);
   for (const issue of state.issues) applyDueChanges(issue);
+  // `beforeMutationOnce` lands a change after the helper's last read and before the write, as a racing writer does.
+  if (state.beforeMutationOnce) {
+    const { issue: number, ...change } = state.beforeMutationOnce;
+    delete state.beforeMutationOnce;
+    applyChange(issueByNumber(number), change);
+  }
   const mutationNames = [
     "updateIssue",
     "addLabelsToLabelable",
@@ -789,11 +819,13 @@ function respondMutation(query: string, variables: VariableRecord): never {
         if (typeof newBody !== "string") die("UpdateIssueInput.body must be a string");
         issue.body = newBody;
       }
-      if (Object.hasOwn(input, "assigneeIds")) {
+      if (Object.hasOwn(input, "assigneeIds") && !state.mutationDropsAssigneesOnce) {
         issue.assignees = [
           ...new Set(nodeIds(input["assigneeIds"], "assigneeIds").map(loginByNodeId)),
         ];
+        issue.assigneeWrites = (issue.assigneeWrites ?? 0) + 1;
       }
+      delete state.mutationDropsAssigneesOnce;
       touch(issue);
       data[field.key] = mutationPayload(field, { issue: issueObject(issue, variables) });
       continue;
@@ -822,6 +854,12 @@ function respondMutation(query: string, variables: VariableRecord): never {
       const commentBody = input["body"];
       if (typeof commentBody !== "string" || !commentBody)
         die("AddCommentInput.body must be a non-empty string");
+      if (state.addCommentErrorOnce) {
+        data[field.key] = null;
+        errors.push({ path: [field.key], message: state.addCommentErrorOnce });
+        delete state.addCommentErrorOnce;
+        continue;
+      }
       touch(issue);
       state.nextComment ??= 1;
       const comment: StubComment = {
@@ -842,14 +880,19 @@ function respondMutation(query: string, variables: VariableRecord): never {
       requireInput(field, input, ["assignableId", "assigneeIds"]);
       const issue = issueByNodeId(input["assignableId"]);
       const logins = nodeIds(input["assigneeIds"], "assigneeIds").map(loginByNodeId);
-      issue.assignees = [...new Set([...(issue.assignees ?? []), ...logins])];
+      if (!state.mutationDropsAssigneesOnce)
+        issue.assignees = [...new Set([...(issue.assignees ?? []), ...logins])];
+      delete state.mutationDropsAssigneesOnce;
+      issue.assigneeWrites = (issue.assigneeWrites ?? 0) + 1;
       touch(issue);
       data[field.key] = mutationPayload(field, { assignable: issueObject(issue, variables) });
       continue;
     }
     const issue = issueByNodeId(input["labelableId"]);
     const names = nodeIds(input["labelIds"], "labelIds").map(labelNameByNodeId);
-    if (field.name === "addLabelsToLabelable") {
+    if (state.mutationKeepsLabelsOnce) {
+      // The field answers as it would, but the labels stay as stored.
+    } else if (field.name === "addLabelsToLabelable") {
       for (const name of names) {
         const stored = Object.keys(state.labels).find((label) => same(label, name));
         if (!stored) die(`Could not resolve to a Label node with the name '${name}'`);
@@ -863,6 +906,7 @@ function respondMutation(query: string, variables: VariableRecord): never {
   }
   // `afterMutationOnce` holds an issue number and a change, in the form of a scheduled change, that lands right after
   // one write request, such as a label that someone adds before the helper reads the plan again.
+  delete state.mutationKeepsLabelsOnce;
   if (state.afterMutationOnce) {
     const { issue: number, ...change } = state.afterMutationOnce;
     delete state.afterMutationOnce;
@@ -1079,6 +1123,7 @@ if (group === "api" && command === "graphql") {
     __typename: "Repository",
     nameWithOwner: state.repo.nameWithOwner,
     visibility: state.repo.visibility,
+    hasIssuesEnabled: state.repo.hasIssuesEnabled ?? true,
     defaultBranchRef: defaultBranch ? { name: defaultBranch } : null,
     issue: (selection) =>
       issueObject(
@@ -1127,7 +1172,8 @@ if (group === "api" && command === "graphql") {
       const stored = Object.keys(state.labels).find(
         (label) => label.toLowerCase() === (typeof name === "string" ? name.toLowerCase() : name),
       );
-      return stored ? labelObject(stored) : null;
+      if (!stored) return null;
+      return state.nodeIdsMissing ? { name: stored, id: null } : labelObject(stored);
     },
     // Repository.pullRequest: a merged pull request still lists the issues that it closes (checked on #95).
     pullRequest: (selection) => {
@@ -1164,7 +1210,8 @@ if (group === "api" && command === "graphql") {
     viewer: {
       __typename: "User",
       login: state.viewerLogin ?? "",
-      id: state.viewerLogin ? userNodeId(state.viewerLogin) : null,
+      // `nodeIdsMissing` answers the viewer and the repository labels without node ids, as a response that lacks them.
+      id: state.viewerLogin && !state.nodeIdsMissing ? userNodeId(state.viewerLogin) : null,
     },
     repository: () => repository,
   };
@@ -1211,6 +1258,12 @@ if (group === "label" && command === "create") {
     color: value("--color") ?? "ededed",
     ...(description !== undefined && { description }),
   };
+  // `afterLabelCreateOnce` lands a change right after the label exists, such as a body edit during label setup.
+  if (state.afterLabelCreateOnce) {
+    const { issue: number, ...change } = state.afterLabelCreateOnce;
+    delete state.afterLabelCreateOnce;
+    applyChange(issueByNumber(number), change);
+  }
   save();
   process.exit(0);
 }

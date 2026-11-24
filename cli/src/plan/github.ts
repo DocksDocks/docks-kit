@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { Effect, Predicate, Schema } from "effect";
 
-import { PLAN_LABELS, token } from "./records";
+import { PLAN_LABELS, isPhaseLabel, token } from "./records";
 import { stateDirectory } from "./repository";
 import {
   MAX_OUTPUT_MIB,
@@ -42,10 +42,14 @@ const PULL_REQUEST_CONNECTION = `nodes{${PULL_REQUEST_FIELDS}} ${PAGE_INFO}`;
 const REPOSITORY_LABELS = PLAN_LABELS.map(
   (name) => `${name.split(":").at(-1)}:label(name:"${name}"){name id}`,
 ).join(" ");
-// The pre-write read returns the body to compare and the node ids that the write mutation needs.
-const PRE_WRITE_FIELDS = "id,body,updatedAt,assignees";
+// The plan labels by name only, for `new`, which creates the issue with label names.
+const REPOSITORY_LABEL_NAMES = PLAN_LABELS.map(
+  (name) => `${name.split(":").at(-1)}:label(name:"${name}"){name}`,
+).join(" ");
+// The pre-write read returns the facts that a write compares with the snapshot and the node ids that the write needs.
+const PRE_WRITE_FIELDS = "id,body,state,stateReason,labels,updatedAt,assignees";
 // The last field of a write mutation returns the stored state that the post-write checks read.
-const STORED_ISSUE_FIELDS = `body labels(first:100){nodes{name} ${PAGE_INFO}}`;
+const STORED_ISSUE_FIELDS = `body labels(first:100){nodes{name} ${PAGE_INFO}} assignees(first:100){nodes{id}}`;
 // A plan list row and a sub-issue row: enough to derive the status of each issue.
 export const ISSUE_SUMMARY_FIELDS = `number title state stateReason labels(first:100){nodes{name} ${PAGE_INFO}}`;
 // The snapshot pages every issue label with its node id, so a write removes labels from the complete list.
@@ -127,6 +131,9 @@ const DefaultBranch = Schema.Struct({ name: Schema.String });
 const PreWriteFields = Schema.Struct({
   id: Schema.NonEmptyString,
   body: Schema.String,
+  state: Schema.String,
+  stateReason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  labels: Schema.Array(Schema.Struct({ name: Schema.String })),
   assignees: Schema.Array(
     Schema.Struct({ id: Schema.NonEmptyString, login: Schema.optionalKey(Schema.Unknown) }),
   ),
@@ -134,6 +141,7 @@ const PreWriteFields = Schema.Struct({
 const StoredIssue = Schema.Struct({
   body: Schema.String,
   labels: Schema.Struct({ nodes: Schema.Array(Schema.Unknown) }),
+  assignees: Schema.Struct({ nodes: Schema.Array(Schema.Struct({ id: Schema.NonEmptyString })) }),
 });
 const PullRequestFieldsRead = Schema.Struct({
   url: Schema.String,
@@ -325,6 +333,8 @@ export const issueSummaries = Effect.fn("plan.issueSummaries")(function* (
 export interface SnapshotOptions {
   readonly acting?: boolean;
   readonly labelLookup?: boolean;
+  /** Read the acting login and the plan label names without their node ids, for `new`, which writes by name. */
+  readonly namesOnly?: boolean;
   readonly comments?: boolean;
   readonly history?: boolean;
   readonly defaultBranch?: boolean;
@@ -338,6 +348,8 @@ export interface RepositorySnapshot {
   readonly viewerId: string | undefined;
   /** Each plan label name maps to its node id, or to null when the repository lacks the label. */
   readonly labelIds: ReadonlyMap<string, string | null> | undefined;
+  /** The plan labels that the repository lacks, when the read looked labels up. */
+  readonly missingLabels: ReadonlyArray<string>;
 }
 
 export interface IssueSnapshot extends RepositorySnapshot {
@@ -390,7 +402,9 @@ function snapshotQuery(number: number | undefined, options: SnapshotOptions): st
           options.children ? issueConnectionSelection("subIssues", ISSUE_SUMMARY_FIELDS) : "",
           options.parent ? "parent{number repository{nameWithOwner}}" : "",
         ].join(" ");
-  return `query($owner:String!,$name:String!${number === undefined ? "" : ",$number:Int!"}){${options.acting ? "viewer{login id}" : ""} repository(owner:$owner,name:$name){nameWithOwner visibility ${options.defaultBranch ? "defaultBranchRef{name}" : ""} ${options.labelLookup ? REPOSITORY_LABELS : ""} ${number === undefined ? "" : `issue(number:$number){${issueFields}}`}}}`;
+  const viewerFields = options.namesOnly ? "login" : "login id";
+  const labels = options.namesOnly ? REPOSITORY_LABEL_NAMES : REPOSITORY_LABELS;
+  return `query($owner:String!,$name:String!${number === undefined ? "" : ",$number:Int!"}){${options.acting ? `viewer{${viewerFields}}` : ""} repository(owner:$owner,name:$name){nameWithOwner visibility ${options.defaultBranch ? "defaultBranchRef{name}" : ""} ${options.labelLookup ? labels : ""} ${number === undefined ? "" : `issue(number:$number){${issueFields}}`}}}`;
 }
 
 const decodeRepository = malformed(RepositoryFields, "repository");
@@ -401,6 +415,7 @@ const decodeLogin = decodeWith(
 );
 const decodeViewerId = malformed(Schema.NonEmptyString, "viewer");
 const decodeOptionalLabel = malformed(OptionalLabel, "repository labels");
+const decodeOptionalLabelName = malformed(Schema.NullOr(LabelName), "repository labels");
 
 /** The repository part of a snapshot. It records the repository for the later writes of the command. */
 const readRepository = Effect.fn("plan.readRepository")(function* (
@@ -420,20 +435,27 @@ const readRepository = Effect.fn("plan.readRepository")(function* (
   repository.current = { nameWithOwner, visibility, defaultBranch } satisfies RepositoryInfo;
   const viewer = field(data, "viewer");
   const login = options.acting ? yield* decodeLogin(field(viewer, "login")) : undefined;
-  const viewerId = options.acting ? yield* decodeViewerId(field(viewer, "id")) : undefined;
+  const viewerId =
+    options.acting && !options.namesOnly ? yield* decodeViewerId(field(viewer, "id")) : undefined;
   let labelIds: Map<string, string | null> | undefined;
+  const missingLabels: Array<string> = [];
   if (options.labelLookup) {
-    labelIds = new Map();
+    if (!options.namesOnly) labelIds = new Map();
     for (const name of PLAN_LABELS) {
-      const label = yield* decodeOptionalLabel(field(repo, name.split(":").at(-1) ?? name));
-      if (label !== null && token(label.name) !== name)
+      const raw = field(repo, name.split(":").at(-1) ?? name);
+      const label = options.namesOnly ? null : yield* decodeOptionalLabel(raw);
+      const labelName = options.namesOnly
+        ? (yield* decodeOptionalLabelName(raw))?.name
+        : label?.name;
+      if (labelName !== undefined && token(labelName) !== name)
         return yield* new GraphqlError({
           message: "gh api graphql returned malformed repository labels",
         });
-      labelIds.set(name, label?.id ?? null);
+      if (labelName === undefined) missingLabels.push(name);
+      labelIds?.set(name, label?.id ?? null);
     }
   }
-  const snapshot: RepositorySnapshot = { login, viewerId, labelIds };
+  const snapshot: RepositorySnapshot = { login, viewerId, labelIds, missingLabels };
   return { repo, snapshot };
 });
 
@@ -607,6 +629,14 @@ export interface IssueWrite {
   readonly add?: string;
   readonly remove?: ReadonlyArray<string>;
   readonly labelIds?: ReadonlyMap<string, string | null>;
+  /** The state that the issue holds right before the write: the snapshot state, or `CLOSED` after archive's close. */
+  readonly state?: string;
+  /** The close reason right before the write: the snapshot's, or `COMPLETED` after archive's close. */
+  readonly stateReason?: string | null;
+  /** The phase labels that the issue holds right before the write: the snapshot's, or none after retire's removal. */
+  readonly phases?: ReadonlyArray<string>;
+  /** Run the pre-write read and its checks even when the write sends no field, as right before a close. */
+  readonly verify?: boolean;
 }
 
 interface MutationField {
@@ -618,28 +648,145 @@ interface MutationField {
 const decodeStored = malformed(StoredIssue, "stored plan issue");
 const decodeStoredLabels = malformed(Schema.Array(LabelName), "labels");
 
-// A write is the pre-write read plus one GraphQL request (#89). GitHub runs its mutation fields in order:
-// updateIssue first, so the body and the claim of an unassigned plan land in one write; then discrete label
-// additions and removals, so a label that someone else adds meanwhile survives. The last field returns the
-// stored state, which the post-write checks read.
-export const writeIssueIfUnchanged = Effect.fn("plan.writeIssueIfUnchanged")(function* (
+const CHANGED_REMOTELY = "plan issue changed remotely; re-read and retry";
+
+const phaseLabels = (labels: ReadonlyArray<{ readonly name: string }>): Array<string> =>
+  [...new Set(labels.map((label) => token(label.name)).filter(isPhaseLabel))].sort();
+
+const sameList = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean =>
+  a.length === b.length && a.every((entry, index) => entry === b[index]);
+
+type PreWrite = typeof PreWriteFields.Type;
+
+/** What a write expects the issue to hold right before it: by default, what the snapshot read. */
+export interface ExpectedIssue {
+  readonly state?: string;
+  /** The close reason of a closed issue, such as `COMPLETED` after archive's own close. */
+  readonly stateReason?: string | null;
+  readonly phases?: ReadonlyArray<string>;
+  /** Require the base `plan` label also on a closed issue, as before a reopen. */
+  readonly base?: boolean;
+}
+
+// gh issue view reads the first 100 labels only (cli/cli api/query_builder.go); a full page may hide more.
+const GH_VIEW_LABEL_LIMIT = 100;
+
+const ownerLogins = (current: PreWrite): string =>
+  current.assignees
+    .map((owner) => String(owner.login))
+    .sort()
+    .join("\n");
+
+/**
+ * Every label name of the issue, with the pre-write read to compare. A full label page of `gh issue view` may hide
+ * more labels, so the labels are paged with GraphQL, and the issue is read again after those requests: the body,
+ * state, and owners of the two reads must agree. When the second read shows fewer than 100 labels, it holds every
+ * label and wins; otherwise its first 100 labels must be the first 100 of the pages, so no field is older than another.
+ */
+const currentIssue = Effect.fn("plan.currentIssue")(function* (number: number, current: PreWrite) {
+  if (current.labels.length < GH_VIEW_LABEL_LIMIT)
+    return { names: current.labels.map((label) => label.name), latest: current };
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${issueConnectionSelection("labels", "name")}}}}`;
+  const first = field(
+    field(field(yield* graphql(query, { number }), "repository"), "issue"),
+    "labels",
+  );
+  const paged = (yield* decodeStoredLabels(yield* issueNodes(number, first, "labels", "name"))).map(
+    (label) => label.name,
+  );
+  const latest = yield* preWriteIssue(number);
+  const shown = latest.labels.map((label) => label.name);
+  if (
+    latest.body !== current.body ||
+    latest.state !== current.state ||
+    ownerLogins(latest) !== ownerLogins(current) ||
+    (shown.length >= GH_VIEW_LABEL_LIMIT && !sameList(shown, paged.slice(0, shown.length)))
+  )
+    return yield* new PlanRefusal({ message: CHANGED_REMOTELY });
+  return { names: shown.length < GH_VIEW_LABEL_LIMIT ? shown : paged, latest };
+});
+
+/**
+ * Refuse a write when the pre-write read `read` shows a change that governs the write: the body, the open or closed
+ * state and the close reason, the base `plan` label of an open plan, the phase labels, or the owners. `expected` gives
+ * the state and the phase labels after the command's own earlier writes; by default they are the snapshot's. An owner
+ * other than the snapshot owner, the acting login, and the claim is refused by name; a snapshot owner that is gone is
+ * a change. Returns the read to write with.
+ */
+export const refuseChangedIssue = Effect.fn("plan.refuseChangedIssue")(function* (
   issue: PlanIssue,
-  { body, add, remove = [], labelIds }: IssueWrite = {},
+  read: PreWrite,
+  {
+    state = issue.state,
+    stateReason = issue.stateReason,
+    phases = phaseLabels(issue.labels),
+    base = false,
+  }: ExpectedIssue = {},
 ) {
-  const claimantId = issue.claimantId;
-  if (body === undefined && !add && remove.length === 0 && claimantId === undefined) return;
-  const current = yield* preWriteIssue(issue.number);
-  if (current.body !== issue.body)
-    return yield* new PlanRefusal({ message: "plan issue changed remotely; re-read and retry" });
-  // A claim follows the pre-write read: an owner that appeared after the snapshot is refused before any write.
-  const foreign =
-    claimantId === undefined
-      ? undefined
-      : current.assignees.find((owner) => owner.id !== claimantId);
+  const { names, latest: current } = yield* currentIssue(issue.number, read);
+  const closed = state.toUpperCase() === "CLOSED";
+  const reason = (value: string | null | undefined): string => String(value ?? "").toUpperCase();
+  if (
+    current.body !== issue.body ||
+    current.state.toUpperCase() !== state.toUpperCase() ||
+    (closed && reason(current.stateReason) !== reason(stateReason)) ||
+    ((base || !closed) && !names.some((name) => token(name) === "plan")) ||
+    !sameList(phaseLabels(names.map((name) => ({ name }))), [...phases].sort())
+  )
+    return yield* new PlanRefusal({ message: CHANGED_REMOTELY });
+  const owners = new Set(issue.assignees.map((owner) => owner.login));
+  const foreign = current.assignees.find(
+    (owner) =>
+      owner.id !== issue.claimantId &&
+      !(
+        Predicate.isString(owner.login) &&
+        (owners.has(owner.login) || owner.login === issue.actingLogin)
+      ),
+  );
   if (foreign)
     return yield* new PlanRefusal({
       message: `plan #${issue.number} is owned by ${String(foreign.login)}`,
     });
+  if (owners.size > 0 && current.assignees.length === 0)
+    return yield* new PlanRefusal({ message: CHANGED_REMOTELY });
+  // A claim that an earlier write of the command confirmed must still hold.
+  if (
+    issue.confirmedOwner !== undefined &&
+    !current.assignees.some((owner) => owner.login === issue.confirmedOwner)
+  )
+    return yield* new PlanRefusal({ message: CHANGED_REMOTELY });
+  return current;
+});
+
+// A write is the pre-write read plus one GraphQL request (#89). A phase label that the repository lacks is created
+// before that read, so the read is the last one before the write. GitHub runs the mutation fields in order: updateIssue
+// first, so the body and the claim of an unassigned plan land in one write; then discrete label additions and
+// removals, so a non-phase label that someone else adds meanwhile survives. The last field returns the stored state,
+// which the post-write checks read: the body, the claim, and exactly the expected phase labels.
+export const writeIssueIfUnchanged = Effect.fn("plan.writeIssueIfUnchanged")(function* (
+  issue: PlanIssue,
+  { body, add, remove = [], labelIds, state, stateReason, phases, verify = false }: IssueWrite = {},
+) {
+  const claimantId = issue.claimantId;
+  const sends = body !== undefined || !!add || remove.length > 0 || claimantId !== undefined;
+  if (!sends && !verify) return;
+  const addId = add ? (labelIds?.get(add) ?? (yield* createdLabelId(add))) : undefined;
+  const current = yield* refuseChangedIssue(issue, yield* preWriteIssue(issue.number), {
+    ...(state && { state }),
+    ...(stateReason !== undefined && { stateReason }),
+    ...(phases && { phases }),
+  });
+  const removed = new Set(remove.map(token));
+  const removeIds = issue.labels
+    .filter((label) => removed.has(token(label.name)))
+    .map((label) => label.id);
+  if (
+    body === undefined &&
+    addId === undefined &&
+    removeIds.length === 0 &&
+    claimantId === undefined
+  )
+    return;
   const idLists: Array<readonly [string, ReadonlyArray<string>]> = [];
   const fields: Array<MutationField> = [];
   if (body !== undefined || claimantId !== undefined) {
@@ -654,18 +801,14 @@ export const writeIssueIfUnchanged = Effect.fn("plan.writeIssueIfUnchanged")(fun
     }
     fields.push({ mutation: "updateIssue", input: input.join(","), payload: "issue" });
   }
-  if (add) {
-    idLists.push(["add", [labelIds?.get(add) ?? (yield* createdLabelId(add))]]);
+  if (addId !== undefined) {
+    idLists.push(["add", [addId]]);
     fields.push({
       mutation: "addLabelsToLabelable",
       input: "labelableId:$issue,labelIds:$add",
       payload: "labelable",
     });
   }
-  const removed = new Set(remove.map(token));
-  const removeIds = issue.labels
-    .filter((label) => removed.has(token(label.name)))
-    .map((label) => label.id);
   if (removeIds.length) {
     idLists.push(["remove", removeIds]);
     fields.push({
@@ -702,12 +845,22 @@ export const writeIssueIfUnchanged = Effect.fn("plan.writeIssueIfUnchanged")(fun
   const stored = yield* decodeStored(rawStored);
   if (body !== undefined && stored.body !== body)
     return yield* new PlanRefusal({ message: "plan issue body differs after edit" });
-  if (!add && remove.length === 0) return;
+  if (claimantId !== undefined) {
+    if (!stored.assignees.nodes.some((owner) => owner.id === claimantId))
+      return yield* new PlanRefusal({
+        message: "plan issue claim did not land; re-read and retry",
+      });
+    issue.confirmedOwner = issue.actingLogin;
+  }
   const storedLabels = yield* decodeStoredLabels(
     yield* issueNodes(issue.number, field(rawStored, "labels"), "labels", "name"),
   );
-  const names = storedLabels.map((label) => token(label.name));
-  if ((add && !names.includes(add)) || remove.some((label) => names.includes(token(label))))
+  const before = phases ?? phaseLabels(issue.labels);
+  const expected = phaseLabels([
+    ...before.filter((label) => !removed.has(label)).map((name) => ({ name })),
+    ...(add ? [{ name: add }] : []),
+  ]);
+  if (!sameList(phaseLabels(storedLabels), expected))
     return yield* new PlanRefusal({ message: "plan issue labels differ after edit" });
 });
 
@@ -719,7 +872,20 @@ export interface PullRequestRead {
   readonly baseRefName: string;
   readonly body: string | null;
   readonly closesPlan: boolean;
+  /**
+   * Whether the pull request's own merge made its merge commit: a commit other than its head commit that GitHub
+   * associates with this pull request. An indirect merge, through a direct push or another pull request, does not.
+   */
+  readonly landedByItself: boolean;
 }
+
+const MergeFields = Schema.Struct({
+  headRefOid: Schema.String,
+  mergeCommit: Schema.NullOr(
+    Schema.Struct({ oid: Schema.NonEmptyString, associatedPullRequests: Schema.Unknown }),
+  ),
+});
+const decodeMerge = malformed(MergeFields, "pull request");
 
 const decodePullRequest = malformed(
   Schema.Struct({
@@ -746,7 +912,7 @@ export const readPullRequest = Effect.fn("plan.readPullRequest")(function* (
       "",
       after,
     );
-  const query = `query($owner:String!,$name:String!,$pr:Int!){repository(owner:$owner,name:$name){nameWithOwner pullRequest(number:$pr){url merged mergedAt baseRefName body ${references(false)}}}}`;
+  const query = `query($owner:String!,$name:String!,$pr:Int!){repository(owner:$owner,name:$name){nameWithOwner pullRequest(number:$pr){url merged mergedAt baseRefName body headRefOid mergeCommit{oid associatedPullRequests(first:100){${PULL_REQUEST_CONNECTION}}} ${references(false)}}}}`;
   const rawRepo = field(yield* graphql(query, { pr: number }), "repository");
   const repo = yield* decodePullRequest(rawRepo);
   const { pullRequest } = repo;
@@ -769,6 +935,16 @@ export const readPullRequest = Effect.fn("plan.readPullRequest")(function* (
         ),
     ),
   );
+  const { headRefOid, mergeCommit } = yield* decodeMerge(field(rawRepo, "pullRequest"));
+  const isThis = (candidate: PullRequestNode): boolean =>
+    candidate.number === number && candidate.repository.nameWithOwner === repo.nameWithOwner;
+  const landedByItself =
+    pullRequest.merged &&
+    mergeCommit !== null &&
+    mergeCommit.oid !== headRefOid &&
+    (yield* pullRequestNodes(
+      yield* associatedNodes({ __typename: "Commit", ...mergeCommit }),
+    )).some(isThis);
   const read: PullRequestRead = {
     number,
     url: pullRequest.url,
@@ -780,6 +956,7 @@ export const readPullRequest = Effect.fn("plan.readPullRequest")(function* (
       (issue) =>
         issue.number === planNumber && issue.repository.nameWithOwner === repo.nameWithOwner,
     ),
+    landedByItself,
   };
   return read;
 });

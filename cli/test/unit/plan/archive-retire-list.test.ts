@@ -6,6 +6,7 @@ import {
   type LandedPlanOptions,
   type PlanCliContext,
   type PlanResult,
+  body,
   expectSuccess,
   planCliContext,
   refuse,
@@ -216,33 +217,35 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
   );
 
   it(
-    "show and archive read every page of large comments",
+    "show and archive read a comment page after the first one",
     () => {
       const context = planCliContext();
-      const plan = context.closedPlan("large comment pages");
+      const plan = context.closedPlan("later comment page");
+      // The trusted pass is on the first page; 100 more comments push a later trusted verdict to the second page
+      // (#213, R23).
       context.updateState((state) => {
         const entry = state.issues.find((candidate) => candidate.number === plan.number);
         if (entry === undefined) throw new Error(`no issue #${plan.number}`);
         entry.comments ??= [];
         state.nextComment ??= 1;
-        for (let i = 0; i < 20; i += 1) {
+        for (let i = 0; i < 100; i += 1) {
           const id = state.nextComment++;
           entry.comments.push({
             id,
-            body: `Evidence round ${i}\n${"x".repeat(60000)}`,
+            body: `Evidence round ${i}\n${"x".repeat(1000)}`,
             author: "plan-agent",
             createdAt: new Date(Date.parse("2026-08-20T20:00:00Z") + id * 1000).toISOString(),
           });
         }
       });
-      const largeShow = context.run("show", String(plan.number));
-      expectSuccess(largeShow, "show large comment pages");
-      expect(largeShow.stdout).toMatch(/^reviews: plan=none code=pass$/m);
-      const largeArchive = archive(context, plan);
-      expectSuccess(largeArchive, "archive large comment pages");
-      expect(largeArchive.stdout).toBe(
-        `plan #${plan.number} finished (closed by ${plan.closer.url})\n`,
+      context.addIssueComment(
+        plan.number,
+        "### Code review round 3\n\ncode-review: fixes-required",
       );
+      const shown = context.run("show", String(plan.number));
+      expectSuccess(shown, "show a later comment page");
+      expect(shown.stdout).toMatch(/^reviews: plan=none code=fixes-required$/m);
+      refuse(archive(context, plan), "archive requires Code-review: pass");
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -254,13 +257,21 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
       const partialMerge = closedPlan("closed by a partial merge", { status: "in-flight" });
       const partialShow = run("show", String(partialMerge.number));
       expectSuccess(partialShow, "show early closure");
-      expect(
-        partialShow.stdout
-          .split(/\r?\n/)
-          .includes(
-            `advice: plan is closed as completed while step fix_parser is in-flight; closed by ${partialMerge.closer.url}; reopen the issue if work remains`,
-          ),
-      ).toBe(true);
+      // A v5 plan takes no reopen after a partial merge, and new --parent refuses a closed parent.
+      expect(partialShow.stdout.split(/\r?\n/)).toContain(
+        `advice: plan is closed as completed while step fix_parser is in-flight; closed by ${partialMerge.closer.url}; run step ${partialMerge.number} fix_parser done if the merged work finished it; otherwise open a new plan with new for the remaining work`,
+      );
+      expect(partialShow.stdout).not.toContain("reopen the issue");
+      // A v4 plan that a pull request closed reopens through the helper, never by hand.
+      const legacy = closedPlan("v4 closed by a partial merge", { status: "in-flight" });
+      updateIssue(legacy.number, (entry) => {
+        entry.body = body("in-flight", 4);
+      });
+      const legacyShow = run("show", String(legacy.number));
+      expectSuccess(legacyShow, "show v4 early closure");
+      expect(legacyShow.stdout.split(/\r?\n/)).toContain(
+        `advice: plan is closed as completed while step fix_parser is in-flight; closed by ${legacy.closer.url}; run step ${legacy.number} fix_parser done if the merged work finished it; otherwise run reopen ${legacy.number} --pr ${legacy.pr}`,
+      );
       refuse(
         run("step", String(partialMerge.number), "fix_parser", "in-flight"),
         `plan #${partialMerge.number} is finished; reopen it before moving step fix_parser to in-flight`,
@@ -324,33 +335,77 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () =
   );
 
   it(
-    "list advises that more plans may exist when it stops at 500 plans",
+    "list keeps the newest 500 plans, reads five pages of each kind, and advises that more plans may exist",
     () => {
-      const { run, updateState } = planCliContext();
+      const { run, updateState, loadState } = planCliContext();
+      // 501 open plans with distinct creation times; the list reads newest first and keeps 500 (#213, R21).
       updateState((state) => {
-        for (let i = 0; i < 500; i += 1) {
+        for (let i = 0; i < 501; i += 1) {
           const number = state.nextIssue++;
+          const createdAt = new Date(Date.parse("2026-08-20T20:00:00Z") + i * 1000).toISOString();
           state.issues.push({
             number,
             title: `bulk plan ${i}`,
-            body: "",
+            body: body(),
             state: "OPEN",
             stateReason: null,
             labels: ["plan", "plan:drafting"],
             assignees: ["plan-agent"],
             url: `https://github.com/DocksDocks/fixture/issues/${number}`,
-            createdAt: "2026-08-20T20:00:00Z",
-            updatedAt: "2026-08-20T20:00:00Z",
+            createdAt,
+            updatedAt: createdAt,
             comments: [],
             events: [],
           });
         }
+        state.calls = [];
       });
       const limitedList = run("list");
       expectSuccess(limitedList, "list limit advice");
-      expect(limitedList.stdout).toMatch(
-        /^advice: list stopped at 500 plans; more plans may exist$/m,
-      );
+      const lines = limitedList.stdout.trim().split("\n");
+      expect(lines.at(-1)).toBe("advice: list stopped at 500 plans; more plans may exist");
+      const rows = lines.slice(0, -1);
+      expect(rows).toHaveLength(500);
+      expect(rows[0], "the oldest plan is the one left out").toBe("drafting\t#2\tbulk plan 1");
+      expect(rows.at(-1)).toBe("drafting\t#501\tbulk plan 500");
+      const queries = loadState().calls.map((argv) => argv.join(" "));
+      expect(queries.filter((query) => query.includes("hasIssuesEnabled"))).toHaveLength(5);
+      expect(queries.filter((query) => query.includes("number body"))).toHaveLength(5);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "list names an open plan without a contract marker unreadable",
+    () => {
+      const { run, updateIssue, createPlan } = planCliContext();
+      // `show` refuses a body without a marker, so `list` does not offer it as planned (#213, R5).
+      const unmarked = createPlan("unmarked plan");
+      updateIssue(unmarked, (entry) => {
+        entry.body = "No marker here.";
+        entry.labels = ["plan", "plan:planned"];
+      });
+      const marked = createPlan("marked plan");
+      const listed = run("list");
+      expectSuccess(listed, "list with an unmarked plan");
+      expect(listed.stdout.trim().split("\n")).toStrictEqual([
+        `unreadable\t#${unmarked}\tunmarked plan`,
+        `drafting\t#${marked}\tmarked plan`,
+      ]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "list refuses a repository with issues turned off",
+    () => {
+      const { run, updateState, createPlan } = planCliContext();
+      // gh issue list refused a repository with issues turned off; the GraphQL list does too (#213, R19).
+      createPlan("plan before issues were turned off");
+      updateState((state) => {
+        state.repo.hasIssuesEnabled = false;
+      });
+      refuse(run("list"), "issues are disabled in DocksDocks/fixture");
     },
     SPAWN_TIMEOUT_MS,
   );
