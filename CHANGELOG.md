@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-25 - docks-kit 0.29.6: an alias cannot replace the start of the code-guardrails scan
+
+### Fixed
+
+- code-guardrails, "Find scattered values": the line that starts the scan
+  shell now begins with `\command`. Before, in a shell with alias expansion
+  on, an alias named `command` replaced that word, so the block could exit 0
+  without a scan. The prose names what still changes that line: a function
+  named `command`, or a `command` builtin that `enable -n` turned off.
+- The startup-variable case of `cli/test/unit/plugin/codeGuardrailsScan.test.ts`
+  now fails when its probe cannot capture the environment of the scan shell,
+  checks the variable names in TypeScript, and starts the scan shell through a
+  Bash path that holds a space.
+
 ## 2026-11-25 - docks-kit 0.29.5: the code-guardrails scan runs no text that it reads
 
 ### Fixed

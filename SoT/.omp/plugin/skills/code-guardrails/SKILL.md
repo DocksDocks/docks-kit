@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-25"
-  content_hash: "1dc5401f841126058e2c73ce79760cac7713156272265d552c01ffecf46527d3"
+  content_hash: "e9df21991e8754fe240a2e854f7df2ac7c1af19fa7694de2c2d770d3e1d4b091"
 ---
 
 # Code Guardrails
@@ -204,14 +204,14 @@ gives wrong results; leave such a file out with a pathspec.
 ```bash
 # Run the scan in a new bash in privileged mode (-p): it reads no startup file and no
 # BASH_ENV, takes no function from the environment, and ignores SHELLOPTS and
-# BASHOPTS there. The system env (`command /usr/bin/env`: no function, command cache,
-# or command search of the calling shell) starts it without the exported variables
+# BASHOPTS there. The system env (`\command /usr/bin/env`: no alias, function, command
+# cache, or command search of the calling shell) starts it without the exported variables
 # that change how bash starts and runs (POSIXLY_CORRECT, BASH_COMPAT, BASH_XTRACEFD,
 # TMOUT, FUNCNEST, EXECIGNORE) and finds bash on PATH. So the functions, debug hooks,
-# variables, and settings of the calling shell do not change what runs inside it. A
-# debug hook of the calling shell still runs before this one line, as it runs before
-# any command.
-command /usr/bin/env -u POSIXLY_CORRECT -u BASH_COMPAT -u BASH_XTRACEFD -u TMOUT \
+# variables, and settings of the calling shell do not change what runs inside it. The
+# backslash keeps an alias named `command` from replacing that word. A debug hook of the
+# calling shell still runs before this one line, as it runs before any command.
+\command /usr/bin/env -u POSIXLY_CORRECT -u BASH_COMPAT -u BASH_XTRACEFD -u TMOUT \
   -u FUNCNEST -u EXECIGNORE bash --noprofile --norc -p -s <<'SCAN'
 # The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,
 # XDG_CONFIG_HOME (Git reads its user config from HOME and XDG_CONFIG_HOME), LANG,
@@ -332,12 +332,15 @@ functions, variables, options, and debug hooks of your shell do not change what 
 in that Bash, and `set -a` does not send the matches to other commands. A debug hook
 of your shell still runs before the line that starts that Bash. The system `env`
 (`/usr/bin/env`) starts that Bash without the exported variables that change how Bash
-starts and runs; the comment above the start line names them. Your other exported
-variables reach that Bash, but the commands of the scan get only the environment
-variables that the comment above the environment list names. When a Git setting of
-your project lives in another environment variable, add that name to that list. The
-block needs `/usr/bin/env` with the `-u` option, and an `env` on `PATH` with the `-0`
-and `-u` options (GNU coreutils and macOS have both).
+starts and runs; the comment above the start line names them. The backslash in
+`\command` keeps an alias of your shell from replacing that word. A function named
+`command`, or a `command` builtin that `enable -n command` turned off, still changes
+that line, so remove such a function or turn the builtin on before you run the block.
+Your other exported variables reach that Bash, but the commands of the scan get only
+the environment variables that the comment above the environment list names. When a
+Git setting of your project lives in another environment variable, add that name to
+that list. The block needs `/usr/bin/env` with the `-u` option, and an `env` on `PATH`
+with the `-0` and `-u` options (GNU coreutils and macOS have both).
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
