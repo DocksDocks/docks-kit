@@ -59,6 +59,8 @@ test('pairs pairs a security finding with a known defect on its second location 
     ],
   };
   put(ws, `${id}/V1-low/run-1/blocks/security-reviewer.md`, reply);
+  // `prepare.mjs case` records the omp release of the vendored agents for each bundled run.
+  put(ws, `${id}/V1-low/run-1/meta.json`, { bundledOmp: VERIFIED_OMP });
   const known = {
     id: 'SEC1',
     locator: 'src/exec.mjs:21',

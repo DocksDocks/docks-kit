@@ -472,6 +472,30 @@ test('transcripts and findings refuse a bundled run prepared for the vendored ag
   assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
 });
 
+test('transcripts and findings refuse a bundled run without a meta.json or without its recorded omp release', () => {
+  const { ws, sessions } = bundledWorkspace([
+    { id: 'bundled-bug-13', calls: [FINDING_CALL, ...VERDICT_CALLS] },
+    { id: 'bundled-bug-14', calls: [FINDING_CALL, ...VERDICT_CALLS] },
+    { id: 'bundled-bug-15', calls: [FINDING_CALL, ...VERDICT_CALLS] },
+  ]);
+  const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
+  // One run lost its meta.json, and one has a meta.json without `bundledOmp`; both hold a block that fits the schema.
+  fs.rmSync(path.join(run('bundled-bug-13'), 'meta.json'));
+  put(run('bundled-bug-14'), 'meta.json', { config: CONFIGS.low });
+  for (const id of ['bundled-bug-13', 'bundled-bug-14']) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
+  const before = readText(path.join(run('bundled-bug-15'), 'meta.json'));
+  const refusal = (command) =>
+    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; prepare them again with prepare.mjs case, which records omp ${VERIFIED_OMP}`;
+  const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
+  assert.equal(transcripts.status, 1, transcripts.stderr);
+  assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
+  assert.equal(readText(path.join(run('bundled-bug-15'), 'meta.json')), before, 'transcripts wrote a meta.json');
+  const findings = scoreChild(['findings', ws]);
+  assert.equal(findings.status, 1, findings.stderr);
+  assert.equal(findings.stderr.trim(), refusal('findings'));
+  assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
+});
+
 test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
   // A copy of the scripts whose vendored reviewer has a JSON Schema root: `required` is no JTD keyword, so the copy
   // would not check the required fields.

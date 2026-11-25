@@ -586,11 +586,13 @@ export function structuredProblem(reviewer, value) {
 
 // The check of `command` (`transcripts` or `findings`) before it reads a reply of a bundled reviewer. `folders` are
 // the run or round folders of the command, each `{ label, dir, reviewers }`. For each folder with a bundled reviewer
-// (see isBundledReviewer), it loads the output schema of each such reviewer (see bundledSchema), and it reads the omp
-// release that `prepare.mjs case` recorded for the run (meta.json `bundledOmp`). This score.mjs holds the agents and
-// the schemas of BUNDLED_OMP_VERSION only, and the schema of another release can differ, so the command stops when a
-// run records another release, and it names each such run with its release.
+// (see isBundledReviewer), the folder of an R1 or V1 run, it loads the output schema of each such reviewer (see
+// bundledSchema), and it reads the omp release that `prepare.mjs case` recorded for the run (meta.json
+// `bundledOmp`). This score.mjs holds the agents and the schemas of BUNDLED_OMP_VERSION only, and the schema of
+// another release can differ, so the command stops when a run has no meta.json, records no release, or records
+// another release, and it names each such run.
 function checkBundledRuns(command, folders) {
+  const unrecorded = [];
   const others = [];
   for (const { label, dir, reviewers } of folders) {
     const bundled = reviewers.filter(isBundledReviewer);
@@ -598,7 +600,13 @@ function checkBundledRuns(command, folders) {
     for (const reviewer of bundled) bundledSchema(reviewer);
     const metaFile = path.join(dir, 'meta.json');
     const recorded = fs.existsSync(metaFile) ? readJson(metaFile).bundledOmp : undefined;
-    if (recorded !== undefined && recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
+    if (typeof recorded !== 'string') unrecorded.push(label);
+    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
+  }
+  if (unrecorded.length) {
+    fail(
+      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${listSome(unrecorded, LISTED_READS)}; prepare them again with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+    );
   }
   if (others.length) {
     fail(
