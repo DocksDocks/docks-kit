@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'vitest';
 import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import {
+  BUNDLED_OMP_VERSION,
   buildPairs,
   dispatchName,
   parseBlock,
@@ -461,7 +462,7 @@ test('transcripts and findings refuse a bundled run prepared for the vendored ag
   put(run('bundled-bug-11'), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const before = readText(path.join(run('bundled-bug-10'), 'meta.json'));
   const refusal = (command) =>
-    `${command}: 1 bundled runs were prepared for the vendored agents of another omp release than omp ${VERIFIED_OMP} of this score.mjs, whose output schemas can differ: bundled-bug-11/R1-low/run-1 (omp 19.0.0); score them with the score.mjs of their omp release`;
+    `${command}: 1 bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: bundled-bug-11/R1-low/run-1 (omp 19.0.0); score them with the score.mjs of their omp release`;
   const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
   assert.equal(transcripts.status, 1, transcripts.stderr);
   assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
@@ -485,7 +486,7 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
   for (const id of ['bundled-bug-13', 'bundled-bug-14']) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const before = readText(path.join(run('bundled-bug-15'), 'meta.json'));
   const refusal = (command) =>
-    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${VERIFIED_OMP}`;
+    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`;
   const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
   assert.equal(transcripts.status, 1, transcripts.stderr);
   assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
@@ -496,29 +497,115 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
   assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
 });
 
-test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
-  // A copy of the scripts whose vendored reviewer has a JSON Schema root: `required` is no JTD keyword, so the copy
-  // would not check the required fields.
-  const repo = path.join(scratch(), 'repo');
-  fs.mkdirSync(repo);
-  spawnSync('git', ['init', '-q', repo]);
-  const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
-  const agent = path.join(repo, '.agents/skills/review-benchmark/bundled/omp-19.1.1/reviewer.md');
-  put(
-    path.dirname(agent),
-    'reviewer.md',
-    '---\nname: reviewer\noutput:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n---\nReview.\n',
-  );
-  const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
-  put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');
-  const message = `${agent}: score.mjs cannot check this output schema: output has the keywords required; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`;
+test('transcripts and findings name every bundled run without a release record and of another release in one refusal', () => {
+  const ids = Array.from({ length: 8 }, (_, index) => `bundled-bug-${20 + index}`);
+  const { ws, sessions } = bundledWorkspace(ids.map((id) => ({ id, calls: [FINDING_CALL, ...VERDICT_CALLS] })));
+  const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
+  const label = (id) => `${id}/R1-low/run-1`;
+  // Four runs without a release record: no meta.json, no `bundledOmp`, a meta.json of JSON null, and a number.
+  fs.rmSync(path.join(run(ids[0]), 'meta.json'));
+  put(run(ids[1]), 'meta.json', { config: CONFIGS.low });
+  put(run(ids[2]), 'meta.json', null);
+  put(run(ids[3]), 'meta.json', { config: CONFIGS.low, bundledOmp: 19 });
+  // Four runs of other omp releases. A release with a line break is a JSON string, so the group stays on one line.
+  const others = ['19.0.0', '18.2.0', '19.0.1', '18.0.0\nforged'];
+  others.forEach((release, index) => put(run(ids[4 + index]), 'meta.json', { config: CONFIGS.low, bundledOmp: release }));
+  for (const id of ids) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
+  const unrecorded = ids.slice(0, 4).map(label).join(', ');
+  const shown = ['19.0.0', '18.2.0', '19.0.1', '"18.0.0\\nforged"'];
+  const otherRuns = shown.map((release, index) => `${label(ids[4 + index])} (omp ${release})`).join(', ');
+  const refusal = (command) =>
+    [
+      `${command}: 4 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+      `${command}: 4 bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${otherRuns}; score them with the score.mjs of their omp release`,
+    ].join('\n');
   for (const args of [
-    ['findings', ws],
     ['transcripts', ws, '--omp-sessions', sessions],
+    ['findings', ws],
   ]) {
-    const child = scoreChild(args, script);
+    const child = scoreChild(args);
     assert.equal(child.status, 1, child.stderr);
-    assert.equal(child.stderr.trim(), message);
+    assert.equal(child.stderr.trim(), refusal(args[0]));
   }
   assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
+});
+
+test('transcripts and findings keep a bundled refusal on one line and tell apart runs whose labels look alike', () => {
+  // One case folder name has a line break, and one has a backslash and the letter n in its place; the second run
+  // records a release with a Unicode line separator.
+  const ids = ['bundled-bug-30\nx', 'bundled-bug-30\\nx'];
+  const { ws, sessions } = bundledWorkspace(ids.map((id) => ({ id, calls: [FINDING_CALL, ...VERDICT_CALLS] })));
+  const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
+  put(run(ids[0]), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0' });
+  put(run(ids[1]), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0\u2028x' });
+  for (const id of ids) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
+  for (const args of [
+    ['transcripts', ws, '--omp-sessions', sessions],
+    ['findings', ws],
+  ]) {
+    const child = scoreChild(args);
+    assert.equal(child.status, 1, child.stderr);
+    const lines = child.stderr.trim().split(/\r?\n|\u2028|\u2029/);
+    assert.equal(lines.length, 1, child.stderr);
+    assert.ok(lines[0].includes('"bundled-bug-30\\nx/R1-low/run-1" (omp 19.0.0)'), lines[0]);
+    assert.ok(lines[0].includes('"bundled-bug-30\\\\nx/R1-low/run-1" (omp "19.0.0\\u2028x")'), lines[0]);
+  }
+});
+
+test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
+  // Copies of the scripts whose vendored reviewer has a schema that the scorer cannot check: a JSON Schema root, where
+  // `required` is no JTD keyword, so the copy would not check the required fields; a nested `type` that is a list, not
+  // a text, so the copy would not check the type of that field; `metadata` that is not an object (RFC 8927 section
+  // 2.2); two YAML aliases that make a value and a node contain themselves; and two tagged timestamps, which the YAML
+  // parser gives as dates, in place of `metadata` and of a schema node.
+  const schemas = [
+    {
+      output: 'output:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n',
+      problem: 'output has the keywords required',
+    },
+    {
+      output: 'output:\n  properties:\n    findings:\n      elements:\n        properties:\n          priority:\n            type: [uint8]\n',
+      problem: 'output.properties.findings.elements.properties.priority.type ["uint8"] has no check',
+    },
+    {
+      output: 'output:\n  metadata: []\n  properties:\n    explanation:\n      type: string\n',
+      problem: 'output.metadata is not an object',
+    },
+    {
+      output: 'output:\n  properties:\n    explanation:\n      type: &self [*self]\n',
+      problem: 'output.properties.explanation.type (a value that contains itself) has no check',
+    },
+    {
+      output: 'output:\n  properties: &fields\n    explanation:\n      properties: *fields\n',
+      problem: 'output.properties.explanation.properties.explanation is a node that contains itself',
+    },
+    {
+      output: 'output:\n  metadata: !!timestamp 2026-01-01\n  properties:\n    explanation:\n      type: string\n',
+      problem: 'output.metadata is not an object',
+    },
+    {
+      output: 'output:\n  properties:\n    explanation: !!timestamp 2026-01-01\n',
+      problem: 'output.properties.explanation is not an object',
+    },
+  ];
+  for (const { output, problem } of schemas) {
+    const repo = path.join(scratch(), 'repo');
+    fs.mkdirSync(repo);
+    spawnSync('git', ['init', '-q', repo]);
+    const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
+    const agent = path.join(repo, '.agents/skills/review-benchmark/bundled', `omp-${BUNDLED_OMP_VERSION}`, 'reviewer.md');
+    put(path.dirname(agent), 'reviewer.md', `---\nname: reviewer\n${output}---\nReview.\n`);
+    const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
+    put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');
+    const message = `${agent}: score.mjs cannot check this output schema: ${problem}; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`;
+    for (const args of [
+      ['findings', ws],
+      ['transcripts', ws, '--omp-sessions', sessions],
+    ]) {
+      const child = scoreChild(args, script);
+      assert.equal(child.status, 1, child.stderr);
+      assert.equal(child.stderr.trim(), message);
+    }
+    assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
+  }
 });

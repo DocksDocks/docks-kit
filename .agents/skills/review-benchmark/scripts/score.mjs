@@ -442,6 +442,9 @@ export const BUNDLED_DIR = path.join(BENCHMARK_DIR, 'bundled', `omp-${BUNDLED_OM
 const BUNDLED_REVIEWERS = new Set(['reviewer', 'security-reviewer']);
 const isBundledReviewer = (reviewer) => BUNDLED_REVIEWERS.has(reviewer);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// A YAML mapping of a vendored schema: a plain object. isRecord also accepts the Date of a tagged scalar such as
+// `!!timestamp 2026-01-01`, which is no JTD schema node, no `metadata` object, and no `properties` map.
+const isMapping = (value) => isRecord(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 // The severity of a `reviewer` finding from its priority P0 to P3, and of a `security-reviewer` finding from its
 // severity.
 const PRIORITY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
@@ -457,9 +460,9 @@ export function bundledSchema(reviewer) {
     const extracted = extractFrontmatter(readText(file, `; restore the vendored agents of omp ${BUNDLED_OMP_VERSION}`));
     const parsed = extracted.ok ? parseFrontmatter(extracted.text) : extracted;
     const output = parsed.ok ? parsed.value.output : undefined;
-    if (!isRecord(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
+    if (!isMapping(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
     const problems = schemaFormProblems(output, 'output');
-    if (!isRecord(output.properties) && !isRecord(output.optionalProperties)) {
+    if (!isMapping(output.properties) && !isMapping(output.optionalProperties)) {
       problems.unshift('output is not a properties form, so its yield sections have no field names');
     }
     if (problems.length) {
@@ -507,39 +510,57 @@ const SCHEMA_KEYWORDS = new Set(['metadata', 'nullable', ...Object.values(SCHEMA
 
 // The reasons why schemaProblems cannot check the schema node `schema` at the place `at`, or none: a keyword of
 // another schema language or form (for example `required`, `anyOf`, `discriminator`, or `ref`), more than one form, a
-// type without a check (JTD_JSON_TYPES), or a keyword with a value of the wrong shape, in this node or below it.
-function schemaFormProblems(schema, at) {
-  if (!isRecord(schema)) return [`${at} is not an object`];
+// type without a check (JTD_JSON_TYPES), a keyword with a value of the wrong shape, or a node inside itself (a YAML
+// alias can make one), in this node or below it. `ancestors` holds the nodes above `schema`.
+function schemaFormProblems(schema, at, ancestors = new Set()) {
+  if (!isMapping(schema)) return [`${at} is not an object`];
+  if (ancestors.has(schema)) return [`${at} is a node that contains itself`];
   const keys = Object.keys(schema);
   const unknown = keys.filter((key) => !SCHEMA_KEYWORDS.has(key));
   if (unknown.length) return [`${at} has the keywords ${unknown.join(', ')}`];
   const forms = Object.keys(SCHEMA_FORMS).filter((form) => SCHEMA_FORMS[form].some((key) => keys.includes(key)));
   if (forms.length > 1) return [`${at} has more than one form: ${forms.join(', ')}`];
   if (Object.hasOwn(schema, 'nullable') && typeof schema.nullable !== 'boolean') return [`${at}.nullable is not true or false`];
+  // RFC 8927 section 2.2: the value of `metadata` is an object.
+  if (Object.hasOwn(schema, 'metadata') && !isMapping(schema.metadata)) return [`${at}.metadata is not an object`];
+  const below = new Set(ancestors).add(schema);
   switch (forms[0]) {
     case 'enum':
       return Array.isArray(schema.enum) && schema.enum.length && schema.enum.every((item) => typeof item === 'string')
         ? []
         : [`${at}.enum is not a list of texts`];
     case 'elements':
-      return schemaFormProblems(schema.elements, `${at}.elements`);
+      return schemaFormProblems(schema.elements, `${at}.elements`, below);
     case 'type':
-      return Object.hasOwn(JTD_JSON_TYPES, schema.type) ? [] : [`${at}.type ${JSON.stringify(schema.type)} has no check`];
+      // Object.hasOwn turns a list key such as ['uint8'] into the text 'uint8', so check the text first.
+      return typeof schema.type === 'string' && Object.hasOwn(JTD_JSON_TYPES, schema.type)
+        ? []
+        : [`${at}.type ${shownValue(schema.type)} has no check`];
     case 'values':
-      return schemaFormProblems(schema.values, `${at}.values`);
+      return schemaFormProblems(schema.values, `${at}.values`, below);
     case 'properties': {
       const problems = [];
       if (Object.hasOwn(schema, 'additionalProperties') && typeof schema.additionalProperties !== 'boolean') {
         problems.push(`${at}.additionalProperties is not true or false`);
       }
       for (const key of ['properties', 'optionalProperties'].filter((name) => Object.hasOwn(schema, name))) {
-        if (!isRecord(schema[key])) problems.push(`${at}.${key} is not an object`);
-        else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`));
+        if (!isMapping(schema[key])) problems.push(`${at}.${key} is not an object`);
+        else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`, below));
       }
       return problems;
     }
     default:
       return [];
+  }
+}
+
+// A schema value as JSON for a refusal, or a description when JSON cannot hold it: a YAML alias can make a list that
+// contains itself, and JSON.stringify throws on it.
+function shownValue(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '(a value that contains itself)';
   }
 }
 
@@ -590,7 +611,9 @@ export function structuredProblem(reviewer, value) {
 // bundledSchema), and it reads the omp release that `prepare.mjs case` recorded for the run (meta.json
 // `bundledOmp`). This score.mjs holds the agents and the schemas of BUNDLED_OMP_VERSION only, and the schema of
 // another release can differ, so the command stops when a run has no meta.json, records no release, or records
-// another release, and it names each such run.
+// another release. Its one refusal has a line for each group that has runs, and each line names every run of its
+// group, because the operator repairs or scores again each run. Each label and recorded release goes through
+// refusalField, so each group stays on one line and no two runs look alike.
 function checkBundledRuns(command, folders) {
   const unrecorded = [];
   const others = [];
@@ -599,20 +622,31 @@ function checkBundledRuns(command, folders) {
     if (bundled.length === 0) continue;
     for (const reviewer of bundled) bundledSchema(reviewer);
     const metaFile = path.join(dir, 'meta.json');
-    const recorded = fs.existsSync(metaFile) ? readJson(metaFile).bundledOmp : undefined;
-    if (typeof recorded !== 'string') unrecorded.push(label);
-    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
+    const recorded = fs.existsSync(metaFile) ? readJson(metaFile)?.bundledOmp : undefined;
+    if (typeof recorded !== 'string') unrecorded.push(refusalField(label));
+    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${refusalField(label)} (omp ${refusalField(recorded)})`);
   }
+  const lines = [];
   if (unrecorded.length) {
-    fail(
-      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${listSome(unrecorded, LISTED_READS)}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+    lines.push(
+      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded.join(', ')}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
     );
   }
   if (others.length) {
-    fail(
-      `${command}: ${others.length} bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${listSome(others, LISTED_READS)}; score them with the score.mjs of their omp release`,
+    lines.push(
+      `${command}: ${others.length} bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${others.join(', ')}; score them with the score.mjs of their omp release`,
     );
   }
+  if (lines.length) fail(lines.join('\n'));
+}
+
+// A run label or a recorded release in a line of a refusal: the text as it is when it is not empty and has no comma,
+// parenthesis, quote, backslash, control character, or Unicode line or paragraph separator; else the text as a JSON
+// string with these separators escaped too (JSON.stringify keeps them). So a value stays on its line, the commas and
+// parentheses of the line separate the values, and a plain value never looks like a quoted one.
+function refusalField(text) {
+  if (/^[^,()"\\\p{Cc}\p{Zl}\p{Zp}]+$/u.test(text)) return text;
+  return JSON.stringify(text).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 }
 
 // The locator text and the file of one location of a structured finding.
