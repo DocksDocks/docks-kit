@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-25"
-  content_hash: "d67963a9679407da9d89421cee17d730294c144c1760414de1c01f67f7971bb1"
+  content_hash: "1dc5401f841126058e2c73ce79760cac7713156272265d552c01ffecf46527d3"
 ---
 
 # Code Guardrails
@@ -204,14 +204,15 @@ gives wrong results; leave such a file out with a pathspec.
 ```bash
 # Run the scan in a new bash in privileged mode (-p): it reads no startup file and no
 # BASH_ENV, takes no function from the environment, and ignores SHELLOPTS and
-# BASHOPTS there. The system env (/usr/bin/env, not a command of the calling shell)
-# starts it without the exported variables that change how bash starts and runs
-# (POSIXLY_CORRECT, BASH_COMPAT, TMOUT, FUNCNEST, EXECIGNORE) and finds bash on PATH.
-# So the functions, debug hooks, variables, and settings of the calling shell do not
-# change what runs inside it. A debug hook of the calling shell still runs before
-# this one line, as it runs before any command.
-/usr/bin/env -u POSIXLY_CORRECT -u BASH_COMPAT -u TMOUT -u FUNCNEST -u EXECIGNORE \
-  bash --noprofile --norc -p -s <<'SCAN'
+# BASHOPTS there. The system env (`command /usr/bin/env`: no function, command cache,
+# or command search of the calling shell) starts it without the exported variables
+# that change how bash starts and runs (POSIXLY_CORRECT, BASH_COMPAT, BASH_XTRACEFD,
+# TMOUT, FUNCNEST, EXECIGNORE) and finds bash on PATH. So the functions, debug hooks,
+# variables, and settings of the calling shell do not change what runs inside it. A
+# debug hook of the calling shell still runs before this one line, as it runs before
+# any command.
+command /usr/bin/env -u POSIXLY_CORRECT -u BASH_COMPAT -u BASH_XTRACEFD -u TMOUT \
+  -u FUNCNEST -u EXECIGNORE bash --noprofile --norc -p -s <<'SCAN'
 # The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,
 # XDG_CONFIG_HOME (Git reads its user config from HOME and XDG_CONFIG_HOME), LANG,
 # LC_*, and GIT_*. `env -0` lists every entry of the real environment, also the
@@ -335,7 +336,8 @@ starts and runs; the comment above the start line names them. Your other exporte
 variables reach that Bash, but the commands of the scan get only the environment
 variables that the comment above the environment list names. When a Git setting of
 your project lives in another environment variable, add that name to that list. The
-block needs `/usr/bin/env` with the `-0` and `-u` options (GNU coreutils, or macOS).
+block needs `/usr/bin/env` with the `-u` option, and an `env` on `PATH` with the `-0`
+and `-u` options (GNU coreutils and macOS have both).
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short

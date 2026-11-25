@@ -18,7 +18,8 @@
   do not change what runs in that Bash, and `set -a` no longer makes `awk` and
   `sort` fail on a large match stream. Its commands get only `PATH`, `HOME`,
   `TMPDIR`, `XDG_CONFIG_HOME`, `LANG`, `LC_*`, and `GIT_*` from the
-  environment. The block needs `/usr/bin/env` with `-0` and `-u`.
+  environment. The block needs `/usr/bin/env` with `-u`, and an `env` on
+  `PATH` with `-0` and `-u`.
 - A unit test runs the shipped block on fixture Git repositories
   (`cli/test/unit/plugin/codeGuardrailsScan.test.ts`).
 

@@ -389,10 +389,36 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       writeFileSync(cached, `#!/bin/sh\n${drainer("bash")}\n`);
       chmodSync(cached, 0o755);
       const bashInCache = scan(fx, dir, { before: `hash -p ${shellQuote(cached)} bash` });
-      for (const run of [envOnPath, bashInCache]) {
+      // A function of the calling shell with the name of the launcher.
+      const envFunction = scan(fx, dir, { before: "/usr/bin/env() { cat > /dev/null; }" });
+      for (const run of [envOnPath, bashInCache, envFunction]) {
         expect(run.status, run.stderr).toBe(0);
         expect(lines(run.stdout)).toEqual(NORMAL);
       }
+    });
+
+    it("starts bash without the exported variables that change how bash starts and runs", () => {
+      const fx = fixture();
+      // The bash wrapper first on PATH reports each such variable that reaches it, then starts the real bash.
+      const names = [
+        "POSIXLY_CORRECT",
+        "BASH_COMPAT",
+        "BASH_XTRACEFD",
+        "TMOUT",
+        "FUNCNEST",
+        "EXECIGNORE",
+      ];
+      const report = names
+        .map((name) => `[ -z "\${${name}+set}" ] || echo "${name} reached bash" >&2`)
+        .join("\n");
+      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
+        env: shim(fx, "bash", `${report}\nexec ${shellQuote(realCommand(fx, "bash"))} "$@"`),
+        before:
+          "export POSIXLY_CORRECT=1 BASH_COMPAT=31 BASH_XTRACEFD=2 TMOUT=1 FUNCNEST=2 EXECIGNORE=nothing",
+      });
+      expect(run.stderr).not.toContain("reached bash");
+      expect(run.status, run.stderr).toBe(0);
+      expect(lines(run.stdout)).toEqual(NORMAL);
     });
 
     it("waits for a slow scan when the caller exports a read timeout", () => {
