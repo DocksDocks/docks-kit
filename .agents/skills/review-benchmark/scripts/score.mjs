@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parsePlan } from '../../../../cli/src/plan/records.ts';
 import { parseReviewComment } from '../../../../cli/src/plan/reviews.ts';
 import {
+  ABORTED_STOP_REASON,
   EXCLUSION_PREFIX,
   EXCLUSION_TOOLS,
   INSTALLED_SKILL_ROOTS,
@@ -31,6 +32,7 @@ import {
   TOKEN_FIELDS,
   TRANSCRIPT_RECORDS,
   WEB_SEARCH_TOOL,
+  YIELD_PLACEHOLDER_ERRORS,
   tierFamily,
 } from './omp.mjs';
 
@@ -410,8 +412,115 @@ export function unwrapBlock(text) {
   return text;
 }
 
-// The verdict comes from the plan helper. A block of the other review kind is unreadable for this case.
-export function parseBlock(text, family) {
+// The bundled arms of prepare.mjs (R1 and V1) dispatch rendered copies of the omp agents `reviewer` and
+// `security-reviewer` (`prepare.mjs agents --bundled`). The reviewer of each arm has the name of its agent. These
+// agents reply in structured mode: `transcripts` folds their `yield` calls into one object and writes the object as the
+// block (see structuredReply). Each entry holds the facts of the output schema of the vendored agent (prepare.mjs
+// BUNDLED_DIR) that the scorer checks: each required field with its check, and each field that holds a list. omp
+// checks a section when the agent yields it and rejects a section that does not fit, so the scorer checks only the
+// fields of the assembled object.
+export const BUNDLED_REPLIES = {
+  reviewer: {
+    required: {
+      overall_correctness: (value) => value === 'correct' || value === 'incorrect',
+      explanation: (value) => typeof value === 'string',
+      confidence: (value) => typeof value === 'number',
+    },
+    lists: ['findings'],
+  },
+  'security-reviewer': {
+    required: { coverage_summary: (value) => typeof value === 'string' },
+    lists: ['findings', 'reviewed_paths', 'deferred'],
+  },
+};
+const isBundledReviewer = (reviewer) => typeof reviewer === 'string' && Object.hasOwn(BUNDLED_REPLIES, reviewer);
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// The severity of a `reviewer` finding from its priority P0 to P3, and of a `security-reviewer` finding from its
+// severity.
+const PRIORITY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const SECURITY_SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW', informational: 'LOW' };
+
+// The reason why `value` does not fit the output schema of the bundled reviewer `reviewer` (see BUNDLED_REPLIES), or
+// null when it fits.
+export function structuredProblem(reviewer, value) {
+  if (!isRecord(value)) return `the result of ${reviewer} is not an object`;
+  const { required, lists } = BUNDLED_REPLIES[reviewer];
+  const problems = [];
+  for (const [field, fits] of Object.entries(required)) {
+    if (!Object.hasOwn(value, field)) problems.push(`no ${field}`);
+    else if (!fits(value[field])) problems.push(`${field} ${JSON.stringify(value[field])} does not fit`);
+  }
+  for (const field of lists) {
+    if (Object.hasOwn(value, field) && !Array.isArray(value[field])) problems.push(`${field} is not a list`);
+  }
+  if (Array.isArray(value.findings) && !value.findings.every(isRecord)) problems.push('a finding is not an object');
+  return problems.length ? `the result fails the output schema of ${reviewer}: ${problems.join(', ')}` : null;
+}
+
+// The locator text and the file of one location of a structured finding.
+function structuredLocation(file, start, end) {
+  const startLine = Number.isInteger(start) ? start : null;
+  const endLine = startLine !== null && Number.isInteger(end) ? end : startLine;
+  let range = '';
+  if (startLine !== null) range = endLine === startLine ? `:${startLine}` : `:${startLine}-${endLine}`;
+  return { locator: `${file}${range}`, file: { file: normalizeFile(file), start: startLine, end: endLine } };
+}
+
+// A finding of a structured reply in the shape of a finding line (see parseFindingLine). A `security-reviewer` finding
+// keeps every location, in the order of the reply, so each location file is a candidate file of a judge pair (see
+// pairWanted).
+function structuredFinding(reviewer, item) {
+  const texts = (values) => values.filter((value) => typeof value === 'string' && value.trim() !== '');
+  let locations;
+  let severity;
+  let category = '';
+  let text;
+  if (reviewer === 'reviewer') {
+    locations = texts([item.file_path]).map((file) => structuredLocation(file, item.line_start, item.line_end));
+    const priority = typeof item.priority === 'number' ? Math.min(3, Math.max(0, Math.round(item.priority))) : 3;
+    severity = PRIORITY_SEVERITIES[priority];
+    text = texts([item.title, item.body]).join(': ');
+  } else {
+    const places = Array.isArray(item.locations) ? item.locations.filter(isRecord) : [];
+    locations = places
+      .filter((place) => texts([place.path]).length)
+      .map((place) => structuredLocation(place.path, place.start_line, place.end_line));
+    severity = SECURITY_SEVERITIES[item.severity] ?? 'LOW';
+    category = texts([item.category])[0] ?? '';
+    const evidence = (Array.isArray(item.evidence) ? item.evidence.filter(isRecord) : []).map((part) =>
+      texts([part.label, part.explanation]).join(': '),
+    );
+    const proof = evidence.filter(Boolean);
+    text = `${texts([item.title, item.summary]).join(': ')}${proof.length ? ` Evidence: ${proof.join('; ')}` : ''}`;
+  }
+  const files = new Map(locations.map(({ file }) => [`${file.file}:${file.start}:${file.end}`, file]));
+  const locator = locations.map((place) => place.locator).join('; ');
+  return { type: 'code', severity, category, locator, files: [...files.values()], text };
+}
+
+// The verdict and the findings of the block of a bundled reviewer: the JSON object that `transcripts` wrote (see
+// structuredReply). A block that is no JSON, or whose object does not fit the output schema of the agent (see
+// structuredProblem), is unreadable. Else the verdict is `fixes-required` when the object holds a finding or
+// `overall_correctness` is `incorrect`, and `pass` otherwise.
+function parseStructuredBlock(text, reviewer) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { verdict: 'unreadable', findings: [] };
+  }
+  const items = isRecord(value) && Array.isArray(value.findings) ? value.findings.filter(isRecord) : [];
+  const findings = items.map((item) => structuredFinding(reviewer, item));
+  let verdict = 'pass';
+  if (structuredProblem(reviewer, value) !== null) verdict = 'unreadable';
+  else if (findings.length || value.overall_correctness === 'incorrect') verdict = 'fixes-required';
+  return { verdict, findings };
+}
+
+// The verdict comes from the plan helper. A block of the other review kind is unreadable for this case. The block of a
+// bundled reviewer (`reviewer`, see BUNDLED_REPLIES) is a structured reply (see parseStructuredBlock).
+export function parseBlock(text, family, reviewer) {
+  if (isBundledReviewer(reviewer)) return parseStructuredBlock(text, reviewer);
   const block = unwrapBlock(text);
   const review = parseReviewComment(block);
   return { verdict: review?.kind === family ? review.verdict : 'unreadable', findings: parseFindings(block) };
@@ -496,7 +605,7 @@ export function collectFindings(ws) {
       };
       blocks.push(block);
       if (!fs.existsSync(file)) continue;
-      const parsed = parseBlock(fs.readFileSync(file, 'utf8'), family);
+      const parsed = parseBlock(fs.readFileSync(file, 'utf8'), family, reviewer);
       block.verdict = parsed.verdict;
       block.findings = parsed.findings.length;
       for (const [index, finding] of parsed.findings.entries()) {
@@ -975,13 +1084,16 @@ const REVIVED_AGENT = 'revived agent';
 // block of each reviewer of each round: a block that is missing, unreadable, or `blocked` holds no review. The
 // production loop does not post such a round, so the run does not show the review of its arm. A reviewer or fixer
 // whose transcript shows a revived agent (`revived`, see transcriptFacts) makes the run invalid with the reason
-// REVIVED_AGENT. Each reviewer is `{ label, verdict, entry }` and each fixer is `{ label, entry }`, where verdict is the
+// REVIVED_AGENT. A bundled reviewer whose transcript gave no valid structured reply, or whose transcript an omp of
+// another version than the vendored agents wrote, has `replyError` (see transcriptsCommand), which makes the run
+// invalid too. Each reviewer is `{ label, verdict, entry }` and each fixer is `{ label, entry }`, where verdict is the
 // verdict of the block and entry is the meta.json entry (undefined for a fixer without an entry).
 function invalidReasons(config, reviewers, { fixerConfig = null, fixers = [] } = {}) {
   const reasons = [];
   for (const { label, verdict, entry } of reviewers) {
     if (!REVIEW_VERDICTS.has(verdict)) reasons.push(`${label}: no review (${verdict})`);
     if (entry?.revived) reasons.push(`${label}: ${REVIVED_AGENT}`);
+    if (entry?.replyError) reasons.push(`${label}: ${entry.replyError}`);
     if (config) reasons.push(...configReasons(config, label, entry));
     const outside = entry?.readScope?.outside ?? [];
     if (outside.length) reasons.push(`${label}: read outside its inputs: ${listSome(outside, LISTED_READS)}`);
@@ -1843,15 +1955,27 @@ const neutralLimitText = (cases, margin) =>
 const capitals = (...tests) =>
   `${tests.map((test) => ratio(test.capital)).join(', ')}; threshold ${whole(tests[0].threshold)}`;
 
+// The interval rows of the decision table. After the interval of the escaped defects per 50 known comes the escaped
+// defects per 50 known of the column and of the reference column on the cases that both ran, the cases that the
+// interval pairs, so that a decision reads its rate and its interval from the same cases.
 function intervalRows(reference, runsOf) {
-  return INTERVAL_ROWS.map(([measure, value, weight, format, compared]) => {
+  return INTERVAL_ROWS.flatMap(([measure, value, weight, format, compared]) => {
     const referenceRuns = runsOf(reference).filter(compared);
-    return [
+    const interval = [
       `${measure} difference from ${reference}, 90% interval`,
       besideReference(reference, (runs) =>
         intervalText(pairedBootstrap(pairedCases(runs.filter(compared), referenceRuns, value, weight)), format),
       ),
     ];
+    if (value !== escapedValue) return [interval];
+    const referenceCases = casesOf(referenceRuns);
+    const sharedRates = (runs) => {
+      const shared = new Set([...casesOf(runs)].filter((caseId) => referenceCases.has(caseId)));
+      const inShared = (list) => list.filter((run) => shared.has(run.case));
+      return `${ratio(escapedPer50(inShared(runs)))} / ${ratio(escapedPer50(inShared(referenceRuns)))}`;
+    };
+    const label = `Escaped per 50 known on the cases shared with ${reference} (this column / ${reference})`;
+    return [interval, [label, besideReference(reference, sharedRates)]];
   });
 }
 
@@ -3002,6 +3126,92 @@ export function fixerReplies(entries) {
   return replies;
 }
 
+// The structured reply of a bundled reviewer `reviewer` (see BUNDLED_REPLIES), as omp v19.1.1 assembles the result of
+// a child with an output schema (task/executor.ts finalizeSubprocessOutput, task-yield-assembly.ts
+// assembleYieldResult): `{ data, problem }`, where `data` is the object that `transcripts` writes as the block and
+// `problem` is null or the reason why the reply is not valid. The fold takes the accepted calls of the reply tool
+// (omp.mjs REPLY_TOOL) in call order: a call with a tool result that is not an error. omp rejects a call with an error
+// result, so the call adds nothing. A call whose `error` argument is set, and is not a placeholder next to `data`
+// (omp.mjs YIELD_PLACEHOLDER_ERRORS), aborts the task: when the last accepted call does that, the reply is
+// `{ aborted: true, error }`. A call whose `type` is a list of labels adds its `data` as a section under each label: a
+// list field of the schema collects its sections in a list, another field of the schema keeps the last one, and an
+// unknown label gets a list from its second section on. The last call without such a `type` ends the reply: its
+// `data`, when it has one, is the whole reply, else the sections are. A reply without data, a section without data, a
+// reply that does not fit the schema (see structuredProblem), and a run whose last assistant message stopped with
+// omp.mjs ABORTED_STOP_REASON have a problem. `entries` are the records of the transcript (see transcriptEntries).
+export function structuredReply(entries, reviewer) {
+  const accepted = new Map();
+  for (const entry of entries) {
+    const message = entry.type === 'message' && entry.message?.role === 'toolResult' ? entry.message : null;
+    if (typeof message?.toolCallId === 'string') accepted.set(message.toolCallId, message.isError !== true);
+  }
+  const given = (value) => (value === undefined || value === null ? undefined : value);
+  const calls = [];
+  let stopReason = null;
+  for (const entry of entries) {
+    if (entry.type !== 'message' || entry.message?.role !== 'assistant') continue;
+    stopReason = entry.message.stopReason ?? null;
+    const content = Array.isArray(entry.message.content) ? entry.message.content : [];
+    for (const part of content) {
+      if (part?.type !== 'toolCall' || part.name !== REPLY_TOOL || accepted.get(part.id) !== true) continue;
+      const args = isRecord(part.arguments) ? part.arguments : {};
+      const data = given(args.data);
+      const error = typeof args.error === 'string' ? args.error.trim() : '';
+      const placeholder = data !== undefined && YIELD_PLACEHOLDER_ERRORS.has(error.toLowerCase());
+      calls.push({ type: given(args.type), data, error: error && !placeholder ? error : undefined });
+    }
+  }
+  if (calls.length === 0) return { data: {}, problem: `${reviewer} made no accepted ${REPLY_TOOL} call` };
+  const last = calls.at(-1);
+  if (last.error !== undefined) {
+    return { data: { aborted: true, error: last.error }, problem: `${reviewer} aborted its task: ${last.error}` };
+  }
+  const { required, lists } = BUNDLED_REPLIES[reviewer];
+  const shapes = new Map([...Object.keys(required).map((field) => [field, 'scalar']), ...lists.map((f) => [f, 'list'])]);
+  const isSection = (type) => Array.isArray(type) && type.length > 0;
+  const sections = {};
+  const counts = new Map();
+  let missingData = false;
+  for (const call of calls) {
+    if (call.error !== undefined || !isSection(call.type)) continue;
+    const labels = call.type.filter((label) => typeof label === 'string' && label.trim()).map((label) => label.trim());
+    missingData ||= call.data === undefined;
+    for (const label of labels) {
+      const count = counts.get(label) ?? 0;
+      const shape = shapes.get(label);
+      if (shape === 'scalar') sections[label] = call.data;
+      else if (count === 0) sections[label] = shape === 'list' ? [call.data] : call.data;
+      else if (Array.isArray(sections[label])) sections[label].push(call.data);
+      else sections[label] = [sections[label], call.data];
+      counts.set(label, count + 1);
+    }
+  }
+  const end = calls.findLast((call) => !isSection(call.type));
+  let data;
+  if (end?.data !== undefined) {
+    data = end.data;
+    missingData = false;
+  } else if (counts.size) {
+    data = sections;
+  } else {
+    return { data: {}, problem: `${reviewer} yielded no data` };
+  }
+  // omp reads a reply that is a JSON text as the value of that text.
+  if (typeof data === 'string') {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      // The text stays a text, which fits no output schema of a bundled reviewer.
+    }
+  }
+  const problems = [
+    missingData ? `a ${REPLY_TOOL} section of ${reviewer} has no data` : null,
+    structuredProblem(reviewer, data),
+    stopReason === ABORTED_STOP_REASON ? `the run of ${reviewer} was aborted` : null,
+  ].filter(Boolean);
+  return { data, problem: problems.length ? problems.join('; ') : null };
+}
+
 // The working directory of the session of a transcript, the plugin roots that the agent text of the session names,
 // the self-review agent files that it names, and, for a self-review agent, the self-review roots that it names (see
 // selfReviewSkillRoots). omp records the agent text in the system prompt (a string or a list of strings) of the
@@ -3772,11 +3982,14 @@ function readLists({ calls, results }, cwd, probe = cachedProbe(cwd)) {
 
 // The own diff of a reviewer in `folder`, the folder of the inputs of its round, by the name of the reviewer (see
 // prepare.mjs ARMS and buildTail): the focus diff of a panel lens, also of a self-review lens; the full diff of a full
-// review, also of the self-review of the full diff; and the delta diff of a delta review. A plan reviewer has none.
+// review, also of the self-review of the full diff and of a bundled reviewer (see BUNDLED_REPLIES); and the delta diff
+// of a delta review. A plan reviewer has none.
 function ownDiffFile(reviewer, folder) {
   const lens = reviewer.startsWith(`${SELF_REVIEW}-`) ? reviewer.slice(SELF_REVIEW.length + 1) : reviewer;
   if (PANEL_LENSES.has(lens)) return path.join(folder, `focus-${lens}.diff`);
-  if (reviewer === 'full' || reviewer === SELF_REVIEW) return path.join(folder, 'full.diff');
+  if (reviewer === 'full' || reviewer === SELF_REVIEW || isBundledReviewer(reviewer)) {
+    return path.join(folder, 'full.diff');
+  }
   return reviewer === 'delta' ? path.join(folder, 'delta.diff') : null;
 }
 
@@ -4120,8 +4333,8 @@ function transcriptFiles(dir) {
 // The paths that a diff changes, from its header lines. prepare.mjs writes each diff with --no-renames, so the two
 // sides of a `diff --git` line name one path, and the line splits in its middle also when the path holds ` b/`. A
 // `+++ b/` line counts only in the header of a file, before its first `@@` line, because a line of a hunk can start
-// with `++`.
-function diffFiles(text) {
+// with `++`. `prepare.mjs case` lists the scope files of the V1 arm with it.
+export function diffFiles(text) {
   const files = [];
   let header = false;
   for (const line of text.split('\n')) {
@@ -4634,7 +4847,7 @@ export function namesCommand(ws) {
 }
 
 // The fields of a reviewer entry that only the current transcript of the reviewer gives.
-const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revived'];
+const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revived', 'replyError'];
 
 // Fills the meta.json of each run or round folder from the transcripts of its dispatches and keeps every other field.
 // The transcript of a dispatch is the latest repeat of its name (see pickTranscript) among the transcripts whose task
@@ -4664,7 +4877,13 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // checkTranscriptShape), and the agent of each of these transcripts: omp records the agent that it ran in the
 // `session_init` entry (see sessionAgent), and the command stops when that agent is not the agent of the prompt, or
 // when the transcript names no agent: a transcript of another agent, for example of another plan-reviewer variant
-// under the task name of this one, shows the review of another arm, so the message asks for a new dispatch. Then the
+// under the task name of this one, shows the review of another arm, so the message asks for a new dispatch. A run of a
+// bundled arm (`prepare.mjs case` R1 or V1) records the omp version of the vendored agents in its meta.json
+// (`bundledOmp`). Its reviewer replies in structured mode, so the command writes its block: the reply that
+// structuredReply folds from the transcript, as JSON. When that reply has a problem, the reviewer entry gets the reason
+// as `replyError`. When the transcript names another omp version than `bundledOmp`, the agent ran under an omp whose
+// reply rules the vendored agents do not match: the command writes no block, removes an earlier block of the reviewer,
+// and records that reason as `replyError`. Each `replyError` makes the run invalid (see invalidReasons). Then the
 // command writes what it finds, and fails with the names of the dispatches that have no transcript.
 export function transcriptsCommand(ws, sessionsDir) {
   const files = transcriptFiles(sessionsDir);
@@ -4734,7 +4953,19 @@ export function transcriptsCommand(ws, sessionsDir) {
       const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
       const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd);
       if (coverage !== null) entry.diffCoverage = coverage;
-      results.push({ name, reviewer, entry });
+      let block;
+      if (meta.bundledOmp !== undefined && isBundledReviewer(reviewer)) {
+        if (entry.ompVersion === meta.bundledOmp) {
+          const reply = structuredReply(entries, reviewer);
+          block = `${JSON.stringify(reply.data, null, 2)}\n`;
+          if (reply.problem) entry.replyError = reply.problem;
+        } else {
+          block = null;
+          const shown = entry.ompVersion === undefined ? 'no omp version' : `omp ${entry.ompVersion}`;
+          entry.replyError = `the transcript shows ${shown}, not omp ${meta.bundledOmp} of the vendored agents`;
+        }
+      }
+      results.push({ name, reviewer, entry, block, blockFile: path.join(dir, 'blocks', `${reviewer}.md`) });
     }
     if (results.length) updates.push({ metaFile, meta, results });
   }
@@ -4745,7 +4976,7 @@ export function transcriptsCommand(ws, sessionsDir) {
   }
   const updated = [];
   for (const { metaFile, meta, results } of updates) {
-    for (const { name, reviewer, fixer, manager, agent, replies, entry } of results) {
+    for (const { name, reviewer, fixer, manager, agent, replies, entry, block, blockFile } of results) {
       if (fixer) {
         meta.fixer = { ...meta.fixer, seconds: agent.seconds, tokens: agent.tokens, agents: { [reviewer]: agent } };
         if (Object.keys(replies).length) meta.fixer.replies = replies;
@@ -4759,6 +4990,12 @@ export function transcriptsCommand(ws, sessionsDir) {
         const kept = { ...meta.reviewers[reviewer] };
         for (const field of TRANSCRIPT_ONLY_FIELDS) delete kept[field];
         meta.reviewers[reviewer] = { ...kept, ...entry };
+        if (typeof block === 'string') {
+          fs.mkdirSync(path.dirname(blockFile), { recursive: true });
+          fs.writeFileSync(blockFile, block);
+        } else if (block === null) {
+          fs.rmSync(blockFile, { force: true });
+        }
       }
       updated.push(name);
     }

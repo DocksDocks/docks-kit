@@ -39,6 +39,14 @@ export const EFFORT_SUFFIX = /:(off|minimal|low|medium|high|xhigh|max|auto|inher
 export const MODEL_KEYS = ['model', 'thinking-level', 'thinking', 'effort'];
 // The frontmatter key that loads a skill when the agent starts. omp resolves it to the installed skill.
 export const AUTOLOAD_KEY = 'autoload-skills';
+// The frontmatter key that lists the tools of an agent (`tools: read, grep`), the key that lists the agents that it may
+// spawn, and the key that gives it the REPLY_TOOL tool with its output schema (structured mode) also when
+// SETTINGS.structured is false.
+export const TOOLS_KEY = 'tools';
+export const SPAWNS_KEY = 'spawns';
+export const STRUCTURED_KEY = 'structured';
+// The tools that run a command and that query a language server. Both can open files that no `path` argument names.
+export const COMMAND_TOOLS = ['bash', 'lsp'];
 
 // The service tiers per provider family (`tier.<family>`). omp applies an agent tier override only when the family of
 // the resolved model supports the value. A model selector names its provider before the first `/`, and the provider
@@ -77,6 +85,23 @@ export const EXCLUSION_PREFIX = '!';
 // REPLY_TOOL (an agent with an output schema, or `task.structured: true`) replies with the arguments of its last call
 // of that tool instead.
 export const REPLY_TOOL = 'yield';
+// An agent with an output schema can give its result in several calls of REPLY_TOOL, and omp folds the accepted calls
+// into one result (see score.mjs structuredReply). A call with a non-empty `error` argument aborts the task, except
+// when the call also has `data` and the error is one of these filler texts, which some providers write into every
+// optional field (omp tools/yield.ts PLACEHOLDER_YIELD_ERRORS). omp compares the trimmed text in lower case.
+export const YIELD_PLACEHOLDER_ERRORS = new Set([
+  'ignore',
+  'ignored',
+  'n/a',
+  'none',
+  'not applicable',
+  'null',
+  'placeholder',
+  'undefined',
+  'unused',
+]);
+// The `stopReason` of an assistant message that the user or omp aborted.
+export const ABORTED_STOP_REASON = 'aborted';
 
 // The internal URI schemes of the own output of an agent: `artifact://<id>` and the spill files `local://<N>.log`.
 // A read of them shows no repository file.

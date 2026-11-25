@@ -1,10 +1,10 @@
 ---
 name: review-benchmark
-description: "Use when measuring a change to the kit reviewers in this repository (code-reviewer or plan-reviewer prompts, skills, lenses, or delta rounds) or to their model, effort, or service tier: replays recorded and seeded review cases through baseline and candidate arms at each configuration, scores recall, wrong findings, time, and tokens with a blind judge, and records the keep-or-drop decision. Not for reviewing a plan or a diff (use plan-manager), skill trigger checks (use write-skill), or CI gates."
+description: "Use when measuring a change to the kit reviewers in this repository (code-reviewer or plan-reviewer prompts, skills, lenses, or delta rounds) or to their model, effort, or service tier, or the model of the bundled omp reviewer and security-reviewer agents: replays recorded and seeded review cases through baseline and candidate arms at each configuration, scores recall, wrong findings, time, and tokens with a blind judge, and records the keep-or-drop decision. Not for reviewing a plan or a diff (use plan-manager), skill trigger checks (use write-skill), or CI gates."
 user-invocable: true
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-23"
+  updated: "2026-11-24"
 ---
 
 # Review benchmark
@@ -202,6 +202,8 @@ After it writes, `agents` checks with `omp config get` that omp loads every tier
 | `S3` | code | `review-bench-selfreview-<config>` | `self-review-correctness`, `self-review-spec-and-tests`, `self-review-text-and-safety`: the focus diff and the lens description of the `B1` lens | none |
 | `S1<root>`, `S3<root>` | code | `review-bench-selfreview-<root>-<config>` | the reviewers and prompts of `S1` and `S3` | none |
 | `A<arm>` | the kinds of `<arm>` | the agent of `<arm>` | the reviewers and prompts of `<arm>` | the policy of `<arm>` |
+| `R1` | code, only in `cases/bundled/` | `review-bench-bundled-reviewer-<config>` | `reviewer`: the full diff, in structured mode (see Quick comparison, Bundled agents) | none |
+| `V1` | code, only in `cases/bundled/` with a security seed | `review-bench-bundled-security-<config>` | `security-reviewer`: the changed files of the full diff as scope, in structured mode | none |
 
 `B3` and `Bd` give the baseline reviewer the prompt of `C3` and `Cd`, so they compare a candidate with the reviewer at `--baseline-ref` (for example `main`) on the reviewer files alone; `B1` and `B0` keep the prompts that the released reviewer of plan #98 needed.
 
@@ -593,6 +595,64 @@ bun "$skill/scripts/score.mjs" names "$ws"
 
 5. Run `bun "$skill/scripts/score.mjs" report "$ws" --configs <production>,<candidate> --reference <production>`. Read the table `### Single reviews: <split>`: the seconds median, minimum, and maximum, the known defects found per run, the wrong findings per run, and the tokens. For the cost, add `usage.cost.total` of the assistant messages of the configuration model in each reviewer transcript: omp records the list-price cost of each request.
 6. Append a `results.md` entry with the table, and run step 9 of Procedure.
+
+### Bundled agents
+
+The arms `R1` and `V1` compare two configurations of the bundled omp agents `reviewer` and `security-reviewer` (plan #229). No kit skill dispatches these agents. The main omp agent dispatches `reviewer` to review a change and `security-reviewer` to find vulnerabilities in a scope. `R1` runs `reviewer` on every case of `cases/bundled/`, and `V1` runs `security-reviewer` on each case of that folder with a security seed.
+
+Vendored copies. omp compiles both agents into its binary, so the benchmark renders them from copies. `bundled/omp-19.1.1/` holds the two source files of the omp tag `v19.1.1` byte for byte, the omp `LICENSE` (MIT), and `SOURCE.md`, which names the tag and the source URLs. After a raise of the omp `verified` pin in `SoT/toolchain.json`, add the folder `bundled/omp-<version>/` with the files of the new tag and their `SOURCE.md`, and change `BUNDLED_OMP_VERSION` in `scripts/prepare.mjs` to that version.
+
+Setup and checks:
+
+- `agents --bundled --model <m>[,<m>...] --efforts <list> [--tiers <list>] --project <dir>` writes `review-bench-bundled-reviewer-<config>` and `review-bench-bundled-security-<config>` for each configuration. Each copy keeps the vendored file, pins the model and the effort, sets `structured: true`, and leaves out the tools `bash` and `lsp` and the `spawns` line. It takes no `--baseline-ref`, `--out`, `--baseline-dir`, or other option of `agents`. It stops before it writes a file when `omp --version` is not the vendored version. Without `--tiers`, a configuration has no tier and its agents run at the tier of the session, as the bundled agents do in ordinary dispatch.
+- The list of configurations of `agents --bundled` holds only the bundled configurations, so give it a `--project` of its own. `case` refuses `R1` and `V1` with another list of configurations, and every other arm with this list. `probe` refuses this project. The transcripts of the runs show the model, the effort, and the served tier, and `report` makes a run with another setting invalid.
+- `case` refuses `R1` and `V1` on a case outside a `cases/bundled/` folder, and `V1` on a case without a security seed. It refuses a case of a `cases/bundled/` folder that breaks the seed rule below.
+- The prompt of `R1` is `Review the change in the diff file. Report concrete correctness findings.`, the snapshot root, the full diff, and the read-scope rules of the other code arms. The prompt of `V1` is `Review these files for vulnerabilities that the change introduces.`, the same inputs, the changed files of the full diff that the snapshot holds, and the same rules.
+- The meta.json of each run records the vendored omp version as `bundledOmp`.
+
+Replies. Both agents reply in structured mode, with incremental `yield` calls. So the operator does not save a block: `transcripts` writes the block of each `R1` and `V1` run. It folds the `yield` calls with an accepted tool result in call order, as omp `finalizeSubprocessOutput` does, and skips each rejected call. The block is the assembled object as JSON. The reviewer entry gets `replyError`, which makes the run invalid, when the run aborted, when the object does not fit the output schema (`reviewer` needs `overall_correctness`, `explanation`, and `confidence`; `security-reviewer` needs `coverage_summary`), or when the transcript shows another omp version than `bundledOmp`. In the last case, `transcripts` writes no block. Run `transcripts` before `findings`. `findings` converts a `reviewer` finding with priority 0 to 3 to `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`, and a `security-reviewer` finding with its severity (`informational` gives `LOW`). A finding keeps every location, and each location file is a candidate file of a judge pair. The verdict is `fixes-required` when the reply holds a finding or `overall_correctness` is `incorrect`, else `pass`.
+
+Limits:
+
+- The measurement covers the prompt and the model without `bash`, `lsp`, and the `scout` subagent, in structured mode. Ordinary dispatch with `task.structured` off gives these agents no `yield` tool, and they return free text.
+- Recall counts the planted defects only. Another valid finding of the real pull request counts as a valid extra.
+- A seed sits only in a file that a pull request adds. A seed can still restore a behavior that the base had in another file, for example in a module that the pull request replaces. When both configurations miss such a key, it dilutes a real difference; when only one reports it, it can favor the configuration that follows the rubric less. The authoring guard below makes such keys rare, but it cannot exclude them.
+
+Cases. `cases/bundled/` is outside `cases/dev/` and `cases/heldout/`, so `corpus`, `power`, the grid, and the recipe above never read it. It holds 20 planted `code` cases, `bundled-bug-<NN>` and `bundled-sec-<NN>` (`NN` from `01` to `10`). Each case seeds one blocking defect into a real kit pull request that the bundled rubrics must report: a defect that the patch introduces, with a provable effect. To plant a case:
+
+1. Pick a pull request that origin/main merged and that adds a file with new behavior. Authoring guard: the seeded file holds no code that the pull request moved, ported, or replaced from another file. `head` is the merged commit (the full SHA), and `base` is its first parent.
+2. Write one seed in a file that the pull request adds. A correctness seed (`bundled-bug-<NN>`) is an off-by-one or a wrong bound, a wrong condition or an inverted check, a missing error path that loses data, a wrong property name or argument order, or a race between a check and a write. A security seed (`bundled-sec-<NN>`) is a command or shell injection, a path traversal or symlink escape, a write outside the intended folder, a secret in output or logs, an unsafe temporary file, a missing ownership check, an unchecked download, or the unsafe evaluation of input. Save the seed as `<id>.patch`, which applies to the head tree, and its exact reverse as `<id>.<ID>.fix.patch`.
+3. Save the pull request description or the plan body as `<id>-plan.md`.
+4. Write `<id>.json`: `id`, `kind: "code"`, `split: "dev"`, `issue`, `round: 1`, `base`, `head`, `patch`, `plan`, and `known` with exactly one entry: `id`, `locator`, `category: "code"`, `source: "seeded"`, `security` (`true` for a security seed, else `false`), `summary` (the defect, its effect, and why the seeded behavior is new in the pull request), and `fix`.
+5. Run `case` on a scratch workspace. It checks the seed rule: the seed patch edits only files that the pull request adds (the base commit holds none of them, and the head commit holds each), each hunk of the seed adds at least one line, and the head tree with the seed patch and then the fix patch is the head tree again. A seed in this skill folder needs `"show_benchmark": true` in the case file, and `case` refuses a seed in a path that the snapshot and the diffs leave out (see Workspace).
+
+```bash
+project="$bench/bundled-project"; ws="$bench/bundled"; mkdir -p "$project"
+bun "$skill/scripts/prepare.mjs" agents --bundled --model <production model>,<candidate model> --efforts <effort> \
+  --project "$project"
+for f in "$skill"/cases/bundled/*.json; do
+  arms=R1; [[ $(jq -r '.known[0].security' "$f") == true ]] && arms=R1,V1
+  bun "$skill/scripts/prepare.mjs" case --case "$f" --arms "$arms" --runs 1 --out "$ws" --project "$project"
+done
+bun "$skill/scripts/score.mjs" names "$ws"
+```
+
+Dispatch every prompt in one batch, as step 2 above tells, but save no block. Then:
+
+```bash
+bun "$skill/scripts/score.mjs" transcripts "$ws" --omp-sessions <session folder>
+bun "$skill/scripts/score.mjs" findings "$ws"
+bun "$skill/scripts/score.mjs" pairs "$ws" --cases "$skill/cases/bundled"
+```
+
+Judge the pairs as step 4 above tells. Then write one report per agent, because `report --configs` would pool the `R1` and `V1` runs of one configuration. Each `report` overwrites `$ws/report.md`, so keep each copy before the next run. `<production>` and `<candidate>` are the configuration names, for example `gpt-6.1-terra-high`:
+
+```bash
+bun "$skill/scripts/score.mjs" report "$ws" --arms R1-<production>,R1-<candidate> --reference R1-<production> && cp "$ws/report.md" "$ws/report-R1.md"
+bun "$skill/scripts/score.mjs" report "$ws" --arms V1-<production>,V1-<candidate> --reference V1-<production> && cp "$ws/report.md" "$ws/report-V1.md"
+```
+
+The decision table of each report gives, beside the interval of the escaped defects per 50 known, the row `Escaped per 50 known on the cases shared with <reference>`: the rate of the column and of the reference column on the cases that both have valid. A decision that reads the rate and the interval then reads both from the same cases.
 
 ## Decisions
 

@@ -1186,6 +1186,8 @@ test('the configuration table gives one column per configuration and the rows of
     '| Reads of missing paths | 0 | 0 | 0 |',
     '| Round 1 recall difference from low-fast, 90% interval | [-0.50, 0.00] | - | [-1.00, -0.50] |',
     '| Escaped per 50 known difference from low-fast, 90% interval | [0.00, 25.00] | - | [25.00, 50.00] |',
+    // The rate of each column on the cases that it shares with low-fast, beside the rate of low-fast on them.
+    '| Escaped per 50 known on the cases shared with low-fast (this column / low-fast) | 16.67 / 0.00 | - | 33.33 / 0.00 |',
     '| Loop seconds difference from low-fast, 90% interval | [50.0, 90.0] | - | [110.0, 210.0] |',
     // low differs from low-fast in code-7 only; high differs in code-7 and code-8.
     '| Cases with an escaped difference from low-fast | 1 | - | 2 |',
