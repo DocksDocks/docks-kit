@@ -642,11 +642,13 @@ function checkBundledRuns(command, folders) {
 
 // A run label or a recorded release in a line of a refusal: the text as it is when it is not empty and has no comma,
 // parenthesis, quote, backslash, control character, or Unicode line or paragraph separator; else the text as a JSON
-// string with these separators escaped too (JSON.stringify keeps them). So a value stays on its line, the commas and
-// parentheses of the line separate the values, and a plain value never looks like a quoted one.
-function refusalField(text) {
+// string in which each such character that JSON.stringify keeps raw (DEL, the C1 controls such as U+0085 NEXT LINE,
+// and the line and paragraph separators) is a JSON escape too. So a value stays on its line also for a reader that
+// splits lines at U+0085, the commas and parentheses of the line separate the values, and a plain value never looks
+// like a quoted one.
+export function refusalField(text) {
   if (/^[^,()"\\\p{Cc}\p{Zl}\p{Zp}]+$/u.test(text)) return text;
-  return JSON.stringify(text).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
+  return JSON.stringify(text).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => `\\u${char.codePointAt(0).toString(16).padStart(4, '0')}`);
 }
 
 // The locator text and the file of one location of a structured finding.

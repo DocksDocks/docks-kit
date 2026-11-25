@@ -10,6 +10,7 @@ import {
   dispatchName,
   parseBlock,
   readScope,
+  refusalField,
   scoreRuns,
   structuredReply,
   transcriptEntries,
@@ -532,12 +533,14 @@ test('transcripts and findings name every bundled run without a release record a
 
 test('transcripts and findings keep a bundled refusal on one line and tell apart runs whose labels look alike', () => {
   // One case folder name has a line break, and one has a backslash and the letter n in its place; the second run
-  // records a release with a Unicode line separator.
-  const ids = ['bundled-bug-30\nx', 'bundled-bug-30\\nx'];
+  // records a release with a Unicode line separator, and the third a release whose only control characters are DEL
+  // and two C1 controls, which JSON.stringify keeps raw and Python's str.splitlines splits at (U+0085).
+  const ids = ['bundled-bug-30\nx', 'bundled-bug-30\\nx', 'bundled-bug-31'];
   const { ws, sessions } = bundledWorkspace(ids.map((id) => ({ id, calls: [FINDING_CALL, ...VERDICT_CALLS] })));
   const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
   put(run(ids[0]), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0' });
   put(run(ids[1]), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0\u2028x' });
+  put(run(ids[2]), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0\u007f\u0085\u009f' });
   for (const id of ids) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   for (const args of [
     ['transcripts', ws, '--omp-sessions', sessions],
@@ -545,10 +548,18 @@ test('transcripts and findings keep a bundled refusal on one line and tell apart
   ]) {
     const child = scoreChild(args);
     assert.equal(child.status, 1, child.stderr);
-    const lines = child.stderr.trim().split(/\r?\n|\u2028|\u2029/);
+    const lines = child.stderr.trim().split(/\r?\n|\u0085|\u2028|\u2029/);
     assert.equal(lines.length, 1, child.stderr);
     assert.ok(lines[0].includes('"bundled-bug-30\\nx/R1-low/run-1" (omp 19.0.0)'), lines[0]);
     assert.ok(lines[0].includes('"bundled-bug-30\\\\nx/R1-low/run-1" (omp "19.0.0\\u2028x")'), lines[0]);
+    assert.ok(lines[0].includes('bundled-bug-31/R1-low/run-1 (omp "19.0.0\\u007f\\u0085\\u009f")'), lines[0]);
+  }
+});
+
+test('refusalField escapes DEL and each C1 control character as the only control in an otherwise plain field', () => {
+  for (let code = 0x7f; code <= 0x9f; code += 1) {
+    const escape = `\\u${code.toString(16).padStart(4, '0')}`;
+    assert.equal(refusalField(`19.0.0${String.fromCodePoint(code)}`), `"19.0.0${escape}"`);
   }
 });
 
@@ -556,8 +567,9 @@ test('findings and transcripts refuse a vendored output schema of a form that th
   // Copies of the scripts whose vendored reviewer has a schema that the scorer cannot check: a JSON Schema root, where
   // `required` is no JTD keyword, so the copy would not check the required fields; a nested `type` that is a list, not
   // a text, so the copy would not check the type of that field; `metadata` that is not an object (RFC 8927 section
-  // 2.2); two YAML aliases that make a value and a node contain themselves; and two tagged timestamps, which the YAML
-  // parser gives as dates, in place of `metadata` and of a schema node.
+  // 2.2); two YAML aliases that make a value and a node contain themselves; and four tagged timestamps, which the YAML
+  // parser gives as dates, in place of `metadata`, of a schema node, and of a `properties` or an `optionalProperties`
+  // map. Each tagged map has a valid map beside it, so the schema is still a properties form.
   const schemas = [
     {
       output: 'output:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n',
@@ -586,6 +598,14 @@ test('findings and transcripts refuse a vendored output schema of a form that th
     {
       output: 'output:\n  properties:\n    explanation: !!timestamp 2026-01-01\n',
       problem: 'output.properties.explanation is not an object',
+    },
+    {
+      output: 'output:\n  properties: !!timestamp 2026-01-01\n  optionalProperties:\n    explanation:\n      type: string\n',
+      problem: 'output.properties is not an object',
+    },
+    {
+      output: 'output:\n  properties:\n    explanation:\n      type: string\n  optionalProperties: !!timestamp 2026-01-01\n',
+      problem: 'output.optionalProperties is not an object',
     },
   ];
   for (const { output, problem } of schemas) {
