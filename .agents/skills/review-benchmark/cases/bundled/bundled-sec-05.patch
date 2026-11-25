@@ -1,0 +1,13 @@
+diff --git a/SoT/.omp/plugin/extensions/hygiene.ts b/SoT/.omp/plugin/extensions/hygiene.ts
+index eb968888..41d12c3e 100644
+--- a/SoT/.omp/plugin/extensions/hygiene.ts
++++ b/SoT/.omp/plugin/extensions/hygiene.ts
+@@ -333,7 +333,7 @@ export function run(
+       encoding: "utf8",
+       env: options.env,
+       maxBuffer: OUTPUT_LIMIT_BYTES,
+-      shell: false,
++      shell: process.platform === "win32",
+       signal: options.signal,
+       timeout: options.timeoutMs,
+       windowsHide: true,

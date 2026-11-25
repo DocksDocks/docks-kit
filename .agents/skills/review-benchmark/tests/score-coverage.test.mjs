@@ -596,10 +596,13 @@ test('manager writes one manager prompt per round with findings, and names lists
   ]) {
     assert.ok(prompt.includes(line), `the manager prompt lacks ${line}`);
   }
-  // The manager prompt forbids the pages of the benchmark repository under its current name and its former name.
+  // The manager prompt forbids the pages of the benchmark repository under its current name and its former name, and
+  // of the public repository with its earlier history.
   assert.ok(
     prompt.some((line) =>
-      line.endsWith('Do not open any page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks.'),
+      line.endsWith(
+        'Do not open any page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks, or of the DocksDocks/public repository.',
+      ),
     ),
   );
   assert.deepEqual(logged(() => prepare.prepareManager({ ws })).result, { written: 0, unchanged: 1 });

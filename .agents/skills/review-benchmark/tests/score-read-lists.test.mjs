@@ -350,6 +350,9 @@ test('readScope records each web search query, and a query that targets the benc
     'GITHUB.COM/docksdocks plan-lifecycle',
     'DocksDocks docks plan-lifecycle archive fix',
     '"docks-kit" site:github.com/DocksDocks/public OR site:github.com/DocksDocks/docks',
+    // DocksDocks/public holds an earlier history of the kit, so it is part of the benchmark repository.
+    'site:github.com/DocksDocks/public "docks-kit" "fast"',
+    '"docks-kit" "sync omp" "DocksDocks/public"',
     // An exclusion does not cancel a query that names the repository itself.
     'DocksDocks/docks sync lock -site:github.com/DocksDocks/docks',
     // A dot that ends a sentence is not part of the repository name.
@@ -357,14 +360,16 @@ test('readScope records each web search query, and a query that targets the benc
     // An exclusion of part of the repository, or of another site, does not remove the repository from the search.
     'DocksDocks "docks-kit" -site:github.com/DocksDocks/docks/issues',
     'DocksDocks docks-kit -site:deepwiki.com/DocksDocks/docks',
+    // The owner alone still finds DocksDocks/public when only DocksDocks/docks is excluded.
+    'DocksDocks "docks-kit" -site:github.com/DocksDocks/docks',
   ];
-  // Another repository of the owner is not the benchmark repository, and `-site:` excludes the benchmark repository.
+  // Another repository of the owner is not the benchmark repository, and `-site:` excludes the benchmark repository:
+  // the owner, or both of its repositories.
   const other = [
-    'site:github.com/DocksDocks/public "docks-kit" "fast"',
-    '"docks-kit" "sync omp" "DocksDocks/public"',
+    'DocksDocks/publicity sync lock',
     '"docks-kit" "omp" "--fast" -site:github.com/DocksDocks/docks',
     'DocksDocks docs -site:github.com/DocksDocks',
-    'DocksDocks "docks-kit" -site:github.com/DocksDocks/docks',
+    'DocksDocks "docks-kit" -site:github.com/DocksDocks/docks -site:github.com/DocksDocks/public',
   ];
   const calls = [
     search('node lock release finally'),
@@ -381,9 +386,10 @@ test('readScope records each web search query, and a query that targets the benc
   // A reviewer without a web search gets no queries.
   assert.deepEqual(score.readScope(reads(`${SCOPE_CASE}/plan.md`), scope), { outside: [] });
 });
-// The benchmark repository is DocksDocks/docks-kit, and DocksDocks/docks, its name before the rename, which GitHub
-// redirects to docks-kit (score.mjs BENCHMARK_REPOSITORY, targetsBenchmark, webPageAllowed).
-test('a web search query and a web page of DocksDocks/docks-kit or of the old DocksDocks/docks are outside', () => {
+// The benchmark repository is DocksDocks/docks-kit; DocksDocks/docks, its name before the rename, which GitHub
+// redirects to docks-kit; and DocksDocks/public, which holds an earlier history of the kit (score.mjs
+// BENCHMARK_REPOSITORY, targetsBenchmark, webPageAllowed).
+test('a web search query and a web page of DocksDocks/docks-kit, the old DocksDocks/docks, or DocksDocks/public are outside', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
   const search = (query) => ({ name: 'web_search', path: null, query });
   const benchmarkQueries = [
@@ -391,8 +397,10 @@ test('a web search query and a web page of DocksDocks/docks-kit or of the old Do
     'site:github.com/DocksDocks/docks-kit plan base-blob',
     'docksdocks/DOCKS-KIT.git review',
     'DocksDocks/docks sync lock',
+    'site:github.com/DocksDocks/public docks-kit',
+    'docksdocks/PUBLIC.git checklist picker',
   ];
-  const otherQueries = ['DocksDocks/docks-kitchen sync lock', 'site:github.com/DocksDocks/public docks-kit'];
+  const otherQueries = ['DocksDocks/docks-kitchen sync lock', 'DocksDocks/public-notes checklist'];
   assert.deepEqual(score.readScope([...benchmarkQueries, ...otherQueries].map(search), scope), {
     outside: benchmarkQueries.map((query) => `web_search: ${query}`),
     queries: [...benchmarkQueries, ...otherQueries],
@@ -404,8 +412,15 @@ test('a web search query and a web page of DocksDocks/docks-kit or of the old Do
     'https://github.com/docksdocks/Docks-Kit/issues/192',
     'https://github.com/DocksDocks/docks/pull/45',
     'https://deepwiki.com/DocksDocks/docks-kit',
+    'https://github.com/DocksDocks/public/blob/main/cli/src/commands/harnesses.ts',
+    'https://raw.githubusercontent.com/DocksDocks/public/main/README.md',
+    'https://api.github.com/repos/DocksDocks/public/contents/cli',
   ];
-  const otherPages = ['https://github.com/DocksDocks/docks-kitchen', 'https://github.com/other/docks-kit'];
+  const otherPages = [
+    'https://github.com/DocksDocks/docks-kitchen',
+    'https://github.com/other/docks-kit',
+    'https://github.com/DocksDocks/publicity',
+  ];
   assert.deepEqual(score.readScope(reads(...benchmarkPages, ...otherPages), scope), { outside: benchmarkPages });
 });
 test('a web search whose result cites a page of the benchmark repository is outside', () => {
@@ -450,15 +465,18 @@ test('a truncated result URL is outside only when its text names the owner of th
 test('a page of another site that names the benchmark repository is outside', () => {
   // A mirror, a code search, or a GitHub search can show the current text of the repository.
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
-  // The benchmark repository is DocksDocks/docks-kit, and DocksDocks/docks, its name before the rename.
+  // The benchmark repository is DocksDocks/docks-kit, DocksDocks/docks, its name before the rename, and
+  // DocksDocks/public, which holds an earlier history of the kit.
   const mirrors = [
     'https://deepwiki.com/DocksDocks/docks',
     'https://sourcegraph.com/github.com/DocksDocks/docks/-/blob/plugins/plan-lifecycle/README.md',
     'https://github.com/search?q=repo%3ADocksDocks%2Fdocks+lock&type=code',
     'https://deepwiki.com/DocksDocks/docks-kit',
     'https://github.com/search?q=repo%3ADocksDocks%2Fdocks-kit+lock&type=code',
+    'https://deepwiki.com/DocksDocks/public',
+    'https://github.com/search?q=repo%3ADocksDocks%2Fpublic+picker&type=code',
   ];
-  const allowed = ['https://deepwiki.com/DocksDocks/public', 'https://github.com/DocksDocks/docks-kitchen'];
+  const allowed = ['https://deepwiki.com/DocksDocks/publicity', 'https://github.com/DocksDocks/docks-kitchen'];
   assert.deepEqual(score.readScope(reads(...mirrors, ...allowed), scope), { outside: mirrors });
   const search = { name: 'web_search', path: null, query: 'lock release', resultUrls: [mirrors[0], allowed[0]] };
   assert.deepEqual(score.readScope([search], scope), {

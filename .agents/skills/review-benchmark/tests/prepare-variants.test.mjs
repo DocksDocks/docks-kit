@@ -428,8 +428,9 @@ test('report --reference compares every arm column with the named folder, and re
   judgeAll(ws, (_, known) => (known === 'D1' ? 'match' : 'no'));
   const arms = ['C1-low-fast', 'C1-low'];
   const report = () => readText(path.join(ws, 'report.md'));
-  // The shared-cases row and the three interval rows come before the rows of the exact tests and of N.
-  const compared = () => tableAfter(report(), '### Decision: dev').slice(-10, -6);
+  // The shared-cases row, the three interval rows, and the shared-case escaped row come before the rows of the exact
+  // tests and of N.
+  const compared = () => tableAfter(report(), '### Decision: dev').slice(-11, -6);
   // C1-low finds D1 and escapes the fewest, but the report takes no reference from the results.
   assert.throws(() => reportCommand(ws, { arms }), /^Error: report needs --reference <column>/);
   assert.equal(fs.existsSync(path.join(ws, 'report.md')), false);
@@ -437,6 +438,7 @@ test('report --reference compares every arm column with the named folder, and re
     '| Cases shared with C1-low-fast | - | 1 |',
     '| Round 1 recall difference from C1-low-fast, 90% interval | - | [0.33, 0.33] |',
     '| Escaped per 50 known difference from C1-low-fast, 90% interval | - | [-16.67, -16.67] |',
+    '| Escaped per 50 known on the cases shared with C1-low-fast (this column / C1-low-fast) | - | 33.33 / 50.00 |',
     '| Loop seconds difference from C1-low-fast, 90% interval | - | [90.0, 90.0] |',
   ];
   reportCommand(ws, { arms, reference: 'C1-low-fast' });

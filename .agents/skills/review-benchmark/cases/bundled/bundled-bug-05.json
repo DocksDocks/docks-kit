@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-05",
+  "kind": "code",
+  "split": "dev",
+  "issue": 77,
+  "round": 1,
+  "base": "408561bc8c821eb7a5834e48facc146f7375e145",
+  "head": "92efdd73ee439f42c2a5761b9ff2dae1c0693627",
+  "patch": "bundled-bug-05.patch",
+  "plan": "bundled-bug-05-plan.md",
+  "known": [
+    {
+      "id": "BB05",
+      "locator": "cli/src/engine-native/ompFastMode.ts:38-41",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "`toggleOpenAiFast` turns fast mode off for every tier other than `none`, not only for `priority`. A deployed config with `tier.openai: ultrafast`, or any other tier, so switches to `none`, but the doc comment says that only `priority` counts as on and that any other tier switches to plain fast (`priority`). `docks-kit omp --fast` then turns fast mode off for a user who asked to turn it on. The pull request adds ompFastMode.ts: the base has no such file and no fast toggle.",
+      "fix": "bundled-bug-05.BB05.fix.patch"
+    }
+  ]
+}

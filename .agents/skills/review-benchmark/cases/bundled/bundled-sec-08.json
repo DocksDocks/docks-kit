@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-08",
+  "kind": "code",
+  "split": "dev",
+  "issue": 9,
+  "round": 1,
+  "base": "c727ba5b609a5b972f95ed49eb84c052d0b45f62",
+  "head": "7ff2330cd49ea5ed27609d05430eb910cfb78e3c",
+  "patch": "bundled-sec-08.patch",
+  "plan": "bundled-sec-08-plan.md",
+  "known": [
+    {
+      "id": "BS08",
+      "locator": "cli/src/engine-native/claudeRuntime.ts:88-97",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`posixLiteral` puts the value between single quotes, but it does not escape a single quote in the value. `statusLineCommand` builds the shell command of the Claude Code statusline from the Bun path and the statusline script path, so a path with a `'`, from the home folder or from BUN_INSTALL, ends the quote, and the rest of the path runs as shell code each time Claude Code draws the statusline (CWE-78, command injection). The pull request adds claudeRuntime.ts: the base has no such file and no statusline command builder.",
+      "fix": "bundled-sec-08.BS08.fix.patch"
+    }
+  ]
+}

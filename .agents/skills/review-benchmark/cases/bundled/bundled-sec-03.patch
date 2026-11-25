@@ -1,0 +1,14 @@
+diff --git a/.agents/skills/review-benchmark/scripts/keys.mjs b/.agents/skills/review-benchmark/scripts/keys.mjs
+index aba29bee..5d9783f2 100755
+--- a/.agents/skills/review-benchmark/scripts/keys.mjs
++++ b/.agents/skills/review-benchmark/scripts/keys.mjs
+@@ -165,7 +165,8 @@ function mismatches(expected, found, hashOf) {
+ export function tarBytes(keys, manifest) {
+   const names = fs.readdirSync(keys).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+   if (names.includes(MANIFEST)) fail(`the keys folder must not hold a file named ${MANIFEST}`);
+-  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'keys-manifest-'));
++  const staging = path.join(os.tmpdir(), 'keys-manifest');
++  fs.mkdirSync(staging, { recursive: true });
+   try {
+     const file = path.join(staging, MANIFEST);
+     fs.writeFileSync(file, manifest, { mode: 0o600 });

@@ -79,6 +79,7 @@ test('the code-loop rows leave out single reviews, and the fixer median leaves o
     '| Reads of missing paths',
     '| Round 1 recall difference from low-fast, 90% interval',
     '| Escaped per 50 known difference from low-fast, 90% interval',
+    '| Escaped per 50 known on the cases shared with low-fast (this column / low-fast)',
     '| Loop seconds difference from low-fast, 90% interval',
     '| Cases with an escaped difference from low-fast',
     '| Wrong findings more than low-fast, one-sided exact Poisson p',
@@ -88,7 +89,7 @@ test('the code-loop rows leave out single reviews, and the fixer median leaves o
     '| Escaped per 50 known difference from low-fast, each case weighs 1 (N)',
   ]);
   // Loops only: code-7 differs by 80 seconds and code-8 by 40. The single reviews, 100 seconds each, stay out.
-  assert.equal(decision[15], '| Loop seconds difference from low-fast, 90% interval | [40.0, 80.0] | - |');
+  assert.equal(decision[16], '| Loop seconds difference from low-fast, 90% interval | [40.0, 80.0] | - |');
   assert.deepEqual(tableAfter(report, '### Code loops: dev'), [
     '| Measure | low | low-fast |',
     '|---|---:|---:|',
@@ -263,6 +264,7 @@ test('report --arms gives one column per arm folder and compares it with the nam
     '| Cases shared with C1-xhigh-fast | - | 2 |',
     '| Round 1 recall difference from C1-xhigh-fast, 90% interval | - | [-1.00, -0.50] |',
     '| Escaped per 50 known difference from C1-xhigh-fast, 90% interval | - | [0.00, 50.00] |',
+    '| Escaped per 50 known on the cases shared with C1-xhigh-fast (this column / C1-xhigh-fast) | - | 16.67 / 0.00 |',
     '| Loop seconds difference from C1-xhigh-fast, 90% interval | - | [10.0, 60.0] |',
     '| Cases with an escaped difference from C1-xhigh-fast | - | 1 |',
     '| Wrong findings more than C1-xhigh-fast, one-sided exact Poisson p | - | 1.0000 |',
@@ -394,6 +396,7 @@ test('arm columns can hold different cases, and the decision table says how many
     '| Cases shared with S1-xhigh-fast | 2 | - | 1 |',
     '| Round 1 recall difference from S1-xhigh-fast, 90% interval | [-0.50, 0.00] | - | [0.00, 0.00] |',
     '| Escaped per 50 known difference from S1-xhigh-fast, 90% interval | [0.00, 0.00] | - | [0.00, 0.00] |',
+    '| Escaped per 50 known on the cases shared with S1-xhigh-fast (this column / S1-xhigh-fast) | 0.00 / 0.00 | - | 0.00 / 0.00 |',
     '| Loop seconds difference from S1-xhigh-fast, 90% interval | - | - | - |',
     '| Cases with an escaped difference from S1-xhigh-fast | 0 | - | 0 |',
     '| Wrong findings more than S1-xhigh-fast, one-sided exact Poisson p | 1.0000 | - | 1.0000 |',

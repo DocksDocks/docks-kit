@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/scratch.ts b/cli/src/engine-native/scratch.ts
+index 0bef960d..3932ea64 100644
+--- a/cli/src/engine-native/scratch.ts
++++ b/cli/src/engine-native/scratch.ts
+@@ -48,7 +48,7 @@ export function isSameOrInside(parent: string, child: string): boolean {
+ /** True when `child` lies strictly below `parent`. */
+ export function isStrictlyInside(parent: string, child: string): boolean {
+   const path = relative(parent, child);
+-  return path !== "" && !path.startsWith("../") && !isAbsolute(path);
++  return path !== "" && !path.startsWith("..") && !isAbsolute(path);
+ }
+ 
+ function realpathOrUndefined(path: string): string | undefined {

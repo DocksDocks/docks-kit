@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-06",
+  "kind": "code",
+  "split": "dev",
+  "issue": 60,
+  "round": 1,
+  "base": "857f7f7d590011f56c614b21d4447736c2502831",
+  "head": "ae4c7ba56cf781da0cdecee3525dad0945e20adb",
+  "patch": "bundled-bug-06.patch",
+  "plan": "bundled-bug-06-plan.md",
+  "known": [
+    {
+      "id": "BB06",
+      "locator": "cli/src/engine-native/ompRemovals.ts:106-114",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "The ancestor loop of `deletePath` stops only when a mapping holds more than one key. So a parent mapping that still holds one other key is removed together with that key. Pruning `statusLine.preset` then also deletes the user setting `statusLine.compactThinkingLevel`, which the doc comment of `deletePath` says must survive, and every sync loses such user settings from the deployed omp config.yml. The pull request adds ompRemovals.ts: the base has no such file and no retired-key prune.",
+      "fix": "bundled-bug-06.BB06.fix.patch"
+    }
+  ]
+}

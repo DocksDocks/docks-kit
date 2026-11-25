@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/ompOverlay.ts b/cli/src/engine-native/ompOverlay.ts
+index 90330059..e920982f 100644
+--- a/cli/src/engine-native/ompOverlay.ts
++++ b/cli/src/engine-native/ompOverlay.ts
+@@ -86,7 +86,7 @@ export function parseFreeModels(catalogJson: unknown): ReadonlyArray<CatalogMode
+     const cost = record["cost"]
+     if (typeof cost !== "object" || cost === null || Array.isArray(cost)) continue
+     const charges = cost as Record<string, unknown>
+-    if (charges["input"] !== 0 || charges["output"] !== 0) continue
++    if (charges["input"] !== 0 && charges["output"] !== 0) continue
+     const rawName = record["name"]
+     const name = typeof rawName === "string" && rawName.length > 0 ? rawName : selector
+     const rawLevels = record["thinking"]

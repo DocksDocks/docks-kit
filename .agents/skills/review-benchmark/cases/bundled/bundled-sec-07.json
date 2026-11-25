@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-07",
+  "kind": "code",
+  "split": "dev",
+  "issue": 4,
+  "round": 1,
+  "base": "7ee6a0de28bdae9109282cfba3acc5803df69242",
+  "head": "2ef6976d8bd04ee70dfd9774b02021b7d96899f2",
+  "patch": "bundled-sec-07.patch",
+  "plan": "bundled-sec-07-plan.md",
+  "known": [
+    {
+      "id": "BS07",
+      "locator": ".github/workflows/build-binaries.yml:47-51",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "The step that installs the pinned toolchain first downloads the rustup installer over plain `http://sh.rustup.rs` and pipes it into `sh`. Nothing checks the script, so a network attacker between the runner and the host can answer the first request and run any shell code in the build job (CWE-494, download of code without an integrity check). That job builds the four `relay` binaries. The maintainer commits these artifacts into `plugins/session-relay/bin/` with a SHA256SUMS file made from them, so the checksum gate of `release.mjs` accepts tampered binaries, and every plugin user runs them. The header comment says that the workflow uses no third-party toolchain action because both runner images preinstall rustup. The pull request adds build-binaries.yml: the base has no such file, no Rust crate, and no binary build. The only other Rust setup, in ci.yml, is also new in the pull request and uses the preinstalled rustup.",
+      "fix": "bundled-sec-07.BS07.fix.patch"
+    }
+  ]
+}

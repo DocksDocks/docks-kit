@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-06",
+  "kind": "code",
+  "split": "dev",
+  "issue": 138,
+  "round": 1,
+  "base": "dd49c35661363eb865f0e9d301a12b42d5b0697f",
+  "head": "4f9f3aef3077721e0e99346b3bfa4aaa6b2b341c",
+  "patch": "bundled-sec-06.patch",
+  "plan": "bundled-sec-06-plan.md",
+  "known": [
+    {
+      "id": "BS06",
+      "locator": "SoT/.omp/plugin/extensions/pluginUpgrades.ts:72-89; SoT/.omp/plugin/extensions/pluginUpgrades.ts:92-100",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`parseUpgradeEvent` checks only the plugin id against SAFE_TOKEN, not the `before` and `after` versions. The versions come from the installed plugin inventory, so the author of a plugin chooses them, and `upgradeReminder` puts each one word for word into the `additionalContext` of every main omp session. A plugin version with text such as an instruction to the agent so goes into the model context as a kit reminder (CWE-74, prompt injection). The pull request adds pluginUpgrades.ts: the base has no such file and no upgrade reminder.",
+      "fix": "bundled-sec-06.BS06.fix.patch"
+    }
+  ]
+}

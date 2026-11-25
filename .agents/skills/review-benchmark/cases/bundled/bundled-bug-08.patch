@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/liveModels.ts b/cli/src/engine-native/liveModels.ts
+index a3e1ecc0..ddef7b2b 100644
+--- a/cli/src/engine-native/liveModels.ts
++++ b/cli/src/engine-native/liveModels.ts
+@@ -111,7 +111,7 @@ function cachedClaudeCatalog(payload: string): LiveLookup | undefined {
+ 
+ async function claudeCatalog(inputs: LiveCatalogInputs): Promise<Lookup> {
+   if (!inputs.refresh) {
+-    const cached = readCache(inputs.home, ANTHROPIC_CACHE_KEY, ANTHROPIC_CACHE_TTL, inputs.now());
++    const cached = readCache(inputs.home, ANTHROPIC_CACHE_KEY, inputs.now(), ANTHROPIC_CACHE_TTL);
+     if (cached !== undefined) {
+       const catalog = cachedClaudeCatalog(cached);
+       if (catalog !== undefined) return catalog;

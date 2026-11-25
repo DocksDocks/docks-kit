@@ -1,0 +1,26 @@
+diff --git a/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs b/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
+index 22eda4a6..f542b363 100755
+--- a/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
++++ b/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
+@@ -404,17 +404,17 @@ const runReviewer = () =>
+       // second half of `docs/plans/AGENTS.md:224-226` and nothing more. The
+       // normalized verdict stays a SEPARATE artifact (`resultFile`), because a
+       // reply that fails validation must still be recoverable verbatim.
+-      if (code !== 0) {
+-        reject(new Error(`reviewer exited ${signal ?? code}: ${Buffer.concat(errors).toString().slice(0, 200)}`));
+-        return;
+-      }
+       const raw = Buffer.concat(chunks);
+       try {
+         fs.writeFileSync(RAW_STDOUT, raw);
+       } catch (error) {
+         reject(error);
+         return;
+       }
++      if (code !== 0) {
++        reject(new Error(`reviewer exited ${signal ?? code}: ${Buffer.concat(errors).toString().slice(0, 200)}`));
++        return;
++      }
+       resolve(raw.toString());
+     });
+   });

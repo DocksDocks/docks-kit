@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-05",
+  "kind": "code",
+  "split": "dev",
+  "issue": 90,
+  "round": 1,
+  "base": "4998194985b8c5c57a0b10071acd70b05bd091dd",
+  "head": "b0ba237e2a27a4bf70d5160b050e036329683b87",
+  "patch": "bundled-sec-05.patch",
+  "plan": "bundled-sec-05-plan.md",
+  "known": [
+    {
+      "id": "BS05",
+      "locator": "SoT/.omp/plugin/extensions/hygiene.ts:329-340",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`run` gives `execFile` the option `shell: process.platform === \"win32\"`. So on Windows, Node joins the arguments into one command line without quotes, and `cmd.exe` parses it. The `scratch_remove` tool checks only that each path is absolute, then gives the paths to `run` through `runDocksKit`. A path such as `C:\\Temp\\x & <command>`, from the agent or from text that the agent read, so runs `<command>` as the user (CWE-78, command injection). The doc comment of `run` promises no shell and one literal argv entry for each argument, and `resolveDocksKit` accepts only `docks-kit.exe` because the call has no shell. The pull request adds hygiene.ts: the base has no such file, no omp extension folder, and no helper that runs docks-kit or another command for an omp tool.",
+      "fix": "bundled-sec-05.BS05.fix.patch"
+    }
+  ]
+}

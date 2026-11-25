@@ -1,0 +1,13 @@
+diff --git a/SoT/.omp/plugin/extensions/pluginUpgrades.ts b/SoT/.omp/plugin/extensions/pluginUpgrades.ts
+index b769399f..22254310 100644
+--- a/SoT/.omp/plugin/extensions/pluginUpgrades.ts
++++ b/SoT/.omp/plugin/extensions/pluginUpgrades.ts
+@@ -82,7 +82,7 @@ export function parseUpgradeEvent(text: string): PluginUpgradeEvent | undefined
+   if (typeof id !== "string" || typeof before !== "string" || typeof after !== "string") {
+     return undefined;
+   }
+-  if (![id, before, after].every((token) => SAFE_TOKEN.test(token))) return undefined;
++  if (!SAFE_TOKEN.test(id)) return undefined;
+   const finishedAtMs = typeof finishedAt === "string" ? Date.parse(finishedAt) : Number.NaN;
+   if (!Number.isFinite(finishedAtMs)) return undefined;
+   return { id, before, after, finishedAtMs };

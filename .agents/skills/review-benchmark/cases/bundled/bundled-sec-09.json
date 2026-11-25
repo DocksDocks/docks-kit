@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-09",
+  "kind": "code",
+  "split": "dev",
+  "issue": 177,
+  "round": 1,
+  "base": "60d4afd8664d9afe2a0194d0da3b0d6912624264",
+  "head": "05ecf54a2dae8e2629ebcd1e2a238c1c12dd4b0b",
+  "patch": "bundled-sec-09.patch",
+  "plan": "bundled-sec-09-plan.md",
+  "known": [
+    {
+      "id": "BS09",
+      "locator": ".agents/skills/verify/scripts/omp-smoke.mjs:87-95",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`isolatedEnv` copies the whole parent environment except the `PI_` and `OMP_` variables, not only PATH, HOME, USER, LANG, TERM, TMPDIR, and the LC_ variables. So the API keys and tokens of the operator, for example ANTHROPIC_API_KEY, OPENAI_API_KEY, or GH_TOKEN, reach the omp child that installs and runs the plugins under test, and that child or a plugin in it can use or send them (CWE-526, secret exposure). The smoke exists to run omp isolated from the real account. The pull request adds omp-smoke.mjs: the base has no such file and no omp smoke.",
+      "fix": "bundled-sec-09.BS09.fix.patch"
+    }
+  ]
+}

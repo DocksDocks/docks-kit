@@ -1,0 +1,13 @@
+diff --git a/cli/src/checklistPrompt.ts b/cli/src/checklistPrompt.ts
+index b5fb27d4..b0ba7db1 100644
+--- a/cli/src/checklistPrompt.ts
++++ b/cli/src/checklistPrompt.ts
+@@ -179,7 +179,7 @@ function nextAction<A>(
+   // The cursor wraps over the items and the Save row.
+   const moveBy = (step: number): ChecklistAction<A> => ({
+     _tag: "NextFrame",
+-    state: { ...state, cursor: (state.cursor + step + rows) % saveRow },
++    state: { ...state, cursor: (state.cursor + step + rows) % rows },
+   });
+   switch (key.name) {
+     case "up":

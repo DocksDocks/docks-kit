@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-09",
+  "kind": "code",
+  "split": "dev",
+  "issue": 49,
+  "round": 1,
+  "base": "a7959141117582e12f3b09b7be98f6b15191c8f5",
+  "head": "02d17052b2bd9e9d42daff7beee60e0cb8a19e84",
+  "patch": "bundled-bug-09.patch",
+  "plan": "bundled-bug-09-plan.md",
+  "known": [
+    {
+      "id": "BB09",
+      "locator": "cli/src/engine-native/ompOverlay.ts:86-89",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "`parseFreeModels` skips a catalog row only when both the input price and the output price are not 0. A model with free input and paid output, or the reverse, so counts as free. `docks-kit omp` can then offer it, remember it, and run every model role on it, so a session that the user starts as free causes paid spend, which the free-session launcher exists to prevent. The pull request adds ompOverlay.ts: the base has no such file and no free-model filter.",
+      "fix": "bundled-bug-09.BB09.fix.patch"
+    }
+  ]
+}

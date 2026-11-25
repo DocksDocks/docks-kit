@@ -166,10 +166,13 @@ test('case writes the base-instructions folder of a code case, and its prompt an
   assert.ok(
     prompt.some((line) => line.startsWith('- The base instructions folder holds') && line.includes('MANIFEST')),
   );
-  // The prompt forbids the pages of the benchmark repository under its current name and its former name.
+  // The prompt forbids the pages of the benchmark repository under its current name and its former name, and of the
+  // public repository with its earlier history.
   assert.ok(
     prompt.some((line) =>
-      line.includes('but no page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks. You may also read'),
+      line.includes(
+        'but no page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks, or of the DocksDocks/public repository. You may also read',
+      ),
     ),
   );
   const scope = score.readScope(reads(path.join(folder, 'AGENTS.md'), path.join(folder, 'src')), { runDir });

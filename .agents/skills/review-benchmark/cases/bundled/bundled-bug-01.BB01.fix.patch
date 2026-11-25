@@ -1,0 +1,13 @@
+diff --git a/cli/src/skills/markdownHeadings.ts b/cli/src/skills/markdownHeadings.ts
+index 62524c90..d8701a98 100644
+--- a/cli/src/skills/markdownHeadings.ts
++++ b/cli/src/skills/markdownHeadings.ts
+@@ -39,7 +39,7 @@ interface Chunk {
+ function trailing(chunks: ReadonlyArray<Chunk>, length: number): ReadonlyArray<Chunk> | null {
+   let total = 0;
+   let start = chunks.length;
+-  while (start > 1 && total < length) {
++  while (start > 0 && total < length) {
+     start -= 1;
+     total += chunks[start]?.text.length ?? 0;
+   }

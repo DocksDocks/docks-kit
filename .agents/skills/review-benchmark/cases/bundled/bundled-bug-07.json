@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-07",
+  "kind": "code",
+  "split": "dev",
+  "issue": 64,
+  "round": 1,
+  "base": "ca8a935c10cd0878c34aabcf18be2bd95f303c31",
+  "head": "cd1e2acceda79ad8dd492d1a2a54b548ca4dee75",
+  "patch": "bundled-bug-07.patch",
+  "plan": "bundled-bug-07-plan.md",
+  "known": [
+    {
+      "id": "BB07",
+      "locator": "cli/src/engine-native/kitDb.ts:73-82",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "`migrate` reads `user_version` before `BEGIN IMMEDIATE` and then applies `MIGRATIONS.slice(current)` in the transaction without a second read under the lock. When two docks-kit processes open a new kit.db at the same time, both read version 0; the second gets the lock after the first commits and runs the CREATE TABLE migration again, so it fails with a table that already exists and its command stops. A version that another kit wrote between the read and the lock is also not checked again. The pull request adds kitDb.ts: the base has no such file and no SQLite store.",
+      "fix": "bundled-bug-07.BB07.fix.patch"
+    }
+  ]
+}

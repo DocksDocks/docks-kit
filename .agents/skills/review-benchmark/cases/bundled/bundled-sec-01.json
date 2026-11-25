@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-01",
+  "kind": "code",
+  "split": "dev",
+  "issue": 159,
+  "round": 1,
+  "base": "ccfa93cc8074fab495e30abf3fd9e53dc856a8e7",
+  "head": "0b33f344e22c9ff5b646daf9036fb981dc47e5b1",
+  "patch": "bundled-sec-01.patch",
+  "plan": "bundled-sec-01-plan.md",
+  "known": [
+    {
+      "id": "BS01",
+      "locator": "plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh:34-36",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "The script makes its work folder at the fixed name `${TMPDIR:-/tmp}/checkout-state.<pid>` with `mkdir -p`, not with `mktemp -d`. `mkdir -p` accepts a folder or a link that another local user made first, and a process id is easy to guess (CWE-377). That user can then read the listing, replace `listed`, `paths`, or `lines` to hide edits from the before and after comparison, or put links in the folder so that the redirections of the script write over files of the victim. The pull request adds checkout-state.sh: the base has no such file.",
+      "fix": "bundled-sec-01.BS01.fix.patch"
+    }
+  ]
+}
