@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -354,6 +355,8 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
         "exported variables that change how Bash starts, runs, and finds commands",
         "export FUNCNEST=2 BASH_COMPAT=31 POSIXLY_CORRECT=1 EXECIGNORE='*'",
       ],
+      // With alias expansion on, an alias that replaces the first word of the start line would take the script.
+      ["an alias named command", "shopt -s expand_aliases; alias command=:"],
     ])("gives the normal result with %s in the calling shell", (_, before) => {
       const fx = fixture();
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), { before });
@@ -399,10 +402,66 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
 
     it("starts bash without the exported variables that change how bash starts and runs", () => {
       const fx = fixture();
-      // The bash wrapper first on PATH reports each such variable in its environment, then starts the real bash.
-      // It reads `env`, not its own shell variables: when /bin/sh is Bash (macOS), that shell sets POSIXLY_CORRECT
-      // for itself.
-      const names = [
+      // Both wrappers below take a start of the scan shell to be a start with an argument that is exactly -s.
+      const findScanShell =
+        'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done';
+      // A forwarding bash in a folder whose name holds a space. It records each start of the scan shell that
+      // came through the case wrapper, then runs the real bash. It finds its files through $0, so its shell
+      // source holds no path.
+      const forwarder = join(fx.root, "bash dir");
+      mkdirSync(forwarder);
+      symlinkSync(realCommand(fx, "bash"), join(forwarder, "real-bash"));
+      writeFileSync(
+        join(forwarder, "bash"),
+        [
+          "#!/bin/sh",
+          'here=$(dirname "$0")',
+          findScanShell,
+          'if [ -n "$scan_shell" ] && [ "$SCAN_PROBE" = wrapper ]; then echo scan-shell >> "$here/launches"; fi',
+          'exec "$here/real-bash" "$@"',
+          "",
+        ].join("\n"),
+      );
+      chmodSync(join(forwarder, "bash"), 0o755);
+      // The Bash that the case wrapper gets is the forwarding bash: a path with a space, which a #! line cannot hold.
+      const resolvedBash = realCommand(
+        { ...fx, env: { ...fx.env, PATH: `${forwarder}:${fx.env["PATH"]}` } },
+        "bash",
+      );
+      expect(resolvedBash).toBe(join(forwarder, "bash"));
+      // The case wrapper, first on PATH, writes the environment of the scan shell as NUL-ended records. It reads
+      // the exported entries (`env`), not its own shell variables: when /bin/sh is Bash (macOS), that shell sets
+      // POSIXLY_CORRECT for itself without exporting it. The /dev/null input keeps the script of the scan shell
+      // from an `env` wrapper on PATH that reads its input.
+      const capture = join(fx.root, "scan-shell-env");
+      const wrapper = [
+        findScanShell,
+        'if [ -n "$scan_shell" ]; then',
+        `  env -0 < /dev/null > ${shellQuote(capture)} || exit 97`,
+        "  export SCAN_PROBE=wrapper",
+        "fi",
+        `exec ${shellQuote(resolvedBash)} "$@"`,
+      ].join("\n");
+      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
+        env: shim(fx, "bash", wrapper),
+        before:
+          "export POSIXLY_CORRECT=1 BASH_COMPAT=31 BASH_XTRACEFD=2 TMOUT=1 FUNCNEST=2 EXECIGNORE=nothing",
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(lines(run.stdout)).toEqual(NORMAL);
+      expect(
+        existsSync(capture),
+        "the case wrapper did not capture the environment of the scan shell",
+      ).toBe(true);
+      const records = readFileSync(capture, "utf8");
+      expect(records.endsWith("\0"), "the environment capture is incomplete").toBe(true);
+      const entries = records.slice(0, -1).split("\0");
+      for (const entry of entries) {
+        expect(entry, "an environment record without a name").toMatch(/^[^=]+=/);
+      }
+      const names = entries.map((entry) => entry.slice(0, entry.indexOf("=")));
+      expect(names).toContain("PATH");
+      const startupNames = [
         "POSIXLY_CORRECT",
         "BASH_COMPAT",
         "BASH_XTRACEFD",
@@ -410,16 +469,8 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
         "FUNCNEST",
         "EXECIGNORE",
       ];
-      const report = `env | grep -E '^(${names.join("|")})=' | sed 's/=.*/ reached bash/' >&2`;
-      const realBash = realCommand(fx, "bash");
-      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        env: shim(fx, "bash", `${report}\nexec ${shellQuote(realBash)} "$@"`, `#!${realBash}`),
-        before:
-          "export POSIXLY_CORRECT=1 BASH_COMPAT=31 BASH_XTRACEFD=2 TMOUT=1 FUNCNEST=2 EXECIGNORE=nothing",
-      });
-      expect(run.stderr).not.toContain("reached bash");
-      expect(run.status, run.stderr).toBe(0);
-      expect(lines(run.stdout)).toEqual(NORMAL);
+      expect(names.filter((name) => startupNames.includes(name))).toEqual([]);
+      expect(readFileSync(join(forwarder, "launches"), "utf8")).toBe("scan-shell\n");
     });
 
     it("waits for a slow scan when the caller exports a read timeout", () => {
