@@ -605,7 +605,7 @@ function checkBundledRuns(command, folders) {
   }
   if (unrecorded.length) {
     fail(
-      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${listSome(unrecorded, LISTED_READS)}; prepare them again with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${listSome(unrecorded, LISTED_READS)}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
     );
   }
   if (others.length) {

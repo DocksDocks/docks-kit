@@ -485,7 +485,7 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
   for (const id of ['bundled-bug-13', 'bundled-bug-14']) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const before = readText(path.join(run('bundled-bug-15'), 'meta.json'));
   const refusal = (command) =>
-    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; prepare them again with prepare.mjs case, which records omp ${VERIFIED_OMP}`;
+    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${VERIFIED_OMP}`;
   const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
   assert.equal(transcripts.status, 1, transcripts.stderr);
   assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
