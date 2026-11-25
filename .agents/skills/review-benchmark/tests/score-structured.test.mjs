@@ -497,28 +497,37 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
 });
 
 test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
-  // A copy of the scripts whose vendored reviewer has a JSON Schema root: `required` is no JTD keyword, so the copy
-  // would not check the required fields.
-  const repo = path.join(scratch(), 'repo');
-  fs.mkdirSync(repo);
-  spawnSync('git', ['init', '-q', repo]);
-  const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
-  const agent = path.join(repo, '.agents/skills/review-benchmark/bundled/omp-19.1.1/reviewer.md');
-  put(
-    path.dirname(agent),
-    'reviewer.md',
-    '---\nname: reviewer\noutput:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n---\nReview.\n',
-  );
-  const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
-  put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');
-  const message = `${agent}: score.mjs cannot check this output schema: output has the keywords required; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`;
-  for (const args of [
-    ['findings', ws],
-    ['transcripts', ws, '--omp-sessions', sessions],
-  ]) {
-    const child = scoreChild(args, script);
-    assert.equal(child.status, 1, child.stderr);
-    assert.equal(child.stderr.trim(), message);
+  // Copies of the scripts whose vendored reviewer has a schema that the scorer cannot check: a JSON Schema root, where
+  // `required` is no JTD keyword, so the copy would not check the required fields; and a nested `type` that is a list,
+  // not a text, so the copy would not check the type of that field.
+  const schemas = [
+    {
+      output: 'output:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n',
+      problem: 'output has the keywords required',
+    },
+    {
+      output: 'output:\n  properties:\n    findings:\n      elements:\n        properties:\n          priority:\n            type: [uint8]\n',
+      problem: 'output.properties.findings.elements.properties.priority.type ["uint8"] has no check',
+    },
+  ];
+  for (const { output, problem } of schemas) {
+    const repo = path.join(scratch(), 'repo');
+    fs.mkdirSync(repo);
+    spawnSync('git', ['init', '-q', repo]);
+    const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
+    const agent = path.join(repo, '.agents/skills/review-benchmark/bundled/omp-19.1.1/reviewer.md');
+    put(path.dirname(agent), 'reviewer.md', `---\nname: reviewer\n${output}---\nReview.\n`);
+    const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
+    put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');
+    const message = `${agent}: score.mjs cannot check this output schema: ${problem}; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`;
+    for (const args of [
+      ['findings', ws],
+      ['transcripts', ws, '--omp-sessions', sessions],
+    ]) {
+      const child = scoreChild(args, script);
+      assert.equal(child.status, 1, child.stderr);
+      assert.equal(child.stderr.trim(), message);
+    }
+    assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
   }
-  assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
 });

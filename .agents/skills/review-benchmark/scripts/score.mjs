@@ -524,7 +524,10 @@ function schemaFormProblems(schema, at) {
     case 'elements':
       return schemaFormProblems(schema.elements, `${at}.elements`);
     case 'type':
-      return Object.hasOwn(JTD_JSON_TYPES, schema.type) ? [] : [`${at}.type ${JSON.stringify(schema.type)} has no check`];
+      // Object.hasOwn turns a list key such as ['uint8'] into the text 'uint8', so check the text first.
+      return typeof schema.type === 'string' && Object.hasOwn(JTD_JSON_TYPES, schema.type)
+        ? []
+        : [`${at}.type ${JSON.stringify(schema.type)} has no check`];
     case 'values':
       return schemaFormProblems(schema.values, `${at}.values`);
     case 'properties': {
