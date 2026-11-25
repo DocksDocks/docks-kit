@@ -179,10 +179,14 @@ function largeRepo(fx: Fixture, count: number): string {
 const pairRepo = (fx: Fixture, dir: string): string =>
   repo(fx, dir, { "a.py": "a = 1234\n", "b.py": "b = 1234\n" });
 
-/** A UTF-8 locale of this host, if it has one. */
-const UTF8_LOCALE = lines(spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout ?? "").find(
-  (name) => /utf-?8$/i.test(name),
-);
+const WINDOWS = process.platform === "win32";
+
+/** A UTF-8 locale of this host, if it has one; not probed on Windows, where the suite does not run. */
+const UTF8_LOCALE = WINDOWS
+  ? undefined
+  : lines(
+      spawnSync("locale", ["-a"], { encoding: "utf8", timeout: SPAWN_TIMEOUT_MS }).stdout ?? "",
+    ).find((name) => /utf-?8$/i.test(name));
 /**
  * Environment names that the commands of the scan may get. The shell of a shim adds PWD, and also SHLVL and `_`
  * when `/bin/sh` is Bash (macOS).
@@ -190,7 +194,7 @@ const UTF8_LOCALE = lines(spawnSync("locale", ["-a"], { encoding: "utf8" }).stdo
 const KEPT_NAMES =
   "^(PATH|HOME|TMPDIR|XDG_CONFIG_HOME|LANG|LC_[A-Z_]*|GIT_[A-Za-z0-9_]*|PWD|SHLVL|_)=";
 
-describe.skipIf(process.platform === "win32")("code-guardrails scan block", () => {
+describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
   describe("earlier behavior", () => {
     it("lists each value that 2 or more files hold, with every location, under any Git display setting", () => {
       const fx = fixture();
@@ -372,6 +376,15 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       // The caller traces its own launch line; a traced scan shell would also print its scan calls.
       expect(run.stderr).not.toContain("+ scan -w");
       expect(existsSync(marker)).toBe(false);
+    });
+
+    it("keeps the script of the scan shell from an env wrapper that reads its input", () => {
+      const fx = fixture();
+      // The wrapper reads all of its input when it lists the environment or would start a shell.
+      const drain = `case " $* " in *" -0 "* | *" bash "*) cat > /dev/null ;; esac\nexec ${shellQuote(realCommand(fx, "env"))} "$@"`;
+      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), { env: shim(fx, "env", drain) });
+      expect(run.status, run.stderr).toBe(0);
+      expect(lines(run.stdout)).toEqual(NORMAL);
     });
 
     it("waits for a slow scan when the caller exports a read timeout", () => {

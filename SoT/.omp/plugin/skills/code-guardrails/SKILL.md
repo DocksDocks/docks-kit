@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-25"
-  content_hash: "42c9ce4ffda0322c5a63124e30d535cf24e026f350daaf8eae603e3742d37493"
+  content_hash: "5612ff4476f0685e4d3ea79a092678610868d3e7fe9f74354f6b9a7c2e6fc68b"
 ---
 
 # Code Guardrails
@@ -204,13 +204,14 @@ gives wrong results; leave such a file out with a pathspec.
 ```bash
 # Run the scan in a new bash in privileged mode (-p): it reads no startup file and no
 # BASH_ENV, takes no function from the environment, and ignores SHELLOPTS and
-# BASHOPTS there. env also removes the exported variables that change how bash runs
-# (POSIXLY_CORRECT, BASH_COMPAT, TMOUT, FUNCNEST, EXECIGNORE). So the functions, debug
-# hooks, variables, and settings of the calling shell do not change what runs inside
-# it. A debug hook of the calling shell still runs before this one line, as it runs
-# before any command.
-command env -u POSIXLY_CORRECT -u BASH_COMPAT -u TMOUT -u FUNCNEST -u EXECIGNORE \
-  bash --noprofile --norc -p -s <<'SCAN'
+# BASHOPTS there. So the functions, debug hooks, variables, and settings of the
+# calling shell do not change what runs inside it. A debug hook of the calling shell
+# still runs before this one line, as it runs before any command. bash itself reads
+# the script, so no other command can take it from the input.
+command bash --noprofile --norc -p -s <<'SCAN'
+# Undo the exported variables that change how bash runs, before any other command.
+set +o posix
+unset -v POSIXLY_CORRECT BASH_COMPAT TMOUT FUNCNEST EXECIGNORE
 # The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,
 # XDG_CONFIG_HOME (Git reads its user config from HOME and XDG_CONFIG_HOME), LANG,
 # LC_*, and GIT_*. `env -0` lists every entry of the real environment, also the
