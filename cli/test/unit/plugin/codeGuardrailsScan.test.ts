@@ -402,9 +402,12 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
 
     it("starts bash without the exported variables that change how bash starts and runs", () => {
       const fx = fixture();
-      // A forwarding bash in a folder whose name holds a space. It records each start of the scan shell (an
-      // argument that is exactly -s) that came through the case wrapper, then runs the real bash. It finds its
-      // files through $0, so its shell source holds no path.
+      // Both wrappers below take a start of the scan shell to be a start with an argument that is exactly -s.
+      const findScanShell =
+        'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done';
+      // A forwarding bash in a folder whose name holds a space. It records each start of the scan shell that
+      // came through the case wrapper, then runs the real bash. It finds its files through $0, so its shell
+      // source holds no path.
       const forwarder = join(fx.root, "bash dir");
       mkdirSync(forwarder);
       symlinkSync(realCommand(fx, "bash"), join(forwarder, "real-bash"));
@@ -413,7 +416,7 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
         [
           "#!/bin/sh",
           'here=$(dirname "$0")',
-          'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done',
+          findScanShell,
           'if [ -n "$scan_shell" ] && [ "$SCAN_PROBE" = wrapper ]; then echo scan-shell >> "$here/launches"; fi',
           'exec "$here/real-bash" "$@"',
           "",
@@ -428,11 +431,11 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       expect(resolvedBash).toBe(join(forwarder, "bash"));
       // The case wrapper, first on PATH, writes the environment of the scan shell as NUL-ended records. It reads
       // the exported entries (`env`), not its own shell variables: when /bin/sh is Bash (macOS), that shell sets
-      // POSIXLY_CORRECT for itself without exporting it. `env -0` reads no input, so the script of the scan
-      // shell stays on standard input for Bash.
+      // POSIXLY_CORRECT for itself without exporting it. The /dev/null input keeps the script of the scan shell
+      // from an `env` wrapper on PATH that reads its input.
       const capture = join(fx.root, "scan-shell-env");
       const wrapper = [
-        'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done',
+        findScanShell,
         'if [ -n "$scan_shell" ]; then',
         `  env -0 < /dev/null > ${shellQuote(capture)} || exit 97`,
         "  export SCAN_PROBE=wrapper",
