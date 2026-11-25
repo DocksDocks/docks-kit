@@ -2,20 +2,20 @@
   "id": "bundled-sec-05",
   "kind": "code",
   "split": "dev",
-  "issue": 218,
+  "issue": 90,
   "round": 1,
-  "base": "2cea12110257296bfe098238c479487b578e81b7",
-  "head": "0409cb5da1416088cb1578bc6bb3692dcde2f14c",
+  "base": "4998194985b8c5c57a0b10071acd70b05bd091dd",
+  "head": "b0ba237e2a27a4bf70d5160b050e036329683b87",
   "patch": "bundled-sec-05.patch",
   "plan": "bundled-sec-05-plan.md",
   "known": [
     {
       "id": "BS05",
-      "locator": "cli/scripts/tarball-proof.sh:46-48; cli/scripts/tarball-proof.sh:127-136",
+      "locator": "SoT/.omp/plugin/extensions/hygiene.ts:329-340",
       "category": "code",
       "source": "seeded",
       "security": true,
-      "summary": "The build folder of part 4 is the fixed path `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tarball-proof-build`, made with `mkdir -p`, not a `mktemp -d` folder (CWE-377). Files that another user or an earlier run left there stay in the tree where `bun install` and `bun cli/scripts/build-bundle.ts` run, so a planted file can run code in the release job, or change the bundle that the proof compares with the packed bundle. The pull request adds tarball-proof.sh: the base has no such file, and part 4, the rebuild of the bundle from the tag with its build folder, is new; parts 1 to 3 come from release-cli.yml.",
+      "summary": "`run` gives `execFile` the option `shell: process.platform === \"win32\"`. So on Windows, Node joins the arguments into one command line without quotes, and `cmd.exe` parses it. The `scratch_remove` tool checks only that each path is absolute, then gives the paths to `run` through `runDocksKit`. A path such as `C:\\Temp\\x & <command>`, from the agent or from text that the agent read, so runs `<command>` as the user (CWE-78, command injection). The doc comment of `run` promises no shell and one literal argv entry for each argument, and `resolveDocksKit` accepts only `docks-kit.exe` because the call has no shell. The pull request adds hygiene.ts: the base has no such file, no omp extension folder, and no helper that runs docks-kit or another command for an omp tool.",
       "fix": "bundled-sec-05.BS05.fix.patch"
     }
   ]

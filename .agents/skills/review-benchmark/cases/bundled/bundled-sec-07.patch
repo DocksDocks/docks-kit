@@ -1,13 +1,12 @@
-diff --git a/cli/src/engine-native/bun.ts b/cli/src/engine-native/bun.ts
-index 4dd7b446..bfb66abb 100644
---- a/cli/src/engine-native/bun.ts
-+++ b/cli/src/engine-native/bun.ts
-@@ -42,7 +42,7 @@ function installBun(ctx: Ctx, services: EngineServices, pin: string, installer:
-     return
-   }
- 
--  const download = spawnSync("curl", ["-fsSL", "https://bun.sh/install", "-o", installer], { stdio: "ignore" })
-+  const download = spawnSync("curl", ["-fsSL", "http://bun.sh/install", "-o", installer], { stdio: "ignore" })
-   if (download.error === undefined && download.status === 0) {
-     spawnSync("bash", [installer, `bun-v${pin}`], { stdio: "ignore" })
-   }
+diff --git a/.github/workflows/build-binaries.yml b/.github/workflows/build-binaries.yml
+index 8c55ceee..3cea614b 100644
+--- a/.github/workflows/build-binaries.yml
++++ b/.github/workflows/build-binaries.yml
+@@ -46,6 +46,7 @@ jobs:
+         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools gcc-aarch64-linux-gnu
+       - name: "install the pinned toolchain (rust-toolchain.toml) + this runner's targets"
+         run: |
++          curl -fsSL http://sh.rustup.rs | sh -s -- -y --default-toolchain none
+           rustup toolchain install
+           rustup target add ${{ matrix.targets }}
+       - name: "build each target (--locked; release profile lives in Cargo.toml)"
