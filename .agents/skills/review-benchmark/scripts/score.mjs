@@ -507,29 +507,34 @@ const SCHEMA_KEYWORDS = new Set(['metadata', 'nullable', ...Object.values(SCHEMA
 
 // The reasons why schemaProblems cannot check the schema node `schema` at the place `at`, or none: a keyword of
 // another schema language or form (for example `required`, `anyOf`, `discriminator`, or `ref`), more than one form, a
-// type without a check (JTD_JSON_TYPES), or a keyword with a value of the wrong shape, in this node or below it.
-function schemaFormProblems(schema, at) {
+// type without a check (JTD_JSON_TYPES), a keyword with a value of the wrong shape, or a node inside itself (a YAML
+// alias can make one), in this node or below it. `ancestors` holds the nodes above `schema`.
+function schemaFormProblems(schema, at, ancestors = new Set()) {
   if (!isRecord(schema)) return [`${at} is not an object`];
+  if (ancestors.has(schema)) return [`${at} is a node that contains itself`];
   const keys = Object.keys(schema);
   const unknown = keys.filter((key) => !SCHEMA_KEYWORDS.has(key));
   if (unknown.length) return [`${at} has the keywords ${unknown.join(', ')}`];
   const forms = Object.keys(SCHEMA_FORMS).filter((form) => SCHEMA_FORMS[form].some((key) => keys.includes(key)));
   if (forms.length > 1) return [`${at} has more than one form: ${forms.join(', ')}`];
   if (Object.hasOwn(schema, 'nullable') && typeof schema.nullable !== 'boolean') return [`${at}.nullable is not true or false`];
+  // RFC 8927 section 2.2: the value of `metadata` is an object.
+  if (Object.hasOwn(schema, 'metadata') && !isRecord(schema.metadata)) return [`${at}.metadata is not an object`];
+  const below = new Set(ancestors).add(schema);
   switch (forms[0]) {
     case 'enum':
       return Array.isArray(schema.enum) && schema.enum.length && schema.enum.every((item) => typeof item === 'string')
         ? []
         : [`${at}.enum is not a list of texts`];
     case 'elements':
-      return schemaFormProblems(schema.elements, `${at}.elements`);
+      return schemaFormProblems(schema.elements, `${at}.elements`, below);
     case 'type':
       // Object.hasOwn turns a list key such as ['uint8'] into the text 'uint8', so check the text first.
       return typeof schema.type === 'string' && Object.hasOwn(JTD_JSON_TYPES, schema.type)
         ? []
-        : [`${at}.type ${JSON.stringify(schema.type)} has no check`];
+        : [`${at}.type ${shownValue(schema.type)} has no check`];
     case 'values':
-      return schemaFormProblems(schema.values, `${at}.values`);
+      return schemaFormProblems(schema.values, `${at}.values`, below);
     case 'properties': {
       const problems = [];
       if (Object.hasOwn(schema, 'additionalProperties') && typeof schema.additionalProperties !== 'boolean') {
@@ -537,12 +542,22 @@ function schemaFormProblems(schema, at) {
       }
       for (const key of ['properties', 'optionalProperties'].filter((name) => Object.hasOwn(schema, name))) {
         if (!isRecord(schema[key])) problems.push(`${at}.${key} is not an object`);
-        else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`));
+        else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`, below));
       }
       return problems;
     }
     default:
       return [];
+  }
+}
+
+// A schema value as JSON for a refusal, or a description when JSON cannot hold it: a YAML alias can make a list that
+// contains itself, and JSON.stringify throws on it.
+function shownValue(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '(a value that contains itself)';
   }
 }
 
@@ -593,9 +608,11 @@ export function structuredProblem(reviewer, value) {
 // bundledSchema), and it reads the omp release that `prepare.mjs case` recorded for the run (meta.json
 // `bundledOmp`). This score.mjs holds the agents and the schemas of BUNDLED_OMP_VERSION only, and the schema of
 // another release can differ, so the command stops when a run has no meta.json, records no release, or records
-// another release. Its one refusal has a line for each of the two groups, and each line names every run of its group,
-// because the operator repairs or scores again each run.
+// another release. Its one refusal has a line for each group that has runs, and each line names every run of its
+// group, because the operator repairs or scores again each run. A label or a recorded release with a line break gets
+// the escape `\n` or `\r`, so each group stays on one line.
 function checkBundledRuns(command, folders) {
+  const oneLine = (text) => text.replaceAll('\r', '\\r').replaceAll('\n', '\\n');
   const unrecorded = [];
   const others = [];
   for (const { label, dir, reviewers } of folders) {
@@ -604,8 +621,8 @@ function checkBundledRuns(command, folders) {
     for (const reviewer of bundled) bundledSchema(reviewer);
     const metaFile = path.join(dir, 'meta.json');
     const recorded = fs.existsSync(metaFile) ? readJson(metaFile)?.bundledOmp : undefined;
-    if (typeof recorded !== 'string') unrecorded.push(label);
-    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
+    if (typeof recorded !== 'string') unrecorded.push(oneLine(label));
+    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${oneLine(label)} (omp ${oneLine(recorded)})`);
   }
   const lines = [];
   if (unrecorded.length) {

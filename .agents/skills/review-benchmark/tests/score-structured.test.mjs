@@ -462,7 +462,7 @@ test('transcripts and findings refuse a bundled run prepared for the vendored ag
   put(run('bundled-bug-11'), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const before = readText(path.join(run('bundled-bug-10'), 'meta.json'));
   const refusal = (command) =>
-    `${command}: 1 bundled runs were prepared for the vendored agents of another omp release than omp ${VERIFIED_OMP} of this score.mjs, whose output schemas can differ: bundled-bug-11/R1-low/run-1 (omp 19.0.0); score them with the score.mjs of their omp release`;
+    `${command}: 1 bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: bundled-bug-11/R1-low/run-1 (omp 19.0.0); score them with the score.mjs of their omp release`;
   const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
   assert.equal(transcripts.status, 1, transcripts.stderr);
   assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
@@ -486,7 +486,7 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
   for (const id of ['bundled-bug-13', 'bundled-bug-14']) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const before = readText(path.join(run('bundled-bug-15'), 'meta.json'));
   const refusal = (command) =>
-    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${VERIFIED_OMP}`;
+    `${command}: 2 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): bundled-bug-13/R1-low/run-1, bundled-bug-14/R1-low/run-1; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`;
   const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
   assert.equal(transcripts.status, 1, transcripts.stderr);
   assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
@@ -507,16 +507,17 @@ test('transcripts and findings name every bundled run without a release record a
   put(run(ids[1]), 'meta.json', { config: CONFIGS.low });
   put(run(ids[2]), 'meta.json', null);
   put(run(ids[3]), 'meta.json', { config: CONFIGS.low, bundledOmp: 19 });
-  // Four runs of other omp releases.
-  const others = ['19.0.0', '18.2.0', '19.0.1', '18.0.0'];
+  // Four runs of other omp releases. A release with a line break gets the escape `\n`, so the group stays on one line.
+  const others = ['19.0.0', '18.2.0', '19.0.1', '18.0.0\nforged'];
   others.forEach((release, index) => put(run(ids[4 + index]), 'meta.json', { config: CONFIGS.low, bundledOmp: release }));
   for (const id of ids) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
   const unrecorded = ids.slice(0, 4).map(label).join(', ');
-  const otherRuns = others.map((release, index) => `${label(ids[4 + index])} (omp ${release})`).join(', ');
+  const shown = ['19.0.0', '18.2.0', '19.0.1', '18.0.0\\nforged'];
+  const otherRuns = shown.map((release, index) => `${label(ids[4 + index])} (omp ${release})`).join(', ');
   const refusal = (command) =>
     [
-      `${command}: 4 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${VERIFIED_OMP}`,
-      `${command}: 4 bundled runs were prepared for the vendored agents of another omp release than omp ${VERIFIED_OMP} of this score.mjs, whose output schemas can differ: ${otherRuns}; score them with the score.mjs of their omp release`,
+      `${command}: 4 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+      `${command}: 4 bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${otherRuns}; score them with the score.mjs of their omp release`,
     ].join('\n');
   for (const args of [
     ['transcripts', ws, '--omp-sessions', sessions],
@@ -531,8 +532,9 @@ test('transcripts and findings name every bundled run without a release record a
 
 test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
   // Copies of the scripts whose vendored reviewer has a schema that the scorer cannot check: a JSON Schema root, where
-  // `required` is no JTD keyword, so the copy would not check the required fields; and a nested `type` that is a list,
-  // not a text, so the copy would not check the type of that field.
+  // `required` is no JTD keyword, so the copy would not check the required fields; a nested `type` that is a list, not
+  // a text, so the copy would not check the type of that field; `metadata` that is not an object (RFC 8927 section
+  // 2.2); and two YAML aliases that make a value and a node contain themselves.
   const schemas = [
     {
       output: 'output:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n',
@@ -541,6 +543,18 @@ test('findings and transcripts refuse a vendored output schema of a form that th
     {
       output: 'output:\n  properties:\n    findings:\n      elements:\n        properties:\n          priority:\n            type: [uint8]\n',
       problem: 'output.properties.findings.elements.properties.priority.type ["uint8"] has no check',
+    },
+    {
+      output: 'output:\n  metadata: []\n  properties:\n    explanation:\n      type: string\n',
+      problem: 'output.metadata is not an object',
+    },
+    {
+      output: 'output:\n  properties:\n    explanation:\n      type: &self [*self]\n',
+      problem: 'output.properties.explanation.type (a value that contains itself) has no check',
+    },
+    {
+      output: 'output:\n  properties: &fields\n    explanation:\n      properties: *fields\n',
+      problem: 'output.properties.explanation.properties.explanation is a node that contains itself',
     },
   ];
   for (const { output, problem } of schemas) {

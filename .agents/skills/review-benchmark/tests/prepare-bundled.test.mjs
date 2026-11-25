@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'vitest';
+import { isNewer } from '../../../../cli/src/engine-native/toolchain.ts';
 import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import { PROJECT_CONFIG } from '../scripts/omp.mjs';
 import * as prepare from '../scripts/prepare.mjs';
@@ -44,9 +45,11 @@ import {
 // Each vendored folder and version text comes from the vendored release of score.mjs (BUNDLED_DIR and
 // BUNDLED_OMP_VERSION), so a refresh of the vendored agents after a raise of the omp pin changes no test.
 
-// The installed omp releases that `agents --bundled` refuses: the next patch release, and the omp floor when it is
-// below the vendored release (a release below the floor stops at the floor check of the omp preflight first).
-const NEWER_OMP = BUNDLED_OMP_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
+// The installed omp releases that `agents --bundled` refuses: the next patch release of the major, minor, and patch
+// numbers of the vendored release, and the omp floor when the preflight order (isNewer) puts it below the vendored
+// release (a release below the floor stops at the floor check of the omp preflight first).
+const [MAJOR, MINOR, PATCH] = BUNDLED_OMP_VERSION.split('.').map((part) => Number.parseInt(part, 10));
+const NEWER_OMP = `${MAJOR}.${MINOR}.${PATCH + 1}`;
 const OMP_FLOOR = prepare.ompPins(REPO_ROOT).floor;
 const AGENT_FRONTMATTER = /^---\n([\s\S]*?)\n---\n/;
 
@@ -147,7 +150,7 @@ test('agents --bundled refuses another omp version and the options of the other 
     agentsRefusal(args, fakeOmp({ version: NEWER_OMP })),
     `omp ${NEWER_OMP} is installed, but ${BUNDLED_DIR} holds the bundled agents of omp ${BUNDLED_OMP_VERSION}; run agents --bundled with omp ${BUNDLED_OMP_VERSION}, or vendor the agents of omp ${NEWER_OMP} as SOURCE.md in that folder tells`,
   );
-  if (OMP_FLOOR !== BUNDLED_OMP_VERSION) {
+  if (isNewer(BUNDLED_OMP_VERSION, OMP_FLOOR)) {
     assert.ok(agentsRefusal(args, fakeOmp({ version: OMP_FLOOR })).startsWith(`omp ${OMP_FLOOR} is installed, but `));
   }
   // The refused runs change no file.
