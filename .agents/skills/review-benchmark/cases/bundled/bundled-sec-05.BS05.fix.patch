@@ -1,0 +1,14 @@
+diff --git a/cli/scripts/tarball-proof.sh b/cli/scripts/tarball-proof.sh
+index 24b219c8..fb48beb0 100755
+--- a/cli/scripts/tarball-proof.sh
++++ b/cli/scripts/tarball-proof.sh
+@@ -43,8 +43,7 @@ BUNDLE="cli/dist/docks-kit.js"
+ lists="$(mktemp -d)"
+ packed_dir="$(mktemp -d)"
+ tagged_dir="$(mktemp -d)"
+-built_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tarball-proof-build"
+-mkdir -p "$built_dir"
++built_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tarball-proof-build.XXXXXX")"
+ trap 'rm -rf "$lists" "$packed_dir" "$packed_dir.tar" "$packed_dir.err" "$tagged_dir" "$built_dir" "$built_dir.tar"' EXIT
+ if ! bun -p '["package.json", "LICENSE", "LICENCE", ...require("./package.json").files].join("\n")' > "$lists/roots"; then
+   echo "::error::could not read the packaged roots from package.json"

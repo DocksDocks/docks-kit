@@ -1,0 +1,23 @@
+{
+  "id": "bundled-sec-02",
+  "kind": "code",
+  "split": "dev",
+  "issue": 160,
+  "round": 1,
+  "base": "b3db4089320b45eec4cae50bc937b0ae586e455b",
+  "head": "a26051cb519e7e0606aac2d60c712e0262f04c46",
+  "patch": "bundled-sec-02.patch",
+  "plan": "bundled-sec-02-plan.md",
+  "show_benchmark": true,
+  "known": [
+    {
+      "id": "BS02",
+      "locator": ".agents/skills/review-benchmark/scripts/keys.mjs:355-359",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`restore` makes the restore folder with the default mode and does not set mode 0700 before or after the extraction. With the usual umask 022 the folder of the decrypted held-out keys is 0755, so every local user can list it and read each key file whose archived mode lets others read it (CWE-276, secret exposure). The usage text and the comment of `restore` promise a new mode-0700 folder. The pull request adds keys.mjs: the base has no such file and no key restore.",
+      "fix": "bundled-sec-02.BS02.fix.patch"
+    }
+  ]
+}

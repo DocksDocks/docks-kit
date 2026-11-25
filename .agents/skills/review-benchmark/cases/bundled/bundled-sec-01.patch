@@ -1,0 +1,14 @@
+diff --git a/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh b/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
+index f4158d5b..0caa4308 100755
+--- a/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
++++ b/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
+@@ -31,7 +31,8 @@ cr=$(printf '\r')
+ nl='
+ '
+ top=$(git -C "$1" rev-parse --show-toplevel) || exit 2
+-tmp=$(mktemp -d) || exit 2
++tmp=${TMPDIR:-/tmp}/checkout-state.$$
++mkdir -p "$tmp" || exit 2
+ trap 'rm -rf "$tmp"' EXIT
+ trap 'exit 2' HUP INT TERM
+ 

@@ -1,0 +1,13 @@
+diff --git a/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh b/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
+index f4158d5b..8ea746bd 100755
+--- a/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
++++ b/plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh
+@@ -61,7 +61,7 @@ while IFS= read -r path; do
+     printf '%s\tlink\t%s\n' "$path" "$target"
+   elif [ -f "$file" ]; then
+     printf '%s\n' "$path" >&3
+-    if [ -x "$file" ]; then echo x; else echo; fi >&4
++    if [ -x "$path" ]; then echo x; else echo; fi >&4
+   elif [ -d "$file" ]; then
+     # A folder that is not a checkout gives the toplevel of the outer checkout.
+     sub=$(git -C "$file" rev-parse --show-toplevel) || exit 2

@@ -1,0 +1,23 @@
+{
+  "id": "bundled-sec-03",
+  "kind": "code",
+  "split": "dev",
+  "issue": 160,
+  "round": 1,
+  "base": "b3db4089320b45eec4cae50bc937b0ae586e455b",
+  "head": "a26051cb519e7e0606aac2d60c712e0262f04c46",
+  "patch": "bundled-sec-03.patch",
+  "plan": "bundled-sec-03-plan.md",
+  "show_benchmark": true,
+  "known": [
+    {
+      "id": "BS03",
+      "locator": ".agents/skills/review-benchmark/scripts/keys.mjs:165-179",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`tarBytes` stages the manifest in the fixed folder `<tmpdir>/keys-manifest`, made with `mkdirSync(..., { recursive: true })`, not in a `mkdtempSync` folder (CWE-377). On a shared /tmp another user can make that folder first: then that user can read the manifest, which names each held-out key file with its SHA-256, or put a link at `MANIFEST.sha256`, so that `writeFileSync` writes over a file that the attacker chose. Two backups at the same time also share the folder. The pull request adds keys.mjs: the base has no such file and no key backup.",
+      "fix": "bundled-sec-03.BS03.fix.patch"
+    }
+  ]
+}

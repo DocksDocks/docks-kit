@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-05",
+  "kind": "code",
+  "split": "dev",
+  "issue": 218,
+  "round": 1,
+  "base": "2cea12110257296bfe098238c479487b578e81b7",
+  "head": "0409cb5da1416088cb1578bc6bb3692dcde2f14c",
+  "patch": "bundled-sec-05.patch",
+  "plan": "bundled-sec-05-plan.md",
+  "known": [
+    {
+      "id": "BS05",
+      "locator": "cli/scripts/tarball-proof.sh:46-48; cli/scripts/tarball-proof.sh:127-136",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "The build folder of part 4 is the fixed path `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tarball-proof-build`, made with `mkdir -p`, not a `mktemp -d` folder (CWE-377). Files that another user or an earlier run left there stay in the tree where `bun install` and `bun cli/scripts/build-bundle.ts` run, so a planted file can run code in the release job, or change the bundle that the proof compares with the packed bundle. The pull request adds tarball-proof.sh: the base has no such file, and part 4, the rebuild of the bundle from the tag with its build folder, is new; parts 1 to 3 come from release-cli.yml.",
+      "fix": "bundled-sec-05.BS05.fix.patch"
+    }
+  ]
+}

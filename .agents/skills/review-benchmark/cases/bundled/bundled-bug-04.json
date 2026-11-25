@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-04",
+  "kind": "code",
+  "split": "dev",
+  "issue": 159,
+  "round": 1,
+  "base": "ccfa93cc8074fab495e30abf3fd9e53dc856a8e7",
+  "head": "0b33f344e22c9ff5b646daf9036fb981dc47e5b1",
+  "patch": "bundled-bug-04.patch",
+  "plan": "bundled-bug-04-plan.md",
+  "known": [
+    {
+      "id": "BB04",
+      "locator": "plugins/plan-lifecycle/skills/productivity/plan-manager/scripts/checkout-state.sh:62-64",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "The executable test reads `$path`, the path relative to the repository root, not `$file`, the path under `$top`. The script runs in the folder of its caller, so the test checks another file or no file. When the caller is not at the root, no file gets the `x` field, and a delegated edit that sets or clears the executable bit of a file does not change the listing, so the before and after comparison misses it. The pull request adds checkout-state.sh: the base has no such file.",
+      "fix": "bundled-bug-04.BB04.fix.patch"
+    }
+  ]
+}

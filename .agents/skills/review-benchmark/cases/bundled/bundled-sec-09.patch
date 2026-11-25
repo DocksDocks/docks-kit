@@ -1,0 +1,21 @@
+diff --git a/.agents/skills/verify/scripts/omp-smoke.mjs b/.agents/skills/verify/scripts/omp-smoke.mjs
+index fb60c9e6..dea3dd5e 100755
+--- a/.agents/skills/verify/scripts/omp-smoke.mjs
++++ b/.agents/skills/verify/scripts/omp-smoke.mjs
+@@ -84,13 +84,12 @@ function createScratch() {
+   return path;
+ }
+ 
+-// Environment for omp: only the allowed parent variables, so no omp session variable and no credential
+-// reaches omp, plus the isolated config root.
+-const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR"];
++// Environment for omp: the parent environment without the omp session variables, plus the isolated config
++// root.
+ function isolatedEnv(configDir) {
+   const env = {};
+   for (const [key, value] of Object.entries(process.env)) {
+-    if (value !== undefined && (ENV_ALLOWLIST.includes(key) || key.startsWith("LC_"))) env[key] = value;
++    if (value !== undefined && !key.startsWith("PI_") && !key.startsWith("OMP_")) env[key] = value;
+   }
+   env.PI_CONFIG_DIR = configDir;
+   return env;

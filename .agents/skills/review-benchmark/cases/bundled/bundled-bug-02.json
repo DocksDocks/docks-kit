@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-02",
+  "kind": "code",
+  "split": "dev",
+  "issue": 107,
+  "round": 1,
+  "base": "fd00f3e0f415ce707e62674fb5b95b8f3cbefcc9",
+  "head": "9e0d049e4758f2e950b0eae61deaca860ea36211",
+  "patch": "bundled-bug-02.patch",
+  "plan": "bundled-bug-02-plan.md",
+  "known": [
+    {
+      "id": "BB02",
+      "locator": "cli/src/checklistPrompt.ts:177-183",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "`moveBy` takes the new cursor modulo `saveRow` (the item count), not modulo `rows` (the items and the Save row). So Up, Down, `j`, `k`, and Tab never reach the Save row, Up on the first item does not wrap, and Down on the last item goes to the second item. The user can reach Save only with End, which the hint line does not name, so the checklist that the hint describes cannot save. The pull request adds checklistPrompt.ts: the base has no such file and no checklist prompt.",
+      "fix": "bundled-bug-02.BB02.fix.patch"
+    }
+  ]
+}

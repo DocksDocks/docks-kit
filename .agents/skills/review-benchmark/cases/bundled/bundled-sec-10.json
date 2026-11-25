@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-10",
+  "kind": "code",
+  "split": "dev",
+  "issue": 10,
+  "round": 1,
+  "base": "180b7e50de1e0dcc5c5fa322918c88c36aa120ba",
+  "head": "0b7d3ed31aacf60b1c1f47ccc3837ba388a96be0",
+  "patch": "bundled-sec-10.patch",
+  "plan": "bundled-sec-10-plan.md",
+  "known": [
+    {
+      "id": "BS10",
+      "locator": "plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs:114-130",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "The driver imports plan-run.mjs and review-policy.mjs from the repository under review when that repository has a file at the kit path, not from the folder of the driver. The reducer, the bundle checks, and the review validation then come from the tree whose plan the driver reviews, so a change in that tree can make the driver settle a review that never passed, and any code in those files runs with the rights of the driver (CWE-829, code from an untrusted source). The pull request adds dispatch-review.mjs to main: the base has no such file.",
+      "fix": "bundled-sec-10.BS10.fix.patch"
+    }
+  ]
+}

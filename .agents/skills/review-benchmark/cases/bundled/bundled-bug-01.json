@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-01",
+  "kind": "code",
+  "split": "dev",
+  "issue": 226,
+  "round": 1,
+  "base": "421593d81d586892b05be37ccf4889de2c24577c",
+  "head": "ec95803de89bc5df1da1ab9d0c956dfd74cac286",
+  "patch": "bundled-bug-01.patch",
+  "plan": "bundled-bug-01-plan.md",
+  "known": [
+    {
+      "id": "BB01",
+      "locator": "cli/src/skills/markdownHeadings.ts:39-47",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "The loop of `trailing` runs only while `start > 1`, so it never takes the chunk at index 0. When a heading starts the text, as `# Title` on line 1 does, its text chunks start at index 0, `trailing` returns null, and `scanHeadings` reports that heading as a heading with raw inline HTML and does not count it. So a check that needs the title heading of a text fails on a valid text that begins with that heading. The pull request adds markdownHeadings.ts: the base has no such file and no heading scan through the Bun parser.",
+      "fix": "bundled-bug-01.BB01.fix.patch"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+diff --git a/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs b/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
+index dd8928bb..f542b363 100755
+--- a/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
++++ b/plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs
+@@ -111,23 +111,15 @@ const OUT_DIR = flag('out-dir') ?? path.join(REPO, '.git', 'docks-review');
+ const BODY = flag('body');
+ const COMMIT = args.includes('--commit');
+ 
+-// The repository under review can carry its own copy of the plan library, for
+-// example the kit repository itself, and that copy matches its plan records.
+-// Without one, the library resolves from this file. `fileURLToPath` rather than
+-// `.pathname`: the latter keeps percent-encoding, so a consumer whose plugin
+-// lives under a path containing a space would resolve `../plan-run.mjs` into a
+-// directory that does not exist.
++// Resolved from this file, never from the plan's repository: when the plugin is
++// installed outside the repository under review, the library is not reachable
++// from that repository's root at all.
++// `fileURLToPath` rather than `.pathname`: the latter keeps percent-encoding, so
++// a consumer whose plugin lives under a path containing a space would resolve
++// `../plan-run.mjs` into a directory that does not exist.
+ const HERE = path.dirname(fileURLToPath(import.meta.url));
+-const REPO_SCRIPTS = path.join(REPO, 'plugins/docks/skills/productivity');
+-const fromRepo = fs.existsSync(path.join(REPO_SCRIPTS, 'plan-manager/scripts/plan-run.mjs'));
+-const lib = await import(
+-  fromRepo ? path.join(REPO_SCRIPTS, 'plan-manager/scripts/plan-run.mjs') : path.join(HERE, '../plan-run.mjs')
+-);
+-const policy = await import(
+-  fromRepo
+-    ? path.join(REPO_SCRIPTS, 'plan-reviewer/scripts/review-policy.mjs')
+-    : path.join(HERE, '../../../plan-reviewer/scripts/review-policy.mjs')
+-);
++const lib = await import(path.join(HERE, '../plan-run.mjs'));
++const policy = await import(path.join(HERE, '../../../plan-reviewer/scripts/review-policy.mjs'));
+ 
+ const readRecord = (text) => {
+   const line = text.split('\n').find((l) => l.startsWith('Plan-run:'));

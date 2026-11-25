@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-10",
+  "kind": "code",
+  "split": "dev",
+  "issue": 165,
+  "round": 1,
+  "base": "660147848b01036af3066b2ffcc3fc1db49e616a",
+  "head": "e33e31acb04a6c73f54af3ef4448b769ba5dee5a",
+  "patch": "bundled-bug-10.patch",
+  "plan": "bundled-bug-10-plan.md",
+  "known": [
+    {
+      "id": "BB10",
+      "locator": "cli/src/engine-native/ompChild.ts:17-26",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "The condition of `spawnOmp` is inverted. It keeps the environment of this process, with `XDG_DATA_HOME`, when the locked data root is the config root, and it removes `XDG_DATA_HOME` when the locked data root is the XDG root. So in both layouts the omp child resolves a data root that the sync did not lock and can write into it, which the doc comment and the pull request exist to prevent. The pull request adds ompChild.ts: the base has no such file and no pinned omp child.",
+      "fix": "bundled-bug-10.BB10.fix.patch"
+    }
+  ]
+}

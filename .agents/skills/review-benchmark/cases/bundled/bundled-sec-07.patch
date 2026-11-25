@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/bun.ts b/cli/src/engine-native/bun.ts
+index 4dd7b446..bfb66abb 100644
+--- a/cli/src/engine-native/bun.ts
++++ b/cli/src/engine-native/bun.ts
+@@ -42,7 +42,7 @@ function installBun(ctx: Ctx, services: EngineServices, pin: string, installer:
+     return
+   }
+ 
+-  const download = spawnSync("curl", ["-fsSL", "https://bun.sh/install", "-o", installer], { stdio: "ignore" })
++  const download = spawnSync("curl", ["-fsSL", "http://bun.sh/install", "-o", installer], { stdio: "ignore" })
+   if (download.error === undefined && download.status === 0) {
+     spawnSync("bash", [installer, `bun-v${pin}`], { stdio: "ignore" })
+   }

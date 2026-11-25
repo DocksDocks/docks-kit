@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-03",
+  "kind": "code",
+  "split": "dev",
+  "issue": 10,
+  "round": 1,
+  "base": "180b7e50de1e0dcc5c5fa322918c88c36aa120ba",
+  "head": "0b7d3ed31aacf60b1c1f47ccc3837ba388a96be0",
+  "patch": "bundled-bug-03.patch",
+  "plan": "bundled-bug-03-plan.md",
+  "known": [
+    {
+      "id": "BB03",
+      "locator": "plugins/docks/skills/productivity/plan-manager/scripts/lifecycle/dispatch-review.mjs:400-419",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "The `close` handler of `runReviewer` rejects on a non-zero exit before it writes the reviewer stdout to RAW_STDOUT. A reviewer that exits with an error so leaves no copy of its output: the one artifact of a failed attempt is lost, and the refund and the retry that follow have no record of it. The pull request body (repair C2) and the comment above the handler require the complete byte stream on disk before any interpretation. The pull request adds dispatch-review.mjs to main: the base has no such file.",
+      "fix": "bundled-bug-03.BB03.fix.patch"
+    }
+  ]
+}

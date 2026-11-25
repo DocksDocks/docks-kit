@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/ompChild.ts b/cli/src/engine-native/ompChild.ts
+index 25e76aa8..0fb0a2db 100644
+--- a/cli/src/engine-native/ompChild.ts
++++ b/cli/src/engine-native/ompChild.ts
+@@ -19,7 +19,7 @@ export function spawnOmp(
+   args: ReadonlyArray<string>,
+   stdio: AsyncProcessOptions["stdio"],
+ ): Promise<AsyncProcessResult> {
+-  if (paths.dataRoot !== paths.configRoot) return spawnProcess("omp", args, { stdio });
++  if (paths.dataRoot === paths.configRoot) return spawnProcess("omp", args, { stdio });
+   const env = { ...process.env };
+   delete env["XDG_DATA_HOME"];
+   return spawnProcess("omp", args, { stdio, env });

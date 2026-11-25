@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-07",
+  "kind": "code",
+  "split": "dev",
+  "issue": 9,
+  "round": 1,
+  "base": "c727ba5b609a5b972f95ed49eb84c052d0b45f62",
+  "head": "7ff2330cd49ea5ed27609d05430eb910cfb78e3c",
+  "patch": "bundled-sec-07.patch",
+  "plan": "bundled-sec-07-plan.md",
+  "known": [
+    {
+      "id": "BS07",
+      "locator": "cli/src/engine-native/bun.ts:45-48",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`installBun` downloads the Bun install script over plain `http://bun.sh/install` and then runs the file with bash. Nothing checks the downloaded script, so a network attacker can answer the first request and run any shell code as the user during `docks-kit sync` (CWE-494, download of code without an integrity check). The pull request adds bun.ts: the base has no such file and no Bun bootstrap.",
+      "fix": "bundled-sec-07.BS07.fix.patch"
+    }
+  ]
+}

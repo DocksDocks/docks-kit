@@ -1,0 +1,22 @@
+{
+  "id": "bundled-bug-08",
+  "kind": "code",
+  "split": "dev",
+  "issue": 64,
+  "round": 1,
+  "base": "ca8a935c10cd0878c34aabcf18be2bd95f303c31",
+  "head": "cd1e2acceda79ad8dd492d1a2a54b548ca4dee75",
+  "patch": "bundled-bug-08.patch",
+  "plan": "bundled-bug-08-plan.md",
+  "known": [
+    {
+      "id": "BB08",
+      "locator": "cli/src/engine-native/liveModels.ts:112-119",
+      "category": "code",
+      "source": "seeded",
+      "security": false,
+      "summary": "`claudeCatalog` gives `inputs.now()` as `maxAgeMs` and the TTL as `now` to `readCache(home, key, maxAgeMs, now)`. So `now - fetchedAt` is a large negative number, and every cached Anthropic catalog counts as fresh. The six-hour TTL never applies: the catalog stays stale until a kit release changes the cache fingerprint or the user asks for a refresh. The pull request adds liveModels.ts: the base has no such file and no live catalog cache.",
+      "fix": "bundled-bug-08.BB08.fix.patch"
+    }
+  ]
+}

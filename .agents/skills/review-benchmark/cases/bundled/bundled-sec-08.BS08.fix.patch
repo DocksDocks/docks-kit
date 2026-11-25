@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/claudeRuntime.ts b/cli/src/engine-native/claudeRuntime.ts
+index 596b5a1c..5fd165f5 100644
+--- a/cli/src/engine-native/claudeRuntime.ts
++++ b/cli/src/engine-native/claudeRuntime.ts
+@@ -86,7 +86,7 @@ function validateTemplate(template: Json): void {
+ }
+ 
+ function posixLiteral(value: string): string {
+-  return `'${value}'`
++  return `'${value.replaceAll("'", `'"'"'`)}'`
+ }
+ 
+ export function statusLineCommand(runtime: ClaudeRuntimePaths, platform: Platform): string {

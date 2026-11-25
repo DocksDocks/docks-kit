@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/ompRemovals.ts b/cli/src/engine-native/ompRemovals.ts
+index a417bc57..bf9f5c04 100644
+--- a/cli/src/engine-native/ompRemovals.ts
++++ b/cli/src/engine-native/ompRemovals.ts
+@@ -105,7 +105,7 @@ function deletePath(
+ 
+   for (let depth = owners.length - 1; depth >= 1; depth--) {
+     const mapping = owners[depth];
+-    if (mapping === undefined || mapping.items.length > 1) break;
++    if (mapping === undefined || mapping.items.length > 0) break;
+     const owner = owners[depth - 1];
+     const segment = segments[depth - 1];
+     if (owner === undefined || segment === undefined) break;

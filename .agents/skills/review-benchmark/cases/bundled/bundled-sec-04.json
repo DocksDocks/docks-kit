@@ -1,0 +1,22 @@
+{
+  "id": "bundled-sec-04",
+  "kind": "code",
+  "split": "dev",
+  "issue": 90,
+  "round": 1,
+  "base": "4998194985b8c5c57a0b10071acd70b05bd091dd",
+  "head": "b0ba237e2a27a4bf70d5160b050e036329683b87",
+  "patch": "bundled-sec-04.patch",
+  "plan": "bundled-sec-04-plan.md",
+  "known": [
+    {
+      "id": "BS04",
+      "locator": "cli/src/engine-native/scratch.ts:48-52",
+      "category": "code",
+      "source": "seeded",
+      "security": true,
+      "summary": "`isStrictlyInside` refuses only a relative path that starts with `../`. The relative path from a root to its parent folder is exactly `..`, so the parent counts as inside the root. `removeTemporaryPath` then removes recursively, for example, `~/.cache/docks-kit`, the parent of the scratch root, with the whole kit cache and every other scratch folder: a removal outside every allowed root (CWE-22, path traversal). `docks-kit scratch remove` and the agent tools take this path from an agent. The pull request adds scratch.ts: the base has no such file and no scratch removal.",
+      "fix": "bundled-sec-04.BS04.fix.patch"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+diff --git a/cli/src/engine-native/ompFastMode.ts b/cli/src/engine-native/ompFastMode.ts
+index 68757372..0263c894 100644
+--- a/cli/src/engine-native/ompFastMode.ts
++++ b/cli/src/engine-native/ompFastMode.ts
+@@ -37,7 +37,7 @@ export function toggleOpenAiFast(configText: string): FastToggle {
+ 
+   const current = doc.getIn(["tier", "openai"]);
+   const previous = typeof current === "string" && current !== "" ? current : FAST_OFF_TIER;
+-  const next = previous !== FAST_OFF_TIER ? FAST_OFF_TIER : FAST_ON_TIER;
++  const next = previous === FAST_ON_TIER ? FAST_OFF_TIER : FAST_ON_TIER;
+   doc.setIn(["tier", "openai"], next);
+   return { previous, next, text: doc.toString() };
+ }

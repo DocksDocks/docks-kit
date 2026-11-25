@@ -1,0 +1,17 @@
+diff --git a/.agents/skills/review-benchmark/scripts/keys.mjs b/.agents/skills/review-benchmark/scripts/keys.mjs
+index aba29bee..b2f281ac 100755
+--- a/.agents/skills/review-benchmark/scripts/keys.mjs
++++ b/.agents/skills/review-benchmark/scripts/keys.mjs
+@@ -353,11 +353,9 @@ export function restore({ archive, out, env = process.env }) {
+   const bytes = run('gpg', ['--batch', '--decrypt', path.resolve(archive)], { env });
+   checkMemberTypes(bytes);
+   const created = fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+-  fs.mkdirSync(target, { mode: 0o700 });
++  fs.mkdirSync(target);
+   try {
+-    fs.chmodSync(target, 0o700);
+     run('tar', ['-x', '-p', '--no-same-owner', '-f', '-', '-C', target], { input: bytes });
+-    fs.chmodSync(target, 0o700);
+     verifyRestore(target);
+   } catch (error) {
+     fs.rmSync(created ?? target, { recursive: true, force: true });
