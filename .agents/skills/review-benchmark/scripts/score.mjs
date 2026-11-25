@@ -448,7 +448,8 @@ const PRIORITY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 const SECURITY_SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW', informational: 'LOW' };
 
 // The output schema of the bundled reviewer `reviewer`: the JSON Type Definition (RFC 8927) under the `output` key of
-// the YAML frontmatter of its vendored file, read once with the frontmatter parser of the kit.
+// the YAML frontmatter of its vendored file, read once with the frontmatter parser of the kit. The command stops when
+// the schema uses a form that schemaProblems does not check (see schemaFormProblems), before it reads a reply.
 const bundledSchemas = new Map();
 export function bundledSchema(reviewer) {
   if (!bundledSchemas.has(reviewer)) {
@@ -457,13 +458,22 @@ export function bundledSchema(reviewer) {
     const parsed = extracted.ok ? parseFrontmatter(extracted.text) : extracted;
     const output = parsed.ok ? parsed.value.output : undefined;
     if (!isRecord(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
+    const problems = schemaFormProblems(output, 'output');
+    if (!isRecord(output.properties) && !isRecord(output.optionalProperties)) {
+      problems.unshift('output is not a properties form, so its yield sections have no field names');
+    }
+    if (problems.length) {
+      fail(
+        `${file}: score.mjs cannot check this output schema: ${problems.join('; ')}; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`,
+      );
+    }
     bundledSchemas.set(reviewer, output);
   }
   return bundledSchemas.get(reviewer);
 }
 
 // The JSON type of each JTD type, as omp v19.1.1 converts it (packages/coding-agent/src/tools/jtd-to-json-schema.ts,
-// primitiveMap). omp keeps another type name, such as `number`, as the JSON Schema type of that name.
+// primitiveMap). omp keeps another type name as the JSON Schema type of that name; the vendored schemas use `number`.
 const JTD_JSON_TYPES = {
   boolean: 'boolean',
   string: 'string',
@@ -476,24 +486,69 @@ const JTD_JSON_TYPES = {
   uint16: 'integer',
   int32: 'integer',
   uint32: 'integer',
+  number: 'number',
 };
 const JSON_TYPE_CHECKS = {
   boolean: (value) => typeof value === 'boolean',
   string: (value) => typeof value === 'string',
   number: (value) => typeof value === 'number',
   integer: (value) => Number.isInteger(value),
-  object: isRecord,
-  array: Array.isArray,
-  null: (value) => value === null,
 };
+// The keywords of each schema form that schemaProblems checks. A node has at most one form; beside it, it can have
+// `metadata` (free data) and `nullable`. A node without a form accepts every value.
+const SCHEMA_FORMS = {
+  enum: ['enum'],
+  elements: ['elements'],
+  type: ['type'],
+  values: ['values'],
+  properties: ['properties', 'optionalProperties', 'additionalProperties'],
+};
+const SCHEMA_KEYWORDS = new Set(['metadata', 'nullable', ...Object.values(SCHEMA_FORMS).flat()]);
+
+// The reasons why schemaProblems cannot check the schema node `schema` at the place `at`, or none: a keyword of
+// another schema language or form (for example `required`, `anyOf`, `discriminator`, or `ref`), more than one form, a
+// type without a check (JTD_JSON_TYPES), or a keyword with a value of the wrong shape, in this node or below it.
+function schemaFormProblems(schema, at) {
+  if (!isRecord(schema)) return [`${at} is not an object`];
+  const keys = Object.keys(schema);
+  const unknown = keys.filter((key) => !SCHEMA_KEYWORDS.has(key));
+  if (unknown.length) return [`${at} has the keywords ${unknown.join(', ')}`];
+  const forms = Object.keys(SCHEMA_FORMS).filter((form) => SCHEMA_FORMS[form].some((key) => keys.includes(key)));
+  if (forms.length > 1) return [`${at} has more than one form: ${forms.join(', ')}`];
+  if (Object.hasOwn(schema, 'nullable') && typeof schema.nullable !== 'boolean') return [`${at}.nullable is not true or false`];
+  switch (forms[0]) {
+    case 'enum':
+      return Array.isArray(schema.enum) && schema.enum.length && schema.enum.every((item) => typeof item === 'string')
+        ? []
+        : [`${at}.enum is not a list of texts`];
+    case 'elements':
+      return schemaFormProblems(schema.elements, `${at}.elements`);
+    case 'type':
+      return Object.hasOwn(JTD_JSON_TYPES, schema.type) ? [] : [`${at}.type ${JSON.stringify(schema.type)} has no check`];
+    case 'values':
+      return schemaFormProblems(schema.values, `${at}.values`);
+    case 'properties': {
+      const problems = [];
+      if (Object.hasOwn(schema, 'additionalProperties') && typeof schema.additionalProperties !== 'boolean') {
+        problems.push(`${at}.additionalProperties is not true or false`);
+      }
+      for (const key of ['properties', 'optionalProperties'].filter((name) => Object.hasOwn(schema, name))) {
+        if (!isRecord(schema[key])) problems.push(`${at}.${key} is not an object`);
+        else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`));
+      }
+      return problems;
+    }
+    default:
+      return [];
+  }
+}
 
 // The places where `value` does not fit the JTD schema `schema`, as the JSON Schema that omp v19.1.1 converts it to
 // (jtd-to-json-schema.ts convertSchemaForm, in the same order of forms): `nullable`, `enum`, `elements`, `type`,
-// `values`, and `properties` with `optionalProperties`, which allow no other key. `at` is the path of `value` in the
-// result. A schema form that this function does not check (`discriminator`, `ref`) stops the command, so that a
-// vendored schema of a later omp release does not pass without a check.
+// `values`, and `properties` with `optionalProperties`, which allow no other key (omp sets `additionalProperties:
+// false` for this form). `at` is the path of `value` in the result. bundledSchema checked the forms of the schema
+// before (see schemaFormProblems).
 function schemaProblems(schema, value, at = '') {
-  if (!isRecord(schema)) return [];
   if (schema.nullable === true && value === null) return [];
   const place = at || 'the result';
   const misfit = [`${place} ${JSON.stringify(value)} does not fit`];
@@ -502,11 +557,7 @@ function schemaProblems(schema, value, at = '') {
     if (!Array.isArray(value)) return [`${place} is not a list`];
     return value.flatMap((item, index) => schemaProblems(schema.elements, item, `${at}[${index}]`));
   }
-  if (typeof schema.type === 'string') {
-    const fits = JSON_TYPE_CHECKS[JTD_JSON_TYPES[schema.type] ?? schema.type];
-    if (!fits) fail(`the output schema type ${schema.type} at ${place} has no check in score.mjs schemaProblems`);
-    return fits(value) ? [] : misfit;
-  }
+  if (typeof schema.type === 'string') return JSON_TYPE_CHECKS[JTD_JSON_TYPES[schema.type]](value) ? [] : misfit;
   const field = (name) => (at ? `${at}.${name}` : name);
   if (isRecord(schema.values)) {
     if (!isRecord(value)) return [`${place} is not an object`];
@@ -523,9 +574,6 @@ function schemaProblems(schema, value, at = '') {
       ),
     ];
   }
-  if (Object.hasOwn(schema, 'discriminator') || Object.hasOwn(schema, 'ref')) {
-    fail(`the output schema form at ${place} has no check in score.mjs schemaProblems`);
-  }
   return [];
 }
 
@@ -534,6 +582,29 @@ function schemaProblems(schema, value, at = '') {
 export function structuredProblem(reviewer, value) {
   const problems = schemaProblems(bundledSchema(reviewer), value);
   return problems.length ? `the result fails the output schema of ${reviewer}: ${problems.join(', ')}` : null;
+}
+
+// The check of `command` (`transcripts` or `findings`) before it reads a reply of a bundled reviewer. `folders` are
+// the run or round folders of the command, each `{ label, dir, reviewers }`. For each folder with a bundled reviewer
+// (see isBundledReviewer), it loads the output schema of each such reviewer (see bundledSchema), and it reads the omp
+// release that `prepare.mjs case` recorded for the run (meta.json `bundledOmp`). This score.mjs holds the agents and
+// the schemas of BUNDLED_OMP_VERSION only, and the schema of another release can differ, so the command stops when a
+// run records another release, and it names each such run with its release.
+function checkBundledRuns(command, folders) {
+  const others = [];
+  for (const { label, dir, reviewers } of folders) {
+    const bundled = reviewers.filter(isBundledReviewer);
+    if (bundled.length === 0) continue;
+    for (const reviewer of bundled) bundledSchema(reviewer);
+    const metaFile = path.join(dir, 'meta.json');
+    const recorded = fs.existsSync(metaFile) ? readJson(metaFile).bundledOmp : undefined;
+    if (recorded !== undefined && recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
+  }
+  if (others.length) {
+    fail(
+      `${command}: ${others.length} bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${listSome(others, LISTED_READS)}; score them with the score.mjs of their omp release`,
+    );
+  }
 }
 
 // The locator text and the file of one location of a structured finding.
@@ -669,7 +740,12 @@ export function readWorkspace(ws) {
 export function collectFindings(ws) {
   const blocks = [];
   const findings = [];
-  for (const { caseId, caseData, family, arm, run, round, dir, reviewers } of readWorkspace(ws)) {
+  const runs = readWorkspace(ws);
+  checkBundledRuns(
+    'findings',
+    runs.map(({ dir, reviewers }) => ({ label: path.relative(path.resolve(ws), dir), dir, reviewers })),
+  );
+  for (const { caseId, caseData, family, arm, run, round, dir, reviewers } of runs) {
     const inRound = round === undefined ? {} : { round };
     for (const reviewer of reviewers) {
       const file = path.join(dir, 'blocks', `${reviewer}.md`);
@@ -3393,7 +3469,8 @@ function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSk
     inputFile: bundled
       ? (name) => BUNDLED_INPUT_FILES.has(name)
       : (name) => INPUT_FILES.has(name) || name.endsWith('.diff'),
-    contractCopy: path.join(runDir, CONTRACT_COPY),
+    // A bundled prompt names no copy of the plan contract, so a bundled reviewer has none (null).
+    contractCopy: bundled ? null : path.join(runDir, CONTRACT_COPY),
     pluginRoots: bundled ? [] : pluginRoots,
     agentFiles: ownFiles.map((file) => path.resolve(file)),
     selfReview: ownFiles.length > 0,
@@ -3622,7 +3699,7 @@ function realRoots(rules) {
     inputDirs: rules.inputDirs.map((dir) => linkedPath(dir)),
     folders: rules.folders.map((dir) => linkedPath(dir)),
     inputFile: rules.inputFile,
-    contractCopy: linkedPath(rules.contractCopy),
+    contractCopy: rules.contractCopy === null ? null : linkedPath(rules.contractCopy),
     pluginRoots: rules.pluginRoots.map((root) => linkedPath(path.resolve(root))),
     agentFiles: rules.agentFiles.map((file) => linkedPath(file)),
     skillRoots: rules.skillRoots.map((root) => linkedPath(path.resolve(root))),
@@ -5017,7 +5094,9 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // when the transcript names no agent: a transcript of another agent, for example of another plan-reviewer variant
 // under the task name of this one, shows the review of another arm, so the message asks for a new dispatch. A run of a
 // bundled arm (`prepare.mjs case` R1 or V1) records the omp version of the vendored agents in its meta.json
-// (`bundledOmp`). Its reviewer gets the narrower read scope of the bundled prompt (see readScope `bundled`). It replies
+// (`bundledOmp`); before it reads a transcript, the command stops when a run records another omp release than the
+// vendored agents of this score.mjs (see checkBundledRuns). Its reviewer gets the narrower read scope of the bundled
+// prompt (see readScope `bundled`). It replies
 // in structured mode, so the command writes its block: the reply that structuredReply folds from the transcript, as
 // JSON. When that reply has a problem, the reviewer entry gets the reason as `replyError`, and the block is
 // `{ unreadable: <reason>, reply: <the folded reply> }`: it keeps the reply for a diagnosis, and `findings` reads it as
@@ -5045,6 +5124,14 @@ export function transcriptsCommand(ws, sessionsDir) {
       `transcripts: ${headless.length} prompts have no agent header: ${listSome(headless, LISTED_READS)}; restore the first line \`agent: <name>\` of each prompt, then run transcripts again`,
     );
   }
+  checkBundledRuns(
+    'transcripts',
+    [...byDir].map(([dir, dispatches]) => ({
+      label: path.relative(wsDir, dir),
+      dir,
+      reviewers: dispatches.filter(({ fixer, manager }) => !fixer && !manager).map(({ reviewer }) => reviewer),
+    })),
+  );
   // The update of each folder from the transcripts of its dispatches. Every transcript passes the shape check and the
   // agent check before a meta.json changes.
   const updates = [];

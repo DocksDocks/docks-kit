@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { test } from 'vitest';
-import { blindId, findingsCommand, main } from '../scripts/score.mjs';
+import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
+import { blindId, main } from '../scripts/score.mjs';
 import {
   gridFixture,
   oneKnownCases,
   put,
   readJson,
   readText,
+  SCRIPTS_DIR,
   scratch,
   tableAfter,
   VERIFIED_OMP,
@@ -66,7 +69,17 @@ test('pairs pairs a security finding with a known defect on its second location 
     fix: `${id}.SEC1.fix.patch`,
   };
   put(cases, `${id}.json`, { id, kind: 'code', split: 'dev', known: [known] });
-  findingsCommand(ws);
+  // `score.mjs findings` on Bun converts the reply of security-reviewer.
+  const findings = spawnSync(BUN_RUNTIME, [path.join(SCRIPTS_DIR, 'score.mjs'), 'findings', ws], { encoding: 'utf8' });
+  assert.equal(findings.status, 0, findings.stderr);
+  assert.equal(findings.stdout.trim(), 'findings.json: 2 findings in 1 blocks (0 missing, 0 unreadable)');
+  assert.deepEqual(
+    readJson(path.join(ws, 'findings.json')).findings.map((finding) => [finding.severity, finding.category, finding.locator]),
+    [
+      ['HIGH', 'injection', 'src/input.mjs:3; src/exec.mjs:20-22'],
+      ['HIGH', 'injection', 'src/log.mjs:7'],
+    ],
+  );
   assert.equal(main(['pairs', ws, '--cases', cases]), 'pairs.json: 1 candidate pairs in 1 cases');
   const [entry] = readJson(path.join(ws, 'pairs.json')).cases;
   assert.deepEqual(entry.known, [known]);

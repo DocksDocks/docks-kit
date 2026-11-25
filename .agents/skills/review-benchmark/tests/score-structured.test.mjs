@@ -16,6 +16,7 @@ import {
 import {
   assistantLine,
   CONFIGS,
+  copyScripts,
   isoAt,
   jsonl,
   LIVE,
@@ -232,9 +233,13 @@ function bundledWorkspace(runs) {
   return { ws, sessions };
 }
 
+// Runs a command of the score.mjs command line (`script`, by default the score.mjs of this checkout) on Bun and gives
+// the child process.
+const scoreChild = (args, script = path.join(SCRIPTS_DIR, 'score.mjs')) =>
+  spawnSync(BUN_RUNTIME, [script, ...args], { encoding: 'utf8' });
 // Runs a command of the score.mjs command line on Bun and gives its output.
 function scoreCli(...args) {
-  const child = spawnSync(BUN_RUNTIME, [path.join(SCRIPTS_DIR, 'score.mjs'), ...args], { encoding: 'utf8' });
+  const child = scoreChild(args);
   assert.equal(child.status, 0, child.stderr);
   return child.stdout.trim();
 }
@@ -418,10 +423,13 @@ test('transcripts gives a bundled reviewer the read scope of its prompt: the sna
   const { ws, sessions } = bundledWorkspace([{ id, calls: [FINDING_CALL, ...VERDICT_CALLS] }]);
   const caseDir = path.join(ws, id);
   const allowed = [`${caseDir}/snapshot/src/lock.mjs`, `${caseDir}/full.diff`, 'local://1.log'];
-  // The prompt names neither the plan nor the prompt folder, and it forbids every skill read.
+  // The prompt names neither the plan, the prompt folder, nor a copy of the plan contract, and it forbids every skill
+  // read.
+  put(caseDir, 'R1-low/run-1/plan-contract.md', '# Plan contract\n');
   const outside = [
     `${caseDir}/plan.md`,
     `${caseDir}/R1-low/run-1/prompts/reviewer.txt`,
+    `${caseDir}/R1-low/run-1/plan-contract.md`,
     'skill://unslop',
     '/home/user/.omp/plugins/node_modules/docks-kit-omp/skills/unslop/SKILL.md',
   ];
@@ -432,12 +440,61 @@ test('transcripts gives a bundled reviewer the read scope of its prompt: the sna
   scoreCli('transcripts', ws, '--omp-sessions', sessions);
   const entry = readJson(path.join(caseDir, 'R1-low', 'run-1', 'meta.json')).reviewers.reviewer;
   assert.deepEqual(entry.readScope, { outside });
-  // A reviewer of a kit arm in the same run folder keeps its scope: the plan, its prompts, and an unmeasured skill are
-  // inputs or optional instructions.
-  const kitScope = readScope(reads(...allowed, ...outside.slice(0, 3)), {
+  // A reviewer of a kit arm in the same run folder keeps its scope: the plan, its prompts, the contract copy of its run,
+  // and an unmeasured skill are inputs or optional instructions.
+  const kitScope = readScope(reads(...allowed, ...outside.slice(0, 4)), {
     runDir: path.join(caseDir, 'R1-low', 'run-1'),
     cwd: LIVE,
     pluginRoots: [LIVE_PLUGIN],
   });
   assert.deepEqual(kitScope, { outside: [] });
+});
+
+test('transcripts and findings refuse a bundled run prepared for the vendored agents of another omp release', () => {
+  const { ws, sessions } = bundledWorkspace([
+    { id: 'bundled-bug-10', calls: [FINDING_CALL, ...VERDICT_CALLS] },
+    { id: 'bundled-bug-11', calls: [FINDING_CALL, ...VERDICT_CALLS] },
+  ]);
+  const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
+  // After a raise of the omp pin, this workspace keeps the release that `case` recorded for its runs.
+  put(run('bundled-bug-11'), 'meta.json', { config: CONFIGS.low, bundledOmp: '19.0.0' });
+  put(run('bundled-bug-11'), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
+  const before = readText(path.join(run('bundled-bug-10'), 'meta.json'));
+  const refusal = (command) =>
+    `${command}: 1 bundled runs were prepared for the vendored agents of another omp release than omp ${VERIFIED_OMP} of this score.mjs, whose output schemas can differ: bundled-bug-11/R1-low/run-1 (omp 19.0.0); score them with the score.mjs of their omp release`;
+  const transcripts = scoreChild(['transcripts', ws, '--omp-sessions', sessions]);
+  assert.equal(transcripts.status, 1, transcripts.stderr);
+  assert.equal(transcripts.stderr.trim(), refusal('transcripts'));
+  assert.equal(readText(path.join(run('bundled-bug-10'), 'meta.json')), before, 'transcripts wrote a meta.json');
+  const findings = scoreChild(['findings', ws]);
+  assert.equal(findings.status, 1, findings.stderr);
+  assert.equal(findings.stderr.trim(), refusal('findings'));
+  assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
+});
+
+test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
+  // A copy of the scripts whose vendored reviewer has a JSON Schema root: `required` is no JTD keyword, so the copy
+  // would not check the required fields.
+  const repo = path.join(scratch(), 'repo');
+  fs.mkdirSync(repo);
+  spawnSync('git', ['init', '-q', repo]);
+  const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
+  const agent = path.join(repo, '.agents/skills/review-benchmark/bundled/omp-19.1.1/reviewer.md');
+  put(
+    path.dirname(agent),
+    'reviewer.md',
+    '---\nname: reviewer\noutput:\n  type: object\n  properties:\n    overall_correctness:\n      type: string\n  required: [overall_correctness]\n---\nReview.\n',
+  );
+  const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
+  put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');
+  const message = `${agent}: score.mjs cannot check this output schema: output has the keywords required; extend schemaFormProblems and schemaProblems in score.mjs for the new schema form`;
+  for (const args of [
+    ['findings', ws],
+    ['transcripts', ws, '--omp-sessions', sessions],
+  ]) {
+    const child = scoreChild(args, script);
+    assert.equal(child.status, 1, child.stderr);
+    assert.equal(child.stderr.trim(), message);
+  }
+  assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
 });

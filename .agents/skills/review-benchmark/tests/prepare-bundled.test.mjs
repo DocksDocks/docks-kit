@@ -48,11 +48,35 @@ function agentParts(text) {
   return { lines: lines.split('\n'), body: text.slice(whole.length) };
 }
 
+// Runs `prepare.mjs agents` of this checkout on Bun with the command-line arguments `args` and a fake omp (see
+// fakeOmp) first on PATH: the child process. Each call names a --project of its own, so it writes nothing in the
+// checkout.
+const agentsCli = (args, omp = fakeOmp()) =>
+  spawnSync(BUN_RUNTIME, [path.join(SKILL_DIR, 'scripts', 'prepare.mjs'), 'agents', ...args], {
+    encoding: 'utf8',
+    env: omp.env,
+  });
+// The output lines of a call that succeeds, and the message of a call that `agents` refuses.
+function agentsLines(args, omp) {
+  const child = agentsCli(args, omp);
+  assert.equal(child.status, 0, child.stderr);
+  return child.stdout.split('\n');
+}
+// A refused call can print warnings first, for example of an omp newer than the verified pin.
+function agentsRefusal(args, omp) {
+  const child = agentsCli(args, omp);
+  assert.equal(child.status, 1, child.stderr);
+  const prefix = 'prepare.mjs: ';
+  const refusal = child.stderr.split('\n').find((line) => line.startsWith(prefix));
+  assert.ok(refusal, child.stderr);
+  return refusal.slice(prefix.length);
+}
+
 test('agents --bundled renders both bundled agents per configuration in structured mode without bash, lsp, and spawns', () => {
   const root = neutralScratch();
   const project = path.join(root, 'project');
   fs.mkdirSync(project);
-  const { lines } = agentsOnBun({ bundled: true, model: MODEL, efforts: 'low,high', project }, root);
+  const lines = agentsLines(['--bundled', '--model', MODEL, '--efforts', 'low,high', '--project', project]);
   const agentDir = path.join(project, '.omp', 'agents');
   assert.deepEqual(fs.readdirSync(agentDir).sort(), [
     'review-bench-bundled-reviewer-high.md',
@@ -97,7 +121,7 @@ test('agents --bundled renders both bundled agents per configuration in structur
     }
   }
   // With --tiers, each agent gets the tier override of its configuration. The run replaces the earlier bundled setup.
-  agentsOnBun({ bundled: true, model: MODEL, efforts: 'high', tiers: 'priority', project }, root);
+  agentsLines(['--bundled', '--model', MODEL, '--efforts', 'high', '--tiers', 'priority', '--project', project]);
   assert.deepEqual(tierOverrides(project), {
     'review-bench-bundled-reviewer-high-fast': 'priority',
     'review-bench-bundled-security-high-fast': 'priority',
@@ -110,11 +134,12 @@ test('agents --bundled refuses another omp version and the options of the other 
   const configsFile = path.join(project, '.omp', 'agents', 'review-bench-configs.json');
   put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
   const before = readText(configsFile);
-  const options = { bundled: true, model: MODEL, efforts: 'high', project };
-  assert.throws(() => agentsOnBun(options, root, fakeOmp({ version: '19.1.2' })), {
-    message: `omp 19.1.2 is installed, but ${VENDORED} holds the bundled agents of omp 19.1.1; run agents --bundled with omp 19.1.1, or vendor the agents of omp 19.1.2 as SOURCE.md in that folder tells`,
-  });
-  assert.throws(() => agentsOnBun(options, root, fakeOmp({ version: '19.1.0' })), /^Error: omp 19\.1\.0 is installed/);
+  const args = ['--bundled', '--model', MODEL, '--efforts', 'high', '--project', project];
+  assert.equal(
+    agentsRefusal(args, fakeOmp({ version: '19.1.2' })),
+    `omp 19.1.2 is installed, but ${VENDORED} holds the bundled agents of omp 19.1.1; run agents --bundled with omp 19.1.1, or vendor the agents of omp 19.1.2 as SOURCE.md in that folder tells`,
+  );
+  assert.match(agentsRefusal(args, fakeOmp({ version: '19.1.0' })), /^omp 19\.1\.0 is installed/);
   // The refused runs change no file.
   assert.equal(readText(configsFile), before);
   assert.deepEqual(fs.readdirSync(path.dirname(configsFile)), ['review-bench-configs.json']);
@@ -123,9 +148,10 @@ test('agents --bundled refuses another omp version and the options of the other 
     ['out', path.join(root, 'ws')],
     ['baseline-dir', path.join(root, 'baseline')],
   ]) {
-    assert.throws(() => agentsOnBun({ ...options, [option]: value }, root), {
-      message: `agents --bundled takes only --model, --efforts, --tiers, and --project; leave out --${option}`,
-    });
+    assert.equal(
+      agentsRefusal([...args, `--${option}`, value]),
+      `agents --bundled takes only --model, --efforts, --tiers, and --project; leave out --${option}`,
+    );
   }
 });
 
@@ -175,8 +201,9 @@ test('score.mjs reads the output schema of each vendored agent from its frontmat
   }
 });
 
-// A git repository whose head commit, a pull request on the base commit, adds src/handler.mjs, docs/benchmark.md, and
-// docs/naïve.md (a path that Git quotes) and changes README.md, with a copy of the scripts; a project with the
+// A git repository whose head commit, a pull request on the base commit, adds src/handler.mjs, docs/benchmark.md,
+// docs/naïve.md (a path that Git quotes), and a file whose name holds a newline, and changes README.md, with a copy of
+// the scripts; a project with the
 // configurations of `agents --bundled`; `writeCase(id, { security, seed, fix, folder })`, which writes a case of
 // `<root>/cases/<folder>/` (default `bundled`) with the seed patch `seed` and the fix patch `fix`; and
 // `runCase(casePath, arms, out)`, which runs `prepare.mjs case` of the copy on Bun.
@@ -189,6 +216,7 @@ const HANDLER = [
 ].join('\n');
 const SEEDED = HANDLER.replace("  return ['git', 'switch', name];", '  return `git switch ${name}`;');
 const QUOTED = 'docs/naïve.md';
+const NEWLINE = 'docs/two\nlines.md';
 function bundledRepo() {
   isolateGit();
   const root = neutralScratch();
@@ -204,6 +232,7 @@ function bundledRepo() {
   // A changed file whose name holds a word that a prompt must not hold: the V1 scope lists it anyway.
   put(repo, 'docs/benchmark.md', '# Timing\n');
   put(repo, QUOTED, '# Names\n');
+  put(repo, NEWLINE, '# Lines\n');
   gitIn(repo, 'add', '-A');
   gitIn(repo, 'commit', '-q', '-m', 'head');
   const head = gitIn(repo, 'rev-parse', 'HEAD').trim();
@@ -273,6 +302,7 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
   );
   const security = promptFileParts(path.join(caseDir, 'V1-low', 'run-1', 'prompts', 'security-reviewer.txt'));
   assert.equal(security.agent, 'agent: review-bench-bundled-security-low');
+  assert.equal(readText(path.join(caseDir, 'snapshot', NEWLINE)), '# Lines\n');
   // The scope comes from the Git listing of the full diff, so it also holds the path that the diff text quotes.
   assert.ok(readText(path.join(caseDir, 'full.diff')).includes('diff --git "a/docs/na\\303\\257ve.md"'));
   assert.equal(
@@ -281,11 +311,13 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
       'Review these files for vulnerabilities that the change introduces.',
       '',
       ...inputs,
-      'Files, relative to the snapshot root:',
-      '- README.md',
-      '- docs/benchmark.md',
-      `- ${QUOTED}`,
-      '- src/handler.mjs',
+      'Files, relative to the snapshot root, each as a JSON string:',
+      '- "README.md"',
+      '- "docs/benchmark.md"',
+      `- "${QUOTED}"`,
+      // The newline of the file name stays inside its JSON string, so the entry stays one line and one path.
+      '- "docs/two\\nlines.md"',
+      '- "src/handler.mjs"',
       '',
       ...rules,
       '',

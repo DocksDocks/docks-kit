@@ -649,11 +649,12 @@ const BUNDLED_TASKS = {
 
 // The prompt of a bundled arm (see ARMS) for the agent role `role`: the task of BUNDLED_TASKS, the snapshot root, the
 // full diff, for `security` the files of `paths.scope` (the changed files of the diff that the snapshot holds,
-// relative to the snapshot root), and the read-scope rules of the other code arms (see buildOpening). The agents reply
-// in structured mode with their output schema, so the prompt names no output format.
+// relative to the snapshot root), and the read-scope rules of the other code arms (see buildOpening). Each scope file
+// is a JSON string, so a path with a newline, another control character, or a quote stays one unambiguous entry.
+// The agents reply in structured mode with their output schema, so the prompt names no output format.
 export function buildBundledPrompt(role, paths) {
-  const files = role === 'security' ? paths.scope.map((file) => `- ${file}`) : [];
-  const scope = files.length ? ['Files, relative to the snapshot root:', ...files] : [];
+  const files = role === 'security' ? paths.scope.map((file) => `- ${JSON.stringify(file)}`) : [];
+  const scope = files.length ? ['Files, relative to the snapshot root, each as a JSON string:', ...files] : [];
   return [
     BUNDLED_TASKS[role],
     '',
@@ -1738,6 +1739,8 @@ export function prepareCase(options, repo) {
   const bundledCase = isBundledCase(casePath);
   const bundledArms = arms.filter((arm) => specOf(arm).side === BUNDLED);
   const bundledSpecs = bundledArms.map((arm) => ({ arm, role: specOf(arm).role }));
+  // Only the security role (V1) gets the changed files as its scope (see buildBundledPrompt).
+  const scoped = bundledSpecs.some((item) => item.role === 'security');
   if (bundledCase || bundledArms.length) checkBundledCase(casePath, caseData, bundledSpecs, bundledCase);
   // A candidate contract overlay reaches only the prompts that case writes; the later rounds of a loop would review
   // without the contract copy, so a loop of a candidate arm cannot measure the change.
@@ -1796,7 +1799,7 @@ export function prepareCase(options, repo) {
     }
     if (!extending) {
       tree = buildCaseWorkspace({ repo, caseData, commits, hidden, casePath, sources, caseDir, paths });
-    } else if (options.loop || addBase || bundledArms.length) {
+    } else if (options.loop || addBase || scoped) {
       tree = withIndex(caseDir, (env) => {
         readReviewed(repo, env, { caseData, commits, sources });
         return writeTree(repo, env);
@@ -1805,9 +1808,7 @@ export function prepareCase(options, repo) {
     if (addBase) writeBaseInstructions(repo, hidden, commits.base, tree, caseDir, commits.delta_base);
     const fullLines = options.loop ? diffSize(repo, hidden, commits.base, tree) : null;
     // The scope of the V1 arm: the changed files of the full diff that the snapshot holds (see bundledScope).
-    const inputPaths = bundledArms.length
-      ? { ...paths, scope: bundledScope(repo, hidden, commits.base, tree, paths.snapshot) }
-      : paths;
+    const inputPaths = scoped ? { ...paths, scope: bundledScope(repo, hidden, commits.base, tree, paths.snapshot) } : paths;
     for (const config of configs) {
       for (const arm of arms) {
         // A sequential declaration need not hold every pair of its arms and configurations.
