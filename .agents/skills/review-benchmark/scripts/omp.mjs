@@ -85,21 +85,9 @@ export const EXCLUSION_PREFIX = '!';
 // REPLY_TOOL (an agent with an output schema, or `task.structured: true`) replies with the arguments of its last call
 // of that tool instead.
 export const REPLY_TOOL = 'yield';
-// An agent with an output schema can give its result in several calls of REPLY_TOOL, and omp folds the accepted calls
-// into one result (see score.mjs structuredReply). A call with a non-empty `error` argument aborts the task, except
-// when the call also has `data` and the error is one of these filler texts, which some providers write into every
-// optional field (omp tools/yield.ts PLACEHOLDER_YIELD_ERRORS). omp compares the trimmed text in lower case.
-export const YIELD_PLACEHOLDER_ERRORS = new Set([
-  'ignore',
-  'ignored',
-  'n/a',
-  'none',
-  'not applicable',
-  'null',
-  'placeholder',
-  'undefined',
-  'unused',
-]);
+// An agent with an output schema can give its result in several calls of REPLY_TOOL. omp records what it accepted
+// from each call in the `details` of the tool result and folds these details into one result (see score.mjs
+// structuredReply).
 // The `stopReason` of an assistant message that the user or omp aborted.
 export const ABORTED_STOP_REASON = 'aborted';
 

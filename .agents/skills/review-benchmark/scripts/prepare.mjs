@@ -9,7 +9,7 @@
 //                          [--fixer-model <m>] [--fixer-effort <e>] [--fixer-tier <t>]
 //                          [--manager-model <m>] [--manager-effort <e>] [--manager-tier <t>]
 //                          [--project <dir>] (--out <ws> | --baseline-dir <dir>)
-//   bun prepare.mjs agents --bundled --model <m>[,<m>...] --efforts <list> [--tiers <list>] [--project <dir>]
+//   bun prepare.mjs agents --bundled --model <m>[,<m>...] --efforts <list> [--tiers <list>] --project <dir>
 //   bun prepare.mjs sequential-plan --cases <case.json,...> --reference <arm>@<config>
 //                        --candidates <arm>@<config>[,...] --looks <1,...,k> --out <ws> [--project <dir>]
 //   bun prepare.mjs case --case <case.json> --arms <B0,C3,...> (--runs <k> | --sequential) --out <ws>
@@ -36,10 +36,11 @@ import { parseArgs } from 'node:util';
 import {
   BENCHMARK_REPOSITORY_NAMES,
   BASE_INSTRUCTIONS,
+  BUNDLED_DIR,
+  BUNDLED_OMP_VERSION,
   CONTRACT_COPY,
   CONTROL_PREFIX,
   caseFilePath,
-  diffFiles,
   FIXER_DIR,
   FIXER_NAME,
   fixPlan,
@@ -233,16 +234,14 @@ const lensOf = (reviewer) =>
   reviewer.startsWith(`${SELF_REVIEW}-`) ? reviewer.slice(SELF_REVIEW.length + 1) : reviewer;
 
 // The bundled arms measure the omp agents `reviewer` and `security-reviewer` (#229). omp compiles them into its binary,
-// so `agents --bundled` renders the copies of their source files that BUNDLED_DIR holds, of the omp release
-// BUNDLED_OMP_VERSION (see BUNDLED_DIR/SOURCE.md). After a raise of the omp pin, add the folder of the new release and
-// change this version. Each role of BUNDLED_AGENTS gives the agents `review-bench-bundled-<role>-<config>` from its
-// vendored file (see bundledSource). The copies leave out the tools of omp.mjs COMMAND_TOOLS and the SPAWNS_KEY line,
-// because the read scope cannot see the files that a command, a language server, or a spawned agent reads, and the
-// live checkout holds the fixes of the defects. They set STRUCTURED_KEY, so that the agent gets the `yield` tool and
-// its output schema also when the omp setting `task.structured` is off.
+// so `agents --bundled` renders the copies of their source files that score.mjs BUNDLED_DIR holds, of the omp release
+// score.mjs BUNDLED_OMP_VERSION, which also reads their output schemas. Each role of BUNDLED_AGENTS gives the agents
+// `review-bench-bundled-<role>-<config>` from its vendored file (see bundledSource). The copies leave out the tools of
+// omp.mjs COMMAND_TOOLS and the SPAWNS_KEY line, because the read scope cannot see the files that a command, a
+// language server, or a spawned agent reads, and the live checkout holds the fixes of the defects. They set
+// STRUCTURED_KEY, so that the agent gets the `yield` tool and its output schema also when the omp setting
+// `task.structured` is off.
 const BUNDLED = 'bundled';
-const BUNDLED_OMP_VERSION = '19.1.1';
-const BUNDLED_DIR = path.join(SKILL_DIR, BUNDLED, `omp-${BUNDLED_OMP_VERSION}`);
 const BUNDLED_AGENTS = { reviewer: 'reviewer.md', security: 'security-reviewer.md' };
 // A case of the bundled arms is a case file in this folder of a `cases` folder (see checkSeedRule).
 const BUNDLED_CASES = path.join('cases', BUNDLED);
@@ -321,9 +320,10 @@ const LENS_SCOPE = {
 
 // Reviewer prompts must not tell the reviewer that it runs in a test.
 const FORBIDDEN_PROMPT_WORDS = /benchmark|judge|answer key/i;
-// The repository whose pages the reviewer and manager prompts forbid: its current name and its name before the rename,
-// from the one list of score.mjs, which the read scope also checks (see score.mjs webPageAllowed).
-const REPOSITORY_PAGES = `the ${BENCHMARK_REPOSITORY_NAMES.current} repository, formerly ${BENCHMARK_REPOSITORY_NAMES.former}`;
+// The repositories whose pages the reviewer and manager prompts forbid: the current name of the benchmark repository,
+// its name before the rename, and the public repository with its earlier history, from the one list of score.mjs,
+// which the read scope also checks (see score.mjs webPageAllowed and targetsBenchmark).
+const REPOSITORY_PAGES = `the ${BENCHMARK_REPOSITORY_NAMES.current} repository, formerly ${BENCHMARK_REPOSITORY_NAMES.former}, or of the ${BENCHMARK_REPOSITORY_NAMES.public} repository`;
 
 const TEST_FOLDERS = new Set(['test', 'tests', 'spec', '__tests__', 'fixtures']);
 const PROSE_FILE = /\.(md|txt|rst)$/i;
@@ -1433,9 +1433,9 @@ function checkBundledCase(casePath, caseData, arms, bundledCase) {
   }
 }
 
-// The problems of the hunks of a patch text: each file section of the seed patch must change a file that exists on
-// both sides (no new, deleted, or renamed file), and each hunk must add at least one line. The line counts of the hunk
-// header give the end of a hunk, so a changed line that starts like a header stays in its hunk.
+// The problems of the hunks of a patch text: each hunk must add at least one line. The line counts of the hunk header
+// give the end of a hunk, so a changed line that starts like a header stays in its hunk. The file changes of the seed
+// come from Git, not from this text (see treeChanges).
 function seedPatchProblems(text) {
   const problems = [];
   const lines = text.split('\n');
@@ -1443,14 +1443,6 @@ function seedPatchProblems(text) {
   while (index < lines.length) {
     const line = lines[index];
     index += 1;
-    if (line.startsWith('--- ') && lines[index]?.startsWith('+++ ')) {
-      const [from, to] = [line, lines[index]].map((header) => header.slice(4).replace(/\t.*$/, ''));
-      index += 1;
-      if (!from.startsWith('a/') || !to.startsWith('b/') || from.slice(2) !== to.slice(2)) {
-        problems.push(`it changes ${from} into ${to}; a seed only changes lines of one existing file per section`);
-      }
-      continue;
-    }
     const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
     if (!hunk) continue;
     let [removed, added] = [hunk[1] ?? 1, hunk[2] ?? 1].map(Number);
@@ -1473,58 +1465,98 @@ function seedPatchProblems(text) {
   return problems;
 }
 
-// The seed rule of a `cases/bundled/` case (see ../SKILL.md, Quick comparison): the seed patch edits only files that
-// the pull request adds, so the base commit holds none of them and the head commit holds each; each hunk of the seed
-// adds at least one line (see seedPatchProblems); each file of the seed is in the diffs of the case, so the pathspec
-// `hidden` of the snapshot and the diffs (see hiddenPathspec) does not leave it out; and the fix patch of the seeded
-// defect is the exact reverse of the seed patch: in an index of its own in `dir`, the head tree with the seed patch
-// and then the fix patch is the head tree again. checkBundledCase checked the fields before.
+// The file changes from the tree `from` to the tree `to`, as Git lists them with NUL-delimited paths and without
+// rename detection, so a quoted path, a metadata-only change, and a binary change show as Git applied them: one
+// `{ file, status, sameMode, added }` per changed file, where `status` is the raw status letter (`M`, `A`, `D`, or
+// `T`), `sameMode` tells whether the file mode stays, and `added` is the count of added text lines (null for a binary
+// file).
+function treeChanges(repo, from, to) {
+  const listing = (format) =>
+    git(repo, ['diff-tree', '-r', '-z', '--no-renames', format, from, to]).toString().split('\0');
+  const changes = new Map();
+  const raw = listing('--raw');
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    const [fromMode, toMode, , , status] = raw[index].slice(1).split(' ');
+    changes.set(raw[index + 1], { file: raw[index + 1], status, sameMode: fromMode === toMode, added: 0 });
+  }
+  for (const item of listing('--numstat').filter(Boolean)) {
+    const [added, , ...file] = item.split('\t');
+    const change = changes.get(file.join('\t'));
+    if (change) change.added = added === '-' ? null : Number(added);
+  }
+  return [...changes.values()];
+}
+
+// The problems of the changes of a seed (see treeChanges): each changed file keeps its mode and gets at least one added
+// text line, and the seed adds, deletes, or retypes no file.
+function seedChangeProblems(changes) {
+  if (changes.length === 0) return ['it changes no file'];
+  const kinds = { A: 'adds', D: 'deletes', T: 'changes the type of' };
+  return changes.flatMap(({ file, status, sameMode, added }) => {
+    if (status !== 'M') return [`it ${kinds[status] ?? `changes (${status})`} ${file}; a seed only changes lines of a file`];
+    if (!sameMode) return [`it changes the mode of ${file}; a seed only changes lines of a file`];
+    if (added === null) return [`it changes ${file} as a binary file; each seeded file needs an added text line`];
+    return added > 0 ? [] : [`it adds no text line to ${file}; each seeded file needs an added text line`];
+  });
+}
+
+// The seed rule of a `cases/bundled/` case (see ../SKILL.md, Quick comparison): each hunk of the seed adds at least one
+// line (see seedPatchProblems); in an index of its own in `dir`, the seed patch applies to the head tree, and the
+// changes from the head tree to the seeded tree, as Git lists them (see treeChanges), only change the lines of files,
+// each with at least one added text line (see seedChangeProblems); these files are files that the pull request adds,
+// so the base commit holds none of them and the head commit holds each; each of them is in the diffs of the case, so
+// the pathspec `hidden` of the snapshot and the diffs (see hiddenPathspec) does not leave it out; and the fix patch of
+// the seeded defect is the exact reverse of the seed patch: the seeded tree with the fix patch is the head tree again.
+// checkBundledCase checked the fields before.
 function checkSeedRule({ repo, caseData, commits, hidden, sources, casePath, dir }) {
   const label = `bundled case ${caseData.id}`;
   const [seed] = caseData.known;
-  const text = fs.readFileSync(sources.patch, 'utf8');
-  const files = diffFiles(text);
-  const problems = seedPatchProblems(text);
-  if (files.length === 0) problems.push('it changes no file');
-  if (problems.length) fail(`${label}: the seed patch ${caseData.patch} breaks the seed rule: ${problems.join('; ')}`);
-  const holds = (commit, file) => runGit(repo, ['cat-file', '-e', `${commit}:${file}`]).status === 0;
-  for (const file of files) {
-    if (holds(commits.base, file)) {
-      fail(
-        `${label}: the seed patch ${caseData.patch} edits ${file}, which the base ${caseData.base} holds; seed only a file that the pull request adds`,
-      );
-    }
-    if (!holds(commits.head, file)) {
-      fail(
-        `${label}: the seed patch ${caseData.patch} edits ${file}, which the head ${caseData.head} does not hold; seed only a file that the pull request adds`,
-      );
-    }
-  }
-  // Each seeded file is absent from the base and present in the head, so the diff from the base to the head names it
-  // unless the hidden pathspec leaves it out.
-  const shown = new Set(changedPaths(repo, hidden, commits.base, commits.head));
-  for (const file of files.filter((item) => !shown.has(item))) {
-    fail(
-      `${label}: the seed patch ${caseData.patch} edits ${file}, which the snapshot and the diffs of the case leave out; a seed in the benchmark skill folder needs "show_benchmark": true, and its cases/ folder stays hidden`,
-    );
-  }
+  const breaks = (problems) =>
+    fail(`${label}: the seed patch ${caseData.patch} breaks the seed rule: ${problems.join('; ')}`);
+  const hunkProblems = seedPatchProblems(fs.readFileSync(sources.patch, 'utf8'));
+  if (hunkProblems.length) breaks(hunkProblems);
   const fixFile = path.join(path.dirname(casePath), seed.fix);
   const notReverse = `${label}: the fix patch ${seed.fix} is not the exact reverse of the seed patch ${caseData.patch}`;
   withIndex(dir, (env) => {
     git(repo, ['read-tree', commits.head], { env });
     const head = writeTree(repo, env);
     applyPatch(repo, env, sources.patch, `${label}: the seed patch ${caseData.patch} does not apply to the head`);
+    const changes = treeChanges(repo, head, writeTree(repo, env));
+    const changeProblems = seedChangeProblems(changes);
+    if (changeProblems.length) breaks(changeProblems);
+    const files = changes.map((change) => change.file);
+    const holds = (commit, file) => runGit(repo, ['cat-file', '-e', `${commit}:${file}`]).status === 0;
+    for (const file of files) {
+      if (holds(commits.base, file)) {
+        fail(
+          `${label}: the seed patch ${caseData.patch} edits ${file}, which the base ${caseData.base} holds; seed only a file that the pull request adds`,
+        );
+      }
+      if (!holds(commits.head, file)) {
+        fail(
+          `${label}: the seed patch ${caseData.patch} edits ${file}, which the head ${caseData.head} does not hold; seed only a file that the pull request adds`,
+        );
+      }
+    }
+    // Each seeded file is absent from the base and present in the head, so the diff from the base to the head names
+    // it unless the hidden pathspec leaves it out.
+    const shown = new Set(changedPaths(repo, hidden, commits.base, commits.head));
+    for (const file of files.filter((item) => !shown.has(item))) {
+      fail(
+        `${label}: the seed patch ${caseData.patch} edits ${file}, which the snapshot and the diffs of the case leave out; a seed in the benchmark skill folder needs "show_benchmark": true, and its cases/ folder stays hidden`,
+      );
+    }
     applyPatch(repo, env, fixFile, `${notReverse}: it does not apply after the seed patch`);
     if (writeTree(repo, env) !== head) fail(`${notReverse}: the seed patch and then the fix patch do not give the head`);
   });
 }
 
-// The changed files of the full diff of a case folder that its snapshot holds, relative to the snapshot root: the
-// scope of the V1 arm (see buildBundledPrompt). A file that the change deletes is not in the snapshot.
-function snapshotFiles(paths) {
-  return diffFiles(fs.readFileSync(paths.fullDiff, 'utf8')).filter((file) =>
-    fs.existsSync(path.join(paths.snapshot, ...file.split('/'))),
-  );
+// The scope of the V1 arm (see buildBundledPrompt): the files that the full diff from the base `base` to the reviewed
+// tree `tree` changes, from the NUL-delimited listing of Git with the pathspec `hidden` of the diffs (see
+// changedPaths), that the snapshot `snapshot` holds, relative to the snapshot root. A file that the change deletes is
+// not in the snapshot.
+function bundledScope(repo, hidden, base, tree, snapshot) {
+  return changedPaths(repo, hidden, base, tree).filter((file) => fs.existsSync(path.join(snapshot, ...file.split('/'))));
 }
 
 // The runs of the first look of `case --sequential` (see ../SKILL.md, Procedure): one run per case.
@@ -1764,7 +1796,7 @@ export function prepareCase(options, repo) {
     }
     if (!extending) {
       tree = buildCaseWorkspace({ repo, caseData, commits, hidden, casePath, sources, caseDir, paths });
-    } else if (options.loop || addBase) {
+    } else if (options.loop || addBase || bundledArms.length) {
       tree = withIndex(caseDir, (env) => {
         readReviewed(repo, env, { caseData, commits, sources });
         return writeTree(repo, env);
@@ -1772,8 +1804,10 @@ export function prepareCase(options, repo) {
     }
     if (addBase) writeBaseInstructions(repo, hidden, commits.base, tree, caseDir, commits.delta_base);
     const fullLines = options.loop ? diffSize(repo, hidden, commits.base, tree) : null;
-    // The scope of the V1 arm: the changed files of the full diff that the snapshot holds.
-    const inputPaths = bundledArms.length ? { ...paths, scope: snapshotFiles(paths) } : paths;
+    // The scope of the V1 arm: the changed files of the full diff that the snapshot holds (see bundledScope).
+    const inputPaths = bundledArms.length
+      ? { ...paths, scope: bundledScope(repo, hidden, commits.base, tree, paths.snapshot) }
+      : paths;
     for (const config of configs) {
       for (const arm of arms) {
         // A sequential declaration need not hold every pair of its arms and configurations.
@@ -3001,12 +3035,37 @@ export function checkProjectSettings(project, overrides, { run = runOmp } = {}) 
 // release, so it takes no baseline, variant, self-review, fixer, or manager option.
 const BUNDLED_OPTIONS = new Set(['bundled', 'model', 'efforts', 'tiers', 'project']);
 
+// What `agents` wrote in `project` for another setup than `agents --bundled`: its list of configurations (a list
+// without the `bundled` record), each generated agent file that is no bundled agent (see agentName), and each tier
+// override of such an agent in the omp project files. removeGenerated would remove them.
+function otherSetup(project) {
+  const agentDir = path.join(project, AGENT_DIR);
+  const bundledPrefix = `${GENERATED_PREFIX}${BUNDLED}-`;
+  const other = (name) => name.startsWith(GENERATED_PREFIX) && !name.startsWith(bundledPrefix);
+  const found = [];
+  const configsFile = path.join(agentDir, CONFIGS_FILE);
+  if (fs.existsSync(configsFile) && readJson(configsFile).bundled === undefined) found.push(configsFile);
+  if (fs.existsSync(agentDir)) {
+    for (const name of fs.readdirSync(agentDir).sort()) {
+      if (name !== CONFIGS_FILE && other(name)) found.push(path.join(agentDir, name));
+    }
+  }
+  for (const store of [PROJECT_CONFIG_FILE, LEGACY_SETTINGS_FILE]) {
+    const overrides = readSettings(project, store)[SETTINGS_SECTION]?.[OVERRIDES_KEY] ?? {};
+    const names = Object.keys(overrides).filter(other);
+    if (names.length) found.push(`the tier overrides ${names.join(', ')} in ${path.join(project, store.file)}`);
+  }
+  return found;
+}
+
 // `agents --bundled`: writes the agent `review-bench-bundled-<role>-<config>` of each role of BUNDLED_AGENTS (see
 // bundledSource and renderAgent) for each configuration, the list of configurations with the record
-// `bundled: { ompVersion }` of the vendored release, and the tier overrides, after the omp preflight of `agents`. It
-// stops before the first file changes when the installed omp is not BUNDLED_OMP_VERSION: the vendored copies would then
-// differ from the agents of the installed omp. Without `--tiers`, each configuration gets the tier null (see
-// buildConfigs). The list holds the bundled configurations only, so a bundled setup uses a `--project` of its own.
+// `bundled: { ompVersion }` of the vendored release, and the tier overrides, after the omp preflight of `agents`. The
+// list holds the bundled configurations only, so a bundled setup needs a `--project` of its own: the command stops
+// without `--project`, and it stops when the project holds the setup of another `agents` run (see otherSetup), which
+// it would replace. It replaces an earlier bundled setup. It also stops before the first file changes when the
+// installed omp is not BUNDLED_OMP_VERSION: the vendored copies would then differ from the agents of the installed
+// omp. Without `--tiers`, each configuration gets the tier null (see buildConfigs).
 function prepareBundledAgents(options, repo, { run }) {
   const other = Object.keys(options).filter((name) => options[name] !== undefined && !BUNDLED_OPTIONS.has(name));
   if (other.length) {
@@ -3014,11 +3073,20 @@ function prepareBundledAgents(options, repo, { run }) {
     fail(`agents --bundled takes only --model, --efforts, --tiers, and --project; leave out ${flags}`);
   }
   if (!options.efforts) fail('agents --bundled needs --efforts <list>, for example --efforts high');
+  if (!options.project) {
+    fail('agents --bundled needs --project <dir>, a folder of its own: its list of configurations holds only the bundled configurations');
+  }
   const models = parseModels(options.model);
   const efforts = parseList(options.efforts, '--efforts', EFFORT_LEVELS);
   const tiers = options.tiers === undefined ? null : parseTiers(options.tiers);
   const configs = buildConfigs({ models, efforts, tiers });
   const project = projectDir(options, repo);
+  const found = otherSetup(project);
+  if (found.length) {
+    fail(
+      `agents --bundled would replace the setup of another agents run in ${project}: ${found.join('; ')}; give agents --bundled a --project of its own, or remove that setup with prepare.mjs clean --project ${project}`,
+    );
+  }
   const ompVersion = ompVersionCheck({ run });
   if (ompVersion !== BUNDLED_OMP_VERSION) {
     fail(
@@ -3324,7 +3392,7 @@ const USAGE = `usage:
                      [--fixer-model <m>] [--fixer-effort <e>] [--fixer-tier <t>]
                      [--manager-model <m>] [--manager-effort <e>] [--manager-tier <t>]
                      [--project <dir>] (--out <ws> | --baseline-dir <dir>)
-  prepare.mjs agents --bundled --model <m>[,<m>...] --efforts <list> [--tiers <list>] [--project <dir>]
+  prepare.mjs agents --bundled --model <m>[,<m>...] --efforts <list> [--tiers <list>] --project <dir>
   prepare.mjs sequential-plan --cases <case.json,...> --reference <arm>@<config> --candidates <arm>@<config>[,...]
                    --looks <1,...,k> --out <ws> [--project <dir>]
   prepare.mjs case --case <case.json> --arms <list> (--runs <k> | --sequential) --out <ws> [--configs <list>]

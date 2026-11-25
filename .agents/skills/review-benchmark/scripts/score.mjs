@@ -17,6 +17,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parsePlan } from '../../../../cli/src/plan/records.ts';
 import { parseReviewComment } from '../../../../cli/src/plan/reviews.ts';
+import { extractFrontmatter, parseFrontmatter } from '../../../../cli/src/skills/frontmatter.ts';
 import {
   ABORTED_STOP_REASON,
   EXCLUSION_PREFIX,
@@ -32,7 +33,6 @@ import {
   TOKEN_FIELDS,
   TRANSCRIPT_RECORDS,
   WEB_SEARCH_TOOL,
-  YIELD_PLACEHOLDER_ERRORS,
   tierFamily,
 } from './omp.mjs';
 
@@ -62,6 +62,10 @@ export const BASE_INSTRUCTIONS = 'base-instructions';
 // `*.diff` files.
 const INPUT_FOLDERS = ['snapshot', 'prompts', BASE_INSTRUCTIONS];
 const INPUT_FILES = new Set(['plan.md', 'previous-review.md', 'rejection.md']);
+// The prompt of a bundled reviewer (prepare.mjs buildBundledPrompt) names only the snapshot root and the full diff of
+// the case folder, and forbids every skill read, so these are its only inputs.
+const BUNDLED_INPUT_FOLDERS = ['snapshot'];
+const BUNDLED_INPUT_FILES = new Set(['full.diff']);
 // The copy of the plan contract in the run folder of a variant with a contract overlay (`prepare.mjs case`). The prompt
 // of the run names it as the plan contract, so it is an input of that run and of no other run.
 export const CONTRACT_COPY = 'plan-contract.md';
@@ -176,16 +180,31 @@ const GLOB_CHARACTER = /[*?[{]/;
 // Hosts whose paths start with the owner and the name of a repository.
 const GITHUB_WEB_HOSTS = new Set(['github.com', 'www.github.com']);
 const REPOSITORY_HOSTS = new Set([...GITHUB_WEB_HOSTS, 'raw.githubusercontent.com']);
-// The benchmark repository, as GitHub names it: its current name, and its name before the rename, which GitHub
-// redirects to the current name. prepare.mjs names both in the reviewer and manager prompts.
-export const BENCHMARK_REPOSITORY_NAMES = { current: 'DocksDocks/docks-kit', former: 'DocksDocks/docks' };
-// The owner and the names of the benchmark repository, in lower case, each also with the `.git` suffix of a clone URL.
+// The benchmark repository, as GitHub names it: its current name; its name before the rename, which GitHub redirects
+// to the current name; and DocksDocks/public, a separate repository that holds an earlier history of the kit, so its
+// pages also show the code of the cases without their seeds and with the fixes of their defects. prepare.mjs names
+// all three in the reviewer and manager prompts.
+export const BENCHMARK_REPOSITORY_NAMES = {
+  current: 'DocksDocks/docks-kit',
+  former: 'DocksDocks/docks',
+  public: 'DocksDocks/public',
+};
+// The owner of the benchmark repository in lower case, and each repository name in lower case, also with the `.git`
+// suffix of a clone URL, mapped to its repository: the current and the former name are one repository (`kit`), and
+// the public repository is another (`public`). A web search leaves the benchmark repository only when it excludes
+// both repositories (see targetsBenchmark).
+const repositoryPart = (full) => full.split('/')[1].toLowerCase();
 const BENCHMARK_REPOSITORY = {
   owner: BENCHMARK_REPOSITORY_NAMES.current.split('/')[0].toLowerCase(),
-  names: new Set(
-    Object.values(BENCHMARK_REPOSITORY_NAMES)
-      .map((full) => full.split('/')[1].toLowerCase())
-      .flatMap((name) => [name, `${name}.git`]),
+  repositories: new Map(
+    Object.entries(BENCHMARK_REPOSITORY_NAMES).flatMap(([key, full]) => {
+      const repository = key === 'public' ? 'public' : 'kit';
+      const name = repositoryPart(full);
+      return [
+        [name, repository],
+        [`${name}.git`, repository],
+      ];
+    }),
   ),
 };
 // An invalid-run reason names this many outside targets, then the count of the others.
@@ -414,46 +433,106 @@ export function unwrapBlock(text) {
 
 // The bundled arms of prepare.mjs (R1 and V1) dispatch rendered copies of the omp agents `reviewer` and
 // `security-reviewer` (`prepare.mjs agents --bundled`). The reviewer of each arm has the name of its agent. These
-// agents reply in structured mode: `transcripts` folds their `yield` calls into one object and writes the object as the
-// block (see structuredReply). Each entry holds the facts of the output schema of the vendored agent (prepare.mjs
-// BUNDLED_DIR) that the scorer checks: each required field with its check, and each field that holds a list. omp
-// checks a section when the agent yields it and rejects a section that does not fit, so the scorer checks only the
-// fields of the assembled object.
-export const BUNDLED_REPLIES = {
-  reviewer: {
-    required: {
-      overall_correctness: (value) => value === 'correct' || value === 'incorrect',
-      explanation: (value) => typeof value === 'string',
-      confidence: (value) => typeof value === 'number',
-    },
-    lists: ['findings'],
-  },
-  'security-reviewer': {
-    required: { coverage_summary: (value) => typeof value === 'string' },
-    lists: ['findings', 'reviewed_paths', 'deferred'],
-  },
-};
-const isBundledReviewer = (reviewer) => typeof reviewer === 'string' && Object.hasOwn(BUNDLED_REPLIES, reviewer);
+// agents reply in structured mode: `transcripts` folds their `yield` results into one object and writes the object as
+// the block (see structuredReply). omp compiles the agents into its binary, so BUNDLED_DIR holds the copies of their
+// source files of the omp release BUNDLED_OMP_VERSION (see BUNDLED_DIR/SOURCE.md), one file `<reviewer>.md` per agent.
+// After a raise of the omp pin, add the folder of the new release and change this version.
+export const BUNDLED_OMP_VERSION = '19.1.1';
+export const BUNDLED_DIR = path.join(BENCHMARK_DIR, 'bundled', `omp-${BUNDLED_OMP_VERSION}`);
+const BUNDLED_REVIEWERS = new Set(['reviewer', 'security-reviewer']);
+const isBundledReviewer = (reviewer) => BUNDLED_REVIEWERS.has(reviewer);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 // The severity of a `reviewer` finding from its priority P0 to P3, and of a `security-reviewer` finding from its
 // severity.
 const PRIORITY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 const SECURITY_SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW', informational: 'LOW' };
 
-// The reason why `value` does not fit the output schema of the bundled reviewer `reviewer` (see BUNDLED_REPLIES), or
-// null when it fits.
+// The output schema of the bundled reviewer `reviewer`: the JSON Type Definition (RFC 8927) under the `output` key of
+// the YAML frontmatter of its vendored file, read once with the frontmatter parser of the kit.
+const bundledSchemas = new Map();
+export function bundledSchema(reviewer) {
+  if (!bundledSchemas.has(reviewer)) {
+    const file = path.join(BUNDLED_DIR, `${reviewer}.md`);
+    const extracted = extractFrontmatter(readText(file, `; restore the vendored agents of omp ${BUNDLED_OMP_VERSION}`));
+    const parsed = extracted.ok ? parseFrontmatter(extracted.text) : extracted;
+    const output = parsed.ok ? parsed.value.output : undefined;
+    if (!isRecord(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
+    bundledSchemas.set(reviewer, output);
+  }
+  return bundledSchemas.get(reviewer);
+}
+
+// The JSON type of each JTD type, as omp v19.1.1 converts it (packages/coding-agent/src/tools/jtd-to-json-schema.ts,
+// primitiveMap). omp keeps another type name, such as `number`, as the JSON Schema type of that name.
+const JTD_JSON_TYPES = {
+  boolean: 'boolean',
+  string: 'string',
+  timestamp: 'string',
+  float32: 'number',
+  float64: 'number',
+  int8: 'integer',
+  uint8: 'integer',
+  int16: 'integer',
+  uint16: 'integer',
+  int32: 'integer',
+  uint32: 'integer',
+};
+const JSON_TYPE_CHECKS = {
+  boolean: (value) => typeof value === 'boolean',
+  string: (value) => typeof value === 'string',
+  number: (value) => typeof value === 'number',
+  integer: (value) => Number.isInteger(value),
+  object: isRecord,
+  array: Array.isArray,
+  null: (value) => value === null,
+};
+
+// The places where `value` does not fit the JTD schema `schema`, as the JSON Schema that omp v19.1.1 converts it to
+// (jtd-to-json-schema.ts convertSchemaForm, in the same order of forms): `nullable`, `enum`, `elements`, `type`,
+// `values`, and `properties` with `optionalProperties`, which allow no other key. `at` is the path of `value` in the
+// result. A schema form that this function does not check (`discriminator`, `ref`) stops the command, so that a
+// vendored schema of a later omp release does not pass without a check.
+function schemaProblems(schema, value, at = '') {
+  if (!isRecord(schema)) return [];
+  if (schema.nullable === true && value === null) return [];
+  const place = at || 'the result';
+  const misfit = [`${place} ${JSON.stringify(value)} does not fit`];
+  if (Array.isArray(schema.enum)) return schema.enum.includes(value) ? [] : misfit;
+  if (isRecord(schema.elements)) {
+    if (!Array.isArray(value)) return [`${place} is not a list`];
+    return value.flatMap((item, index) => schemaProblems(schema.elements, item, `${at}[${index}]`));
+  }
+  if (typeof schema.type === 'string') {
+    const fits = JSON_TYPE_CHECKS[JTD_JSON_TYPES[schema.type] ?? schema.type];
+    if (!fits) fail(`the output schema type ${schema.type} at ${place} has no check in score.mjs schemaProblems`);
+    return fits(value) ? [] : misfit;
+  }
+  const field = (name) => (at ? `${at}.${name}` : name);
+  if (isRecord(schema.values)) {
+    if (!isRecord(value)) return [`${place} is not an object`];
+    return Object.entries(value).flatMap(([name, item]) => schemaProblems(schema.values, item, field(name)));
+  }
+  if (isRecord(schema.properties) || isRecord(schema.optionalProperties)) {
+    if (!isRecord(value)) return [`${place} is not an object`];
+    const fields = { ...schema.optionalProperties, ...schema.properties };
+    const missing = Object.keys(schema.properties ?? {}).filter((name) => !Object.hasOwn(value, name));
+    return [
+      ...missing.map((name) => `no ${field(name)}`),
+      ...Object.entries(value).flatMap(([name, item]) =>
+        Object.hasOwn(fields, name) ? schemaProblems(fields[name], item, field(name)) : [`${field(name)} is not in the schema`],
+      ),
+    ];
+  }
+  if (Object.hasOwn(schema, 'discriminator') || Object.hasOwn(schema, 'ref')) {
+    fail(`the output schema form at ${place} has no check in score.mjs schemaProblems`);
+  }
+  return [];
+}
+
+// The reason why `value` does not fit the output schema of the bundled reviewer `reviewer` (see bundledSchema and
+// schemaProblems), or null when it fits.
 export function structuredProblem(reviewer, value) {
-  if (!isRecord(value)) return `the result of ${reviewer} is not an object`;
-  const { required, lists } = BUNDLED_REPLIES[reviewer];
-  const problems = [];
-  for (const [field, fits] of Object.entries(required)) {
-    if (!Object.hasOwn(value, field)) problems.push(`no ${field}`);
-    else if (!fits(value[field])) problems.push(`${field} ${JSON.stringify(value[field])} does not fit`);
-  }
-  for (const field of lists) {
-    if (Object.hasOwn(value, field) && !Array.isArray(value[field])) problems.push(`${field} is not a list`);
-  }
-  if (Array.isArray(value.findings) && !value.findings.every(isRecord)) problems.push('a finding is not an object');
+  const problems = schemaProblems(bundledSchema(reviewer), value);
   return problems.length ? `the result fails the output schema of ${reviewer}: ${problems.join(', ')}` : null;
 }
 
@@ -500,25 +579,26 @@ function structuredFinding(reviewer, item) {
 
 // The verdict and the findings of the block of a bundled reviewer: the JSON object that `transcripts` wrote (see
 // structuredReply). A block that is no JSON, or whose object does not fit the output schema of the agent (see
-// structuredProblem), is unreadable. Else the verdict is `fixes-required` when the object holds a finding or
-// `overall_correctness` is `incorrect`, and `pass` otherwise.
+// structuredProblem), is unreadable and gives no finding to the judge. Such a block is also the record of a reply
+// with a problem, `{ unreadable, reply }` (see transcriptsCommand), which no output schema of a bundled agent allows.
+// Else the verdict is `fixes-required` when the object holds a finding or `overall_correctness` is `incorrect`, and
+// `pass` otherwise.
 function parseStructuredBlock(text, reviewer) {
+  const unreadable = { verdict: 'unreadable', findings: [] };
   let value;
   try {
     value = JSON.parse(text);
   } catch {
-    return { verdict: 'unreadable', findings: [] };
+    return unreadable;
   }
-  const items = isRecord(value) && Array.isArray(value.findings) ? value.findings.filter(isRecord) : [];
-  const findings = items.map((item) => structuredFinding(reviewer, item));
-  let verdict = 'pass';
-  if (structuredProblem(reviewer, value) !== null) verdict = 'unreadable';
-  else if (findings.length || value.overall_correctness === 'incorrect') verdict = 'fixes-required';
+  if (structuredProblem(reviewer, value) !== null) return unreadable;
+  const findings = (value.findings ?? []).map((item) => structuredFinding(reviewer, item));
+  const verdict = findings.length || value.overall_correctness === 'incorrect' ? 'fixes-required' : 'pass';
   return { verdict, findings };
 }
 
 // The verdict comes from the plan helper. A block of the other review kind is unreadable for this case. The block of a
-// bundled reviewer (`reviewer`, see BUNDLED_REPLIES) is a structured reply (see parseStructuredBlock).
+// bundled reviewer (see isBundledReviewer) is a structured reply (see parseStructuredBlock).
 export function parseBlock(text, family, reviewer) {
   if (isBundledReviewer(reviewer)) return parseStructuredBlock(text, reviewer);
   const block = unwrapBlock(text);
@@ -1225,6 +1305,14 @@ function scoreRun(run, caseEntry, judged, metas) {
       entry: metaOf(round.round)?.manager?.agents?.[MANAGER_NAME],
     })),
   ];
+  // A bundled run (meta.json `bundledOmp`) whose transcript shows another omp version, or none, than its vendored
+  // agents is invalid (see transcriptsCommand `replyError`), and its version stays in that reason. Such a run is
+  // outside the comparison, so its version does not join the version check of `report`.
+  const bundledOmp = metas[run.key]?.bundledOmp;
+  const versionRejected =
+    typeof bundledOmp === 'string' &&
+    reviewers.some(({ entry }) => entry !== undefined && entry.ompVersion !== bundledOmp);
+  const versionedAgents = versionRejected ? [] : runAgents;
   return {
     case: run.case,
     arm: run.arm,
@@ -1263,12 +1351,13 @@ function scoreRun(run, caseEntry, judged, metas) {
     finalFound: run.hasRounds ? knownIds.filter((id) => repaired.has(id)) : null,
     // The omp versions that the transcripts of the reviewers, fixers, and managers of the run name (see
     // transcriptFacts `ompVersion`), and, for a run with a configuration, the agents whose transcript facts name no
-    // omp version; `report` compares only runs of one known omp version.
+    // omp version; `report` compares only runs of one known omp version. A bundled run that its omp version made
+    // invalid has none of them (see versionRejected).
     ompVersions: distinct(
-      runAgents.map(({ entry }) => entry?.ompVersion).filter((version) => typeof version === 'string'),
+      versionedAgents.map(({ entry }) => entry?.ompVersion).filter((version) => typeof version === 'string'),
     ),
     unversioned: config
-      ? runAgents
+      ? versionedAgents
           .filter(({ entry }) => Array.isArray(entry?.messages) && typeof entry.ompVersion !== 'string')
           .map(({ label }) => label)
       : [],
@@ -1956,8 +2045,10 @@ const capitals = (...tests) =>
   `${tests.map((test) => ratio(test.capital)).join(', ')}; threshold ${whole(tests[0].threshold)}`;
 
 // The interval rows of the decision table. After the interval of the escaped defects per 50 known comes the escaped
-// defects per 50 known of the column and of the reference column on the cases that both ran, the cases that the
-// interval pairs, so that a decision reads its rate and its interval from the same cases.
+// defects per 50 known of the column and of the reference column on the cases that both ran, from the same paired
+// cases as the interval (see pairedCases): each rate is the sum over the cases of the mean escaped defects of the runs
+// of its column in the case, divided by the sum of the case weights (known defects / 50). So repeats inside a case
+// count as one case, as in the interval, and the difference of the two rates is the estimate of the interval.
 function intervalRows(reference, runsOf) {
   return INTERVAL_ROWS.flatMap(([measure, value, weight, format, compared]) => {
     const referenceRuns = runsOf(reference).filter(compared);
@@ -1968,11 +2059,11 @@ function intervalRows(reference, runsOf) {
       ),
     ];
     if (value !== escapedValue) return [interval];
-    const referenceCases = casesOf(referenceRuns);
     const sharedRates = (runs) => {
-      const shared = new Set([...casesOf(runs)].filter((caseId) => referenceCases.has(caseId)));
-      const inShared = (list) => list.filter((run) => shared.has(run.case));
-      return `${ratio(escapedPer50(inShared(runs)))} / ${ratio(escapedPer50(inShared(referenceRuns)))}`;
+      const cases = pairedCases(runs.filter(compared), referenceRuns, value, weight);
+      const weights = sum(cases.map((item) => item.weight));
+      const rate = (side) => (weights ? sum(cases.map((item) => meanOf(item[side]))) / weights : null);
+      return `${ratio(rate('values'))} / ${ratio(rate('references'))}`;
     };
     const label = `Escaped per 50 known on the cases shared with ${reference} (this column / ${reference})`;
     return [interval, [label, besideReference(reference, sharedRates)]];
@@ -3073,24 +3164,27 @@ export function checkTranscriptShape(entries, source = 'transcript') {
   }
 }
 
-// A web search query targets the benchmark repository when, outside its `-site:` exclusions, it names the repository,
-// or names the owner without a repository and no exclusion removes the repository or its owner (see OWNER_MENTION).
-// An exclusion removes them only when it covers the whole repository or the whole owner on GitHub: an exclusion of
-// part of the repository, or of another site, leaves the repository in the search. A dot that ends a sentence is not
-// part of a repository name.
+// A web search query targets the benchmark repository when, outside its `-site:` exclusions, it names one of its
+// repositories (see BENCHMARK_REPOSITORY), or names the owner without a repository and the exclusions do not remove
+// the owner or every repository (see OWNER_MENTION). An exclusion removes a repository or the owner only when it
+// covers the whole repository or the whole owner on GitHub: an exclusion of part of a repository, or of another site,
+// leaves the repository in the search. A dot that ends a sentence is not part of a repository name.
 function targetsBenchmark(query) {
   const repositoryName = (name) => (name === undefined ? undefined : name.replace(/\.+$/, '').toLowerCase());
   const mentions = (text) => [...text.matchAll(OWNER_MENTION)].map(([, name]) => repositoryName(name));
-  const benchmark = (name) => BENCHMARK_REPOSITORY.names.has(name);
-  const coversRepository = (site) => {
+  const { owner, repositories } = BENCHMARK_REPOSITORY;
+  // What an exclusion covers: `owner`, a repository of BENCHMARK_REPOSITORY, or null.
+  const covered = (site) => {
     const [host, ...segments] = site.replace(/^https?:\/\//i, '').split('/');
     const parts = segments.filter((part) => part !== '' && part !== '*').map((part) => part.toLowerCase());
-    if (!GITHUB_WEB_HOSTS.has(host.toLowerCase()) || parts[0] !== BENCHMARK_REPOSITORY.owner) return false;
-    return parts.length === 1 || (parts.length === 2 && benchmark(parts[1]));
+    if (!GITHUB_WEB_HOSTS.has(host.toLowerCase()) || parts[0] !== owner) return null;
+    if (parts.length === 1) return 'owner';
+    return parts.length === 2 ? (repositories.get(parts[1]) ?? null) : null;
   };
-  const excluded = [...query.matchAll(SITE_EXCLUSION)].some(([, site]) => coversRepository(site));
+  const exclusions = new Set([...query.matchAll(SITE_EXCLUSION)].map(([, site]) => covered(site)));
+  const excluded = exclusions.has('owner') || [...new Set(repositories.values())].every((item) => exclusions.has(item));
   const kept = mentions(query.replace(SITE_EXCLUSION, ' '));
-  return kept.some((name) => (name === undefined || name === '' ? !excluded : benchmark(name)));
+  return kept.some((name) => (name === undefined || name === '' ? !excluded : repositories.has(name)));
 }
 
 // A line of the fixer reply: `<finding id>: repaired` or `<finding id>: not present` (see prepare.mjs fixerPrompt),
@@ -3126,78 +3220,102 @@ export function fixerReplies(entries) {
   return replies;
 }
 
-// The structured reply of a bundled reviewer `reviewer` (see BUNDLED_REPLIES), as omp v19.1.1 assembles the result of
-// a child with an output schema (task/executor.ts finalizeSubprocessOutput, task-yield-assembly.ts
-// assembleYieldResult): `{ data, problem }`, where `data` is the object that `transcripts` writes as the block and
-// `problem` is null or the reason why the reply is not valid. The fold takes the accepted calls of the reply tool
-// (omp.mjs REPLY_TOOL) in call order: a call with a tool result that is not an error. omp rejects a call with an error
-// result, so the call adds nothing. A call whose `error` argument is set, and is not a placeholder next to `data`
-// (omp.mjs YIELD_PLACEHOLDER_ERRORS), aborts the task: when the last accepted call does that, the reply is
-// `{ aborted: true, error }`. A call whose `type` is a list of labels adds its `data` as a section under each label: a
-// list field of the schema collects its sections in a list, another field of the schema keeps the last one, and an
-// unknown label gets a list from its second section on. The last call without such a `type` ends the reply: its
-// `data`, when it has one, is the whole reply, else the sections are. A reply without data, a section without data, a
-// reply that does not fit the schema (see structuredProblem), and a run whose last assistant message stopped with
-// omp.mjs ABORTED_STOP_REASON have a problem. `entries` are the records of the transcript (see transcriptEntries).
+// The sections of an output schema for the fold of structuredReply: each field of the schema, `list` for a field that
+// holds a list (the JTD form `elements`) and `scalar` for another field, as omp v19.1.1 derives them
+// (packages/coding-agent/src/task/yield-assembly.ts yieldSectionShapes).
+function sectionShapes(schema) {
+  const fields = { ...schema.optionalProperties, ...schema.properties };
+  return new Map(Object.entries(fields).map(([name, field]) => [name, isRecord(field?.elements) ? 'list' : 'scalar']));
+}
+// A `type` of a yield result that labels an incremental section: a list of one or more texts.
+const isSectionType = (type) => Array.isArray(type) && type.length > 0 && type.every((label) => typeof label === 'string');
+
+// The structured reply of a bundled reviewer `reviewer` (see isBundledReviewer), as omp v19.1.1 assembles the result
+// of a child with an output schema (https://github.com/can1357/oh-my-pi/tree/v19.1.1): `{ data, problem }`, where
+// `data` is the assembled object and `problem` is null or the reason why the reply is not valid. omp records what it
+// accepted from each call of the reply tool (omp.mjs REPLY_TOOL) in the `details` of the tool result
+// (packages/coding-agent/src/tools/yield.ts, YieldTool.execute and the `extractData` handler of the yield tool):
+// `status` (`success` or `aborted`), `data` as omp normalized it (a JSON text that the schema refuses as a text
+// becomes its value), `error`, and `type`. The raw arguments of a call are not the accepted data. A call that omp
+// refused has an error result without such details, and adds nothing. The fold takes these details in the order of
+// the calls, as task/executor.ts finalizeSubprocessOutput and packages/tui/src/tools/task-yield-assembly.ts
+// assembleYieldResult do:
+// - when the last result has the status `aborted`, the reply is `{ aborted: true, error }`. omp also gives this status
+//   when it aborts a child that submitted an empty result too many times;
+// - each other result whose `type` labels a section (see isSectionType) adds its `data` as a section under each label:
+//   a list field of the schema collects its sections in a list, another field of the schema keeps the last one, and
+//   an unknown label gets a list from its second section on (see sectionShapes);
+// - the last result without such a `type` ends the reply: its `data`, when it has one, is the whole reply, else the
+//   sections are. A JSON text of an object or a list is read as its value (executor.ts parseStringifiedJson).
+// A reply without data, a section or a whole reply with null data, a reply that does not fit the full output schema
+// (see structuredProblem; omp accepts such data after it used up its schema retries), and a run whose last assistant
+// message stopped with omp.mjs ABORTED_STOP_REASON have a problem. `entries` are the records of the transcript (see
+// transcriptEntries).
 export function structuredReply(entries, reviewer) {
-  const accepted = new Map();
-  for (const entry of entries) {
-    const message = entry.type === 'message' && entry.message?.role === 'toolResult' ? entry.message : null;
-    if (typeof message?.toolCallId === 'string') accepted.set(message.toolCallId, message.isError !== true);
-  }
-  const given = (value) => (value === undefined || value === null ? undefined : value);
-  const calls = [];
+  // The position of each call of the reply tool, in call order.
+  const calls = new Map();
   let stopReason = null;
   for (const entry of entries) {
     if (entry.type !== 'message' || entry.message?.role !== 'assistant') continue;
     stopReason = entry.message.stopReason ?? null;
     const content = Array.isArray(entry.message.content) ? entry.message.content : [];
     for (const part of content) {
-      if (part?.type !== 'toolCall' || part.name !== REPLY_TOOL || accepted.get(part.id) !== true) continue;
-      const args = isRecord(part.arguments) ? part.arguments : {};
-      const data = given(args.data);
-      const error = typeof args.error === 'string' ? args.error.trim() : '';
-      const placeholder = data !== undefined && YIELD_PLACEHOLDER_ERRORS.has(error.toLowerCase());
-      calls.push({ type: given(args.type), data, error: error && !placeholder ? error : undefined });
+      if (part?.type === 'toolCall' && part.name === REPLY_TOOL && !calls.has(part.id)) calls.set(part.id, calls.size);
     }
   }
-  if (calls.length === 0) return { data: {}, problem: `${reviewer} made no accepted ${REPLY_TOOL} call` };
-  const last = calls.at(-1);
-  if (last.error !== undefined) {
-    return { data: { aborted: true, error: last.error }, problem: `${reviewer} aborted its task: ${last.error}` };
+  const items = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const message = entry.type === 'message' && entry.message?.role === 'toolResult' ? entry.message : null;
+    const details = message?.details;
+    if (!message || !calls.has(message.toolCallId) || seen.has(message.toolCallId) || !isRecord(details)) continue;
+    if (details.status !== 'success' && details.status !== 'aborted') continue;
+    seen.add(message.toolCallId);
+    items.push({
+      order: calls.get(message.toolCallId),
+      status: details.status,
+      data: details.data,
+      error: typeof details.error === 'string' ? details.error : undefined,
+      type: typeof details.type === 'string' || isSectionType(details.type) ? details.type : undefined,
+    });
   }
-  const { required, lists } = BUNDLED_REPLIES[reviewer];
-  const shapes = new Map([...Object.keys(required).map((field) => [field, 'scalar']), ...lists.map((f) => [f, 'list'])]);
-  const isSection = (type) => Array.isArray(type) && type.length > 0;
+  items.sort((a, b) => a.order - b.order);
+  if (items.length === 0) return { data: {}, problem: `${reviewer} made no accepted ${REPLY_TOOL} call` };
+  const last = items.at(-1);
+  if (last.status === 'aborted') {
+    return {
+      data: { aborted: true, error: last.error },
+      problem: `${reviewer} aborted its task: ${last.error || 'no reason given'}`,
+    };
+  }
+  const shapes = sectionShapes(bundledSchema(reviewer));
   const sections = {};
   const counts = new Map();
   let missingData = false;
-  for (const call of calls) {
-    if (call.error !== undefined || !isSection(call.type)) continue;
-    const labels = call.type.filter((label) => typeof label === 'string' && label.trim()).map((label) => label.trim());
-    missingData ||= call.data === undefined;
-    for (const label of labels) {
+  for (const item of items) {
+    if (item.status === 'aborted' || !isSectionType(item.type)) continue;
+    missingData ||= item.data === undefined || item.data === null;
+    for (const label of item.type.map((value) => value.trim()).filter(Boolean)) {
       const count = counts.get(label) ?? 0;
       const shape = shapes.get(label);
-      if (shape === 'scalar') sections[label] = call.data;
-      else if (count === 0) sections[label] = shape === 'list' ? [call.data] : call.data;
-      else if (Array.isArray(sections[label])) sections[label].push(call.data);
-      else sections[label] = [sections[label], call.data];
+      if (shape === 'scalar') sections[label] = item.data;
+      else if (count === 0) sections[label] = shape === 'list' ? [item.data] : item.data;
+      else if (Array.isArray(sections[label])) sections[label].push(item.data);
+      else sections[label] = [sections[label], item.data];
       counts.set(label, count + 1);
     }
   }
-  const end = calls.findLast((call) => !isSection(call.type));
+  const end = items.findLast((item) => !isSectionType(item.type));
   let data;
   if (end?.data !== undefined) {
     data = end.data;
-    missingData = false;
+    missingData = end.data === null;
   } else if (counts.size) {
     data = sections;
   } else {
     return { data: {}, problem: `${reviewer} yielded no data` };
   }
-  // omp reads a reply that is a JSON text as the value of that text.
-  if (typeof data === 'string') {
+  if (typeof data === 'string' && /^\s*[[{]/.test(data)) {
     try {
       data = JSON.parse(data);
     } catch {
@@ -3205,7 +3323,7 @@ export function structuredReply(entries, reviewer) {
     }
   }
   const problems = [
-    missingData ? `a ${REPLY_TOOL} section of ${reviewer} has no data` : null,
+    missingData ? `a ${REPLY_TOOL} result of ${reviewer} has no data` : null,
     structuredProblem(reviewer, data),
     stopReason === ABORTED_STOP_REASON ? `the run of ${reviewer} was aborted` : null,
   ].filter(Boolean);
@@ -3249,29 +3367,38 @@ function isUnder(folder, target) {
   return relative === '' || !(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
 }
 
-// The input folders of a run, the folders that a reviewer may read with every path below them, the copy of the plan
-// contract of the run, the plugin roots, the agent files of the reviewer, the self-review roots of the reviewer, the
-// skills that the measured plugin copies hold, and the keys of the files that the case changes (see changedPathKeys).
-// An input folder is the case folder, and the run folder or each round folder up to `round`. The tree copies are those
-// of the rounds up to `round`. A reviewer with an agent file of its own is the self-review agent.
-function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSkills, changedFiles }) {
+// The input folders of a run, the folders that a reviewer may read with every path below them, the input files of an
+// input folder, the copy of the plan contract of the run, the plugin roots, the agent files of the reviewer, the
+// self-review roots of the reviewer, the skills that the measured plugin copies hold, whether the reviewer may read a
+// skill, and the keys of the files that the case changes (see changedPathKeys). An input folder is the case folder,
+// and the run folder or each round folder up to `round`. The tree copies are those of the rounds up to `round`. A
+// reviewer with an agent file of its own is the self-review agent. A `bundled` reviewer (see isBundledReviewer) has
+// only the inputs that its prompt names (BUNDLED_INPUT_FOLDERS and BUNDLED_INPUT_FILES of the case folder), no
+// instruction file, and no skill read.
+function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSkills, changedFiles, bundled }) {
   const armDir = path.dirname(runDir);
   const caseDir = path.dirname(armDir);
   const [caseId, arm, run] = [caseDir, armDir, runDir].map((dir) => path.basename(dir));
   const rounds = Array.from({ length: round ?? 0 }, (_, index) => index + 1);
   const roundDirs = round === undefined ? [runDir] : rounds.map((number) => path.join(runDir, `round-${number}`));
-  const inputDirs = [caseDir, ...roundDirs];
+  const inputDirs = bundled ? [caseDir] : [caseDir, ...roundDirs];
+  const inputFolders = bundled ? BUNDLED_INPUT_FOLDERS : INPUT_FOLDERS;
   const trees = rounds.map((number) =>
     path.join(path.dirname(caseDir), JUDGE_TREES, runLabel(caseId, arm, runPath(run, number))),
   );
+  const ownFiles = bundled ? [] : agentFiles;
   return {
     inputDirs,
-    folders: [...inputDirs.flatMap((dir) => INPUT_FOLDERS.map((name) => path.join(dir, name))), ...trees],
+    folders: [...inputDirs.flatMap((dir) => inputFolders.map((name) => path.join(dir, name))), ...trees],
+    inputFile: bundled
+      ? (name) => BUNDLED_INPUT_FILES.has(name)
+      : (name) => INPUT_FILES.has(name) || name.endsWith('.diff'),
     contractCopy: path.join(runDir, CONTRACT_COPY),
-    pluginRoots,
-    agentFiles: agentFiles.map((file) => path.resolve(file)),
-    selfReview: agentFiles.length > 0,
-    skillRoots: agentFiles.length > 0 ? skillRoots : [],
+    pluginRoots: bundled ? [] : pluginRoots,
+    agentFiles: ownFiles.map((file) => path.resolve(file)),
+    selfReview: ownFiles.length > 0,
+    skillRoots: ownFiles.length > 0 ? skillRoots : [],
+    skillReads: !bundled,
     measuredSkills: new Set([...REVIEWER_SKILLS, ...heldSkills]),
     changed: distinct(changedFiles.flatMap(changedPathKeys)),
     // The link walk of each searched folder in this call, and its entry budget (see searchLeavesScope), and the allowed
@@ -3316,12 +3443,12 @@ function folderAllowed(target, { folders, pluginRoots, skillRoots }) {
   return skillRoots.some((root) => underSkill(target, root, ALLOWED_SKILLS));
 }
 
-// An input file of an input folder, the copy of the plan contract of the run, a reviewer agent file of a plugin root,
-// or an agent file of the reviewer.
-function fileAllowed(target, { inputDirs, contractCopy, pluginRoots, agentFiles }) {
+// An input file of an input folder (see scopeRules `inputFile`), the copy of the plan contract of the run, a reviewer
+// agent file of a plugin root, or an agent file of the reviewer.
+function fileAllowed(target, { inputDirs, inputFile, contractCopy, pluginRoots, agentFiles }) {
   const dir = path.dirname(target);
   const name = path.basename(target);
-  if (inputDirs.includes(dir) && (INPUT_FILES.has(name) || name.endsWith('.diff'))) return true;
+  if (inputDirs.includes(dir) && inputFile(name)) return true;
   if (target === contractCopy || agentFiles.includes(target)) return true;
   return name.endsWith('-reviewer.md') && pluginRoots.some((root) => path.join(root, 'agents') === dir);
 }
@@ -3407,6 +3534,7 @@ function instructionAllowed(key, { changed }) {
 
 // A read of the installed copy of a skill through a `skill://` URI or an installed plugin copy, with the key `key`
 // (undefined for another read).
+// - A bundled reviewer reads no skill (see scopeRules `skillReads`): its prompt forbids every skill read.
 // - The benchmark skill itself (BENCHMARK_SKILL) is outside for every reviewer: it holds the answer keys of the cases.
 // - An allowed skill (code-review, code-clarity): the self-review agent loads these skills as its own instructions, so
 //   its reads of them stay allowed also when the case changes them. For another reviewer, they are optional
@@ -3417,7 +3545,7 @@ function instructionAllowed(key, { changed }) {
 //   can be another version than the copy of the arm, so its read is outside. Each of the first two segments of the key
 //   counts as the skill name, because the skill can sit in a category folder.
 function skillReadAllowed(key, rules) {
-  if (key === undefined) return false;
+  if (key === undefined || !rules.skillReads) return false;
   const [first, second] = key.split('/');
   if (first === BENCHMARK_SKILL || second === BENCHMARK_SKILL) return false;
   if (ALLOWED_SKILLS.has(first)) {
@@ -3493,6 +3621,7 @@ function realRoots(rules) {
   rules.realRoots ??= {
     inputDirs: rules.inputDirs.map((dir) => linkedPath(dir)),
     folders: rules.folders.map((dir) => linkedPath(dir)),
+    inputFile: rules.inputFile,
     contractCopy: linkedPath(rules.contractCopy),
     pluginRoots: rules.pluginRoots.map((root) => linkedPath(path.resolve(root))),
     agentFiles: rules.agentFiles.map((file) => linkedPath(file)),
@@ -3615,24 +3744,26 @@ function rulesAllow(target, base, rest, searched, cwd, rules) {
   return folderAllowed(searched, rules) || skillReadAllowed(installedKey(base, searched), rules);
 }
 
-// A web page outside the benchmark repository. The pages of the repository can show the fixes of the corpus defects.
-// A web page is allowed unless it can show the benchmark repository: a page of the repository on GitHub, or a page of
-// any site whose host, path, or query names the owner and the repository, such as a mirror, a code search, or a GitHub
-// search. A URL that a search result cut with `…`, or that cannot be parsed, is allowed unless its text names the
-// owner, because its cut part can hold the repository name.
+// A web page outside the benchmark repository. The pages of its repositories (see BENCHMARK_REPOSITORY) can show the
+// fixes of the corpus defects. A web page is allowed unless it can show the benchmark repository: a page of one of its
+// repositories on GitHub, or a page of any site whose host, path, or query names the owner and one of these
+// repositories, such as a mirror, a code search, or a GitHub search. A URL that a search result cut with `…`, or that
+// cannot be parsed, is allowed unless its text names the owner, because its cut part can hold the repository name.
 function webPageAllowed(target) {
-  if (target.includes('…')) return !/docksdocks/i.test(target);
+  const { owner, repositories } = BENCHMARK_REPOSITORY;
+  const ownerMention = new RegExp(escapeRegExp(owner), 'i');
+  if (target.includes('…')) return !ownerMention.test(target);
   let url;
   try {
     url = new URL(target);
   } catch {
-    return !/docksdocks/i.test(target);
+    return !ownerMention.test(target);
   }
   const parts = url.pathname
     .split('/')
     .filter(Boolean)
     .map((part) => part.toLowerCase());
-  const benchmark = ([owner, name]) => owner === BENCHMARK_REPOSITORY.owner && BENCHMARK_REPOSITORY.names.has(name);
+  const benchmark = ([first, name]) => first === owner && repositories.has(name);
   if (REPOSITORY_HOSTS.has(url.hostname) && benchmark(parts)) return false;
   if (url.hostname === 'api.github.com' && parts[0] === 'repos' && benchmark(parts.slice(1))) return false;
   let text = `${url.hostname}${url.pathname}${url.search}`;
@@ -3641,7 +3772,8 @@ function webPageAllowed(target) {
   } catch {
     // Keep the encoded text: a bad escape cannot hide the plain owner and repository names.
   }
-  return !/docksdocks\/docks(?:-kit)?(?:\.git)?(?![\w.-])/i.test(text);
+  const names = [...repositories.keys()].filter((name) => !name.endsWith('.git')).map(escapeRegExp);
+  return !new RegExp(`${escapeRegExp(owner)}\\/(?:${names.join('|')})(?:\\.git)?(?![\\w.-])`, 'i').test(text);
 }
 
 const uriScheme = (target) => URI_SCHEME.exec(target)?.[1].toLowerCase();
@@ -3982,7 +4114,7 @@ function readLists({ calls, results }, cwd, probe = cachedProbe(cwd)) {
 
 // The own diff of a reviewer in `folder`, the folder of the inputs of its round, by the name of the reviewer (see
 // prepare.mjs ARMS and buildTail): the focus diff of a panel lens, also of a self-review lens; the full diff of a full
-// review, also of the self-review of the full diff and of a bundled reviewer (see BUNDLED_REPLIES); and the delta diff
+// review, also of the self-review of the full diff and of a bundled reviewer (see isBundledReviewer); and the delta diff
 // of a delta review. A plan reviewer has none.
 function ownDiffFile(reviewer, folder) {
   const lens = reviewer.startsWith(`${SELF_REVIEW}-`) ? reviewer.slice(SELF_REVIEW.length + 1) : reviewer;
@@ -4221,6 +4353,10 @@ function diffCoverage(tools, file, cwd) {
 // A call with an error result (`error`, see transcriptFacts) showed no file. When each path of such a call that is not
 // allowed does not exist (see pathMissing), the call read nothing: its target goes to `missing`, not to `outside`, so
 // it does not make the run invalid. A reviewer without such a read gets no `missing`.
+// A `bundled` reviewer (a bundled arm R1 or V1, see isBundledReviewer) gets the narrower scope of its prompt
+// (prepare.mjs buildBundledPrompt): under the case folder, only `snapshot/` and `full.diff` are inputs, and it has no
+// instruction file and no skill read, so `plan.md`, the other diffs, `prompts/`, `base-instructions/`, every
+// `skill://` URI, and every installed plugin copy are outside. The spill URIs and the web rules stay the same.
 export function readScope(
   toolCalls,
   {
@@ -4234,6 +4370,7 @@ export function readScope(
     changedFiles = [],
     lists = new Map(),
     probe = cachedProbe(cwd),
+    bundled = false,
   },
 ) {
   const rules = scopeRules(path.resolve(runDir), round, {
@@ -4242,6 +4379,7 @@ export function readScope(
     skillRoots,
     heldSkills,
     changedFiles,
+    bundled,
   });
   const outside = new Set();
   const missing = new Set();
@@ -4333,8 +4471,8 @@ function transcriptFiles(dir) {
 // The paths that a diff changes, from its header lines. prepare.mjs writes each diff with --no-renames, so the two
 // sides of a `diff --git` line name one path, and the line splits in its middle also when the path holds ` b/`. A
 // `+++ b/` line counts only in the header of a file, before its first `@@` line, because a line of a hunk can start
-// with `++`. `prepare.mjs case` lists the scope files of the V1 arm with it.
-export function diffFiles(text) {
+// with `++`.
+function diffFiles(text) {
   const files = [];
   let header = false;
   for (const line of text.split('\n')) {
@@ -4879,12 +5017,15 @@ const TRANSCRIPT_ONLY_FIELDS = ['readScope', 'diffCoverage', 'ompVersion', 'revi
 // when the transcript names no agent: a transcript of another agent, for example of another plan-reviewer variant
 // under the task name of this one, shows the review of another arm, so the message asks for a new dispatch. A run of a
 // bundled arm (`prepare.mjs case` R1 or V1) records the omp version of the vendored agents in its meta.json
-// (`bundledOmp`). Its reviewer replies in structured mode, so the command writes its block: the reply that
-// structuredReply folds from the transcript, as JSON. When that reply has a problem, the reviewer entry gets the reason
-// as `replyError`. When the transcript names another omp version than `bundledOmp`, the agent ran under an omp whose
-// reply rules the vendored agents do not match: the command writes no block, removes an earlier block of the reviewer,
-// and records that reason as `replyError`. Each `replyError` makes the run invalid (see invalidReasons). Then the
-// command writes what it finds, and fails with the names of the dispatches that have no transcript.
+// (`bundledOmp`). Its reviewer gets the narrower read scope of the bundled prompt (see readScope `bundled`). It replies
+// in structured mode, so the command writes its block: the reply that structuredReply folds from the transcript, as
+// JSON. When that reply has a problem, the reviewer entry gets the reason as `replyError`, and the block is
+// `{ unreadable: <reason>, reply: <the folded reply> }`: it keeps the reply for a diagnosis, and `findings` reads it as
+// unreadable, so it gives no finding to the judge (see parseStructuredBlock). When the transcript names another omp
+// version than `bundledOmp`, the agent ran under an omp whose reply rules the vendored agents do not match: the command
+// writes no block, removes an earlier block of the reviewer, and records that reason as `replyError`. Each
+// `replyError` makes the run invalid (see invalidReasons). Then the command writes what it finds, and fails with the
+// names of the dispatches that have no transcript.
 export function transcriptsCommand(ws, sessionsDir) {
   const files = transcriptFiles(sessionsDir);
   const wsDir = path.resolve(ws);
@@ -4947,7 +5088,8 @@ export function transcriptsCommand(ws, sessionsDir) {
         const probe = cachedProbe(session.cwd);
         const lists = readLists(tools, session.cwd, probe);
         const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots]);
-        const options = { runDir, round, changedFiles, ...session, heldSkills, lists, probe };
+        const bundled = isBundledReviewer(reviewer);
+        const options = { runDir, round, changedFiles, ...session, heldSkills, lists, probe, bundled };
         entry.readScope = readScope(toolCalls, options);
       }
       const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
@@ -4957,7 +5099,8 @@ export function transcriptsCommand(ws, sessionsDir) {
       if (meta.bundledOmp !== undefined && isBundledReviewer(reviewer)) {
         if (entry.ompVersion === meta.bundledOmp) {
           const reply = structuredReply(entries, reviewer);
-          block = `${JSON.stringify(reply.data, null, 2)}\n`;
+          const written = reply.problem ? { unreadable: reply.problem, reply: reply.data } : reply.data;
+          block = `${JSON.stringify(written, null, 2)}\n`;
           if (reply.problem) entry.replyError = reply.problem;
         } else {
           block = null;

@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'vitest';
 import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
+import { PROJECT_CONFIG } from '../scripts/omp.mjs';
 import * as prepare from '../scripts/prepare.mjs';
-import { BUNDLED_REPLIES } from '../scripts/score.mjs';
+import { bundledSchema } from '../scripts/score.mjs';
 import {
   agentsOnBun,
   CONFIGS,
@@ -30,11 +31,13 @@ import {
 //
 // - prepareAgents({ bundled: true, model, efforts, tiers?, project }): renders `review-bench-bundled-reviewer-<config>`
 //   and `review-bench-bundled-security-<config>` from bundled/omp-19.1.1/ with `structured: true`, without `bash`,
-//   `lsp`, and `spawns`, and with the pinned model and effort. It stops when `omp --version` is not 19.1.1, and it
-//   takes no option of the other `agents` runs.
-// - prepareCase with the arms R1 (`reviewer`, the full diff) and V1 (`security-reviewer`, the changed files as scope)
-//   on a case of a `cases/bundled/` folder. It checks the seed rule, and V1 needs a security seed. Each run records the
-//   vendored omp version as `bundledOmp` in its meta.json.
+//   `lsp`, and `spawns`, and with the pinned model and effort. It needs a `--project` of its own and refuses to
+//   replace the setup of another `agents` run there. It stops when `omp --version` is not 19.1.1, and it takes no
+//   option of the other `agents` runs.
+// - `prepare.mjs case` with the arms R1 (`reviewer`, the full diff) and V1 (`security-reviewer`, the changed files as
+//   scope, from the Git listing of the full diff) on a case of a `cases/bundled/` folder. It checks the seed rule on
+//   the changes that Git applies, and V1 needs a security seed. Each run records the vendored omp version as
+//   `bundledOmp` in its meta.json.
 
 const VENDORED = path.join(SKILL_DIR, 'bundled', 'omp-19.1.1');
 const AGENT_FRONTMATTER = /^---\n([\s\S]*?)\n---\n/;
@@ -93,7 +96,7 @@ test('agents --bundled renders both bundled agents per configuration in structur
       );
     }
   }
-  // With --tiers, each agent gets the tier override of its configuration.
+  // With --tiers, each agent gets the tier override of its configuration. The run replaces the earlier bundled setup.
   agentsOnBun({ bundled: true, model: MODEL, efforts: 'high', tiers: 'priority', project }, root);
   assert.deepEqual(tierOverrides(project), {
     'review-bench-bundled-reviewer-high-fast': 'priority',
@@ -105,7 +108,7 @@ test('agents --bundled refuses another omp version and the options of the other 
   const root = neutralScratch();
   const project = path.join(root, 'project');
   const configsFile = path.join(project, '.omp', 'agents', 'review-bench-configs.json');
-  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low] });
+  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
   const before = readText(configsFile);
   const options = { bundled: true, model: MODEL, efforts: 'high', project };
   assert.throws(() => agentsOnBun(options, root, fakeOmp({ version: '19.1.2' })), {
@@ -126,7 +129,40 @@ test('agents --bundled refuses another omp version and the options of the other 
   }
 });
 
-test('the output schema facts of score.mjs match the vendored agents', () => {
+test('agents --bundled needs its own --project and does not replace the setup of another agents run', () => {
+  const root = neutralScratch();
+  const options = { bundled: true, model: MODEL, efforts: 'high' };
+  // Without --project, the project would be the repository, whose kit setup the run would replace.
+  put(root, '.omp/agents/review-bench-candidate-code-low.md', '---\nname: review-bench-candidate-code-low\n---\n');
+  assert.throws(() => agentsOnBun(options, root), {
+    message:
+      'agents --bundled needs --project <dir>, a folder of its own: its list of configurations holds only the bundled configurations',
+  });
+  assert.deepEqual(fs.readdirSync(path.join(root, '.omp', 'agents')), ['review-bench-candidate-code-low.md']);
+  // A project with the list of configurations, an agent file, or a tier override of another agents run.
+  const setups = {
+    configs: (project) => put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low] }),
+    agent: (project) => put(project, '.omp/agents/review-bench-baseline-code-low.md', '---\nname: x\n---\n'),
+    tier: (project) => put(project, PROJECT_CONFIG, 'task:\n  agentServiceTierOverrides:\n    review-bench-candidate-code-low-fast: priority\n'),
+  };
+  const found = {
+    configs: (project) => path.join(project, '.omp', 'agents', 'review-bench-configs.json'),
+    agent: (project) => path.join(project, '.omp', 'agents', 'review-bench-baseline-code-low.md'),
+    tier: (project) =>
+      `the tier overrides review-bench-candidate-code-low-fast in ${path.join(project, PROJECT_CONFIG)}`,
+  };
+  for (const [kind, write] of Object.entries(setups)) {
+    const project = path.join(root, `project-${kind}`);
+    write(project);
+    const files = fs.readdirSync(project, { recursive: true }).sort();
+    assert.throws(() => agentsOnBun({ ...options, project }, root), {
+      message: `agents --bundled would replace the setup of another agents run in ${project}: ${found[kind](project)}; give agents --bundled a --project of its own, or remove that setup with prepare.mjs clean --project ${project}`,
+    });
+    assert.deepEqual(fs.readdirSync(project, { recursive: true }).sort(), files, `${kind}: the refused run changed a file`);
+  }
+});
+
+test('score.mjs reads the output schema of each vendored agent from its frontmatter', () => {
   // Bun parses the YAML frontmatter of each vendored agent and prints its output schema.
   const code = `const text = await Bun.file(process.argv[1]).text(); console.log(JSON.stringify(Bun.YAML.parse(/^---\\n([\\s\\S]*?)\\n---\\n/.exec(text)[1]).output));`;
   for (const [reviewer, file] of [
@@ -135,18 +171,15 @@ test('the output schema facts of score.mjs match the vendored agents', () => {
   ]) {
     const child = spawnSync(BUN_RUNTIME, ['-e', code, path.join(VENDORED, file)], { encoding: 'utf8' });
     assert.equal(child.status, 0, child.stderr);
-    const output = JSON.parse(child.stdout);
-    const fields = { ...output.properties, ...output.optionalProperties };
-    const lists = Object.keys(fields).filter((field) => Object.hasOwn(fields[field], 'elements'));
-    assert.deepEqual(Object.keys(BUNDLED_REPLIES[reviewer].required), Object.keys(output.properties));
-    assert.deepEqual(BUNDLED_REPLIES[reviewer].lists, lists);
+    assert.deepEqual(bundledSchema(reviewer), JSON.parse(child.stdout));
   }
 });
 
-// A git repository whose head commit, a pull request on the base commit, adds src/handler.mjs and
-// docs/benchmark.md and changes README.md;
-// a project with the configurations of `agents --bundled`; and `writeCase(id, { security, seed, fix, folder })`, which
-// writes a case of `<root>/cases/<folder>/` (default `bundled`) with the seed patch `seed` and the fix patch `fix`.
+// A git repository whose head commit, a pull request on the base commit, adds src/handler.mjs, docs/benchmark.md, and
+// docs/naïve.md (a path that Git quotes) and changes README.md, with a copy of the scripts; a project with the
+// configurations of `agents --bundled`; `writeCase(id, { security, seed, fix, folder })`, which writes a case of
+// `<root>/cases/<folder>/` (default `bundled`) with the seed patch `seed` and the fix patch `fix`; and
+// `runCase(casePath, arms, out)`, which runs `prepare.mjs case` of the copy on Bun.
 const HANDLER = [
   'export function switchCommand(name) {',
   "  if (!/^[\\w.-]+$/.test(name)) throw new Error('bad name');",
@@ -155,6 +188,7 @@ const HANDLER = [
   '',
 ].join('\n');
 const SEEDED = HANDLER.replace("  return ['git', 'switch', name];", '  return `git switch ${name}`;');
+const QUOTED = 'docs/naïve.md';
 function bundledRepo() {
   isolateGit();
   const root = neutralScratch();
@@ -169,9 +203,12 @@ function bundledRepo() {
   put(repo, 'src/handler.mjs', HANDLER);
   // A changed file whose name holds a word that a prompt must not hold: the V1 scope lists it anyway.
   put(repo, 'docs/benchmark.md', '# Timing\n');
+  put(repo, QUOTED, '# Names\n');
   gitIn(repo, 'add', '-A');
   gitIn(repo, 'commit', '-q', '-m', 'head');
   const head = gitIn(repo, 'rev-parse', 'HEAD').trim();
+  // case reads the repository of the checkout that holds the script, so the scripts go into the case repository.
+  const script = copyScripts(repo);
   const project = path.join(root, 'project');
   put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
   const writeCase = (id, { security = true, seed, fix, folder = 'bundled' }) => {
@@ -192,20 +229,27 @@ function bundledRepo() {
     put(dir, `${id}.S1.fix.patch`, fix);
     return path.join(dir, `${id}.json`);
   };
+  const runCase = (casePath, arms, out) =>
+    spawnSync(
+      BUN_RUNTIME,
+      [script, 'case', '--case', casePath, '--arms', arms, '--runs', '1', '--out', out, '--project', project],
+      { encoding: 'utf8' },
+    );
   const seed = filePatch(repo, 'src/handler.mjs', HANDLER, SEEDED);
   const fix = filePatch(repo, 'src/handler.mjs', SEEDED, HANDLER);
-  return { root, repo, project, writeCase, seed, fix };
+  return { root, repo, project, writeCase, runCase, seed, fix };
 }
 
 test('case writes the R1 and V1 prompts of a bundled case with the read-scope rules and the diff or the scope', () => {
-  const { root, repo, project, writeCase, seed, fix } = bundledRepo();
+  const { root, writeCase, runCase, seed, fix } = bundledRepo();
   const ws = path.join(root, 'ws');
   const casePath = writeCase('bundled-sec-01', { seed, fix });
-  prepare.prepareCase({ case: casePath, arms: 'R1,V1', runs: '1', out: ws, project }, repo);
+  const result = runCase(casePath, 'R1,V1', ws);
+  assert.equal(result.status, 0, result.stderr);
   const caseDir = path.join(ws, 'bundled-sec-01');
   const rules = [
     'Rules:',
-    '- The snapshot root holds the repository files of the change, without Git history. Take repository evidence only from files under the snapshot root and the files that this message names. You may read official documentation on the web, but no page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks.',
+    '- The snapshot root holds the repository files of the change, without Git history. Take repository evidence only from files under the snapshot root and the files that this message names. You may read official documentation on the web, but no page of the DocksDocks/docks-kit repository, formerly DocksDocks/docks, or of the DocksDocks/public repository.',
     '- The working directory is not the snapshot, so give every Read, Grep, and Glob call an absolute path under the snapshot root or the absolute path of a file that this message names.',
     '- Do not load or read skills, also not through `skill://` URIs.',
     '- Do not fetch GitHub issues or pull requests.',
@@ -229,6 +273,8 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
   );
   const security = promptFileParts(path.join(caseDir, 'V1-low', 'run-1', 'prompts', 'security-reviewer.txt'));
   assert.equal(security.agent, 'agent: review-bench-bundled-security-low');
+  // The scope comes from the Git listing of the full diff, so it also holds the path that the diff text quotes.
+  assert.ok(readText(path.join(caseDir, 'full.diff')).includes('diff --git "a/docs/na\\303\\257ve.md"'));
   assert.equal(
     security.body,
     [
@@ -238,6 +284,7 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
       'Files, relative to the snapshot root:',
       '- README.md',
       '- docs/benchmark.md',
+      `- ${QUOTED}`,
       '- src/handler.mjs',
       '',
       ...rules,
@@ -255,12 +302,16 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
 });
 
 test('case refuses V1 without a security seed and a bundled case that breaks the seed rule', () => {
-  const { root, repo, project, writeCase, seed, fix } = bundledRepo();
+  const { root, repo, writeCase, runCase, seed, fix } = bundledRepo();
   const refuses = (id, spec, arms, message) => {
     const ws = path.join(root, `ws-${id}`);
-    assert.throws(() => prepare.prepareCase({ case: writeCase(id, spec), arms, runs: '1', out: ws, project }, repo), {
-      message,
-    });
+    const result = runCase(writeCase(id, spec), arms, ws);
+    assert.equal(result.status, 1, result.stderr);
+    const error = result.stderr.trim();
+    const shown = 'prepare.mjs: ';
+    assert.ok(error.startsWith(shown), error);
+    if (typeof message === 'string') assert.equal(error.slice(shown.length), message);
+    else assert.match(error.slice(shown.length), message);
     assert.equal(fs.existsSync(path.join(ws, id)), false, `${id} left a case folder`);
   };
   refuses(
@@ -295,11 +346,27 @@ test('case refuses V1 without a security seed and a bundled case that breaks the
     'R1',
     'bundled case bundled-bug-04: the fix patch bundled-bug-04.S1.fix.patch is not the exact reverse of the seed patch bundled-bug-04.patch: the seed patch and then the fix patch do not give the head',
   );
+  // A metadata-only seed: it has no `---` or `+++` header and no hunk, but Git applies the mode change.
+  const mode = (from, to) => `diff --git a/src/handler.mjs b/src/handler.mjs\nold mode ${from}\nnew mode ${to}\n`;
+  refuses(
+    'bundled-bug-05',
+    { seed: mode('100644', '100755'), fix: mode('100755', '100644') },
+    'R1',
+    'bundled case bundled-bug-05: the seed patch bundled-bug-05.patch breaks the seed rule: it changes the mode of src/handler.mjs; a seed only changes lines of a file',
+  );
+  // A seed in a file whose path Git quotes passes the rule.
+  const quotedSeed = filePatch(repo, QUOTED, '# Names\n', '# Names\n\nTrust every name.\n');
+  const quotedFix = filePatch(repo, QUOTED, '# Names\n\nTrust every name.\n', '# Names\n');
+  assert.ok(quotedSeed.startsWith('diff --git "a/docs/na\\303\\257ve.md"'), quotedSeed);
+  const quoted = runCase(writeCase('bundled-bug-06', { seed: quotedSeed, fix: quotedFix }), 'R1', path.join(root, 'ws-06'));
+  assert.equal(quoted.status, 0, quoted.stderr);
   // A bundled arm needs a case of a cases/bundled/ folder.
   const devCase = writeCase('code-9', { seed, fix, folder: 'dev' });
-  assert.throws(
-    () => prepare.prepareCase({ case: devCase, arms: 'R1', runs: '1', out: path.join(root, 'ws-dev'), project }, repo),
-    { message: `the bundled arms R1 run only on the cases of a cases/bundled folder, and ${devCase} is not in one` },
+  const dev = runCase(devCase, 'R1', path.join(root, 'ws-dev'));
+  assert.equal(dev.status, 1, dev.stderr);
+  assert.equal(
+    dev.stderr.trim(),
+    `prepare.mjs: the bundled arms R1 run only on the cases of a cases/bundled folder, and ${devCase} is not in one`,
   );
 });
 
