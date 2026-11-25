@@ -41,9 +41,9 @@ import {
 //   the changes that Git applies, and V1 needs a security seed. Each run records the vendored omp version as
 //   `bundledOmp` in its meta.json.
 
-// Each version text comes from the vendored release of score.mjs, so a refresh of the vendored agents after a raise of
-// the omp pin changes no test.
-const VENDORED = BUNDLED_DIR;
+// Each vendored folder and version text comes from the vendored release of score.mjs (BUNDLED_DIR and
+// BUNDLED_OMP_VERSION), so a refresh of the vendored agents after a raise of the omp pin changes no test.
+
 // The installed omp releases that `agents --bundled` refuses: the next patch release, and the omp floor when it is
 // below the vendored release (a release below the floor stops at the floor check of the omp preflight first).
 const NEWER_OMP = BUNDLED_OMP_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
@@ -119,7 +119,7 @@ test('agents --bundled renders both bundled agents per configuration in structur
       assert.equal(fields.spawns, undefined);
       // Every other line of the vendored file stays: the description, the output schema, and the body.
       const rendered = agentParts(readText(file));
-      const vendored = agentParts(readText(path.join(VENDORED, files[role])));
+      const vendored = agentParts(readText(path.join(BUNDLED_DIR, files[role])));
       assert.equal(rendered.body, vendored.body);
       const changed = /^(?:name|model|thinking-level|structured|tools|spawns):/;
       assert.deepEqual(
@@ -145,7 +145,7 @@ test('agents --bundled refuses another omp version and the options of the other 
   const args = ['--bundled', '--model', MODEL, '--efforts', 'high', '--project', project];
   assert.equal(
     agentsRefusal(args, fakeOmp({ version: NEWER_OMP })),
-    `omp ${NEWER_OMP} is installed, but ${VENDORED} holds the bundled agents of omp ${BUNDLED_OMP_VERSION}; run agents --bundled with omp ${BUNDLED_OMP_VERSION}, or vendor the agents of omp ${NEWER_OMP} as SOURCE.md in that folder tells`,
+    `omp ${NEWER_OMP} is installed, but ${BUNDLED_DIR} holds the bundled agents of omp ${BUNDLED_OMP_VERSION}; run agents --bundled with omp ${BUNDLED_OMP_VERSION}, or vendor the agents of omp ${NEWER_OMP} as SOURCE.md in that folder tells`,
   );
   if (OMP_FLOOR !== BUNDLED_OMP_VERSION) {
     assert.ok(agentsRefusal(args, fakeOmp({ version: OMP_FLOOR })).startsWith(`omp ${OMP_FLOOR} is installed, but `));
@@ -205,7 +205,7 @@ test('score.mjs reads the output schema of each vendored agent from its frontmat
     ['reviewer', 'reviewer.md'],
     ['security-reviewer', 'security-reviewer.md'],
   ]) {
-    const child = spawnSync(BUN_RUNTIME, ['-e', code, path.join(VENDORED, file)], { encoding: 'utf8' });
+    const child = spawnSync(BUN_RUNTIME, ['-e', code, path.join(BUNDLED_DIR, file)], { encoding: 'utf8' });
     assert.equal(child.status, 0, child.stderr);
     assert.deepEqual(bundledSchema(reviewer), JSON.parse(child.stdout));
   }
