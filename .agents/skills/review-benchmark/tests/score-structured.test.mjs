@@ -496,6 +496,38 @@ test('transcripts and findings refuse a bundled run without a meta.json or witho
   assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
 });
 
+test('transcripts and findings name every bundled run without a release record and of another release in one refusal', () => {
+  const ids = Array.from({ length: 8 }, (_, index) => `bundled-bug-${20 + index}`);
+  const { ws, sessions } = bundledWorkspace(ids.map((id) => ({ id, calls: [FINDING_CALL, ...VERDICT_CALLS] })));
+  const run = (id) => path.join(ws, id, 'R1-low', 'run-1');
+  const label = (id) => `${id}/R1-low/run-1`;
+  // Four runs without a release record: no meta.json, no `bundledOmp`, a meta.json of JSON null, and a number.
+  fs.rmSync(path.join(run(ids[0]), 'meta.json'));
+  put(run(ids[1]), 'meta.json', { config: CONFIGS.low });
+  put(run(ids[2]), 'meta.json', null);
+  put(run(ids[3]), 'meta.json', { config: CONFIGS.low, bundledOmp: 19 });
+  // Four runs of other omp releases.
+  const others = ['19.0.0', '18.2.0', '19.0.1', '18.0.0'];
+  others.forEach((release, index) => put(run(ids[4 + index]), 'meta.json', { config: CONFIGS.low, bundledOmp: release }));
+  for (const id of ids) put(run(id), 'blocks/reviewer.md', JSON.stringify(REVIEWER_REPLY));
+  const unrecorded = ids.slice(0, 4).map(label).join(', ');
+  const otherRuns = others.map((release, index) => `${label(ids[4 + index])} (omp ${release})`).join(', ');
+  const refusal = (command) =>
+    [
+      `${command}: 4 bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${VERIFIED_OMP}`,
+      `${command}: 4 bundled runs were prepared for the vendored agents of another omp release than omp ${VERIFIED_OMP} of this score.mjs, whose output schemas can differ: ${otherRuns}; score them with the score.mjs of their omp release`,
+    ].join('\n');
+  for (const args of [
+    ['transcripts', ws, '--omp-sessions', sessions],
+    ['findings', ws],
+  ]) {
+    const child = scoreChild(args);
+    assert.equal(child.status, 1, child.stderr);
+    assert.equal(child.stderr.trim(), refusal(args[0]));
+  }
+  assert.equal(fs.existsSync(path.join(ws, 'findings.json')), false);
+});
+
 test('findings and transcripts refuse a vendored output schema of a form that the scorer does not check', () => {
   // Copies of the scripts whose vendored reviewer has a schema that the scorer cannot check: a JSON Schema root, where
   // `required` is no JTD keyword, so the copy would not check the required fields; and a nested `type` that is a list,

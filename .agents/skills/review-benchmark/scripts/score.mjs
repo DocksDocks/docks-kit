@@ -593,7 +593,8 @@ export function structuredProblem(reviewer, value) {
 // bundledSchema), and it reads the omp release that `prepare.mjs case` recorded for the run (meta.json
 // `bundledOmp`). This score.mjs holds the agents and the schemas of BUNDLED_OMP_VERSION only, and the schema of
 // another release can differ, so the command stops when a run has no meta.json, records no release, or records
-// another release, and it names each such run.
+// another release. Its one refusal has a line for each of the two groups, and each line names every run of its group,
+// because the operator repairs or scores again each run.
 function checkBundledRuns(command, folders) {
   const unrecorded = [];
   const others = [];
@@ -602,20 +603,22 @@ function checkBundledRuns(command, folders) {
     if (bundled.length === 0) continue;
     for (const reviewer of bundled) bundledSchema(reviewer);
     const metaFile = path.join(dir, 'meta.json');
-    const recorded = fs.existsSync(metaFile) ? readJson(metaFile).bundledOmp : undefined;
+    const recorded = fs.existsSync(metaFile) ? readJson(metaFile)?.bundledOmp : undefined;
     if (typeof recorded !== 'string') unrecorded.push(label);
     else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${label} (omp ${recorded})`);
   }
+  const lines = [];
   if (unrecorded.length) {
-    fail(
-      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${listSome(unrecorded, LISTED_READS)}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
+    lines.push(
+      `${command}: ${unrecorded.length} bundled runs have no record of the omp release of their vendored agents (\`bundledOmp\` in meta.json): ${unrecorded.join(', ')}; restore their meta.json from a trusted copy, or prepare and dispatch new runs into a fresh workspace with prepare.mjs case, which records omp ${BUNDLED_OMP_VERSION}`,
     );
   }
   if (others.length) {
-    fail(
-      `${command}: ${others.length} bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${listSome(others, LISTED_READS)}; score them with the score.mjs of their omp release`,
+    lines.push(
+      `${command}: ${others.length} bundled runs were prepared for the vendored agents of another omp release than omp ${BUNDLED_OMP_VERSION} of this score.mjs, whose output schemas can differ: ${others.join(', ')}; score them with the score.mjs of their omp release`,
     );
   }
+  if (lines.length) fail(lines.join('\n'));
 }
 
 // The locator text and the file of one location of a structured finding.
