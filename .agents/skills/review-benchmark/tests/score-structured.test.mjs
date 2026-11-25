@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'vitest';
 import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import {
+  BUNDLED_OMP_VERSION,
   buildPairs,
   dispatchName,
   parseBlock,
@@ -547,7 +548,7 @@ test('findings and transcripts refuse a vendored output schema of a form that th
     fs.mkdirSync(repo);
     spawnSync('git', ['init', '-q', repo]);
     const script = path.join(path.dirname(copyScripts(repo)), 'score.mjs');
-    const agent = path.join(repo, '.agents/skills/review-benchmark/bundled/omp-19.1.1/reviewer.md');
+    const agent = path.join(repo, '.agents/skills/review-benchmark/bundled', `omp-${BUNDLED_OMP_VERSION}`, 'reviewer.md');
     put(path.dirname(agent), 'reviewer.md', `---\nname: reviewer\n${output}---\nReview.\n`);
     const { ws, sessions } = bundledWorkspace([{ id: 'bundled-bug-12', calls: VERDICT_CALLS }]);
     put(path.join(ws, 'bundled-bug-12', 'R1-low', 'run-1'), 'blocks/reviewer.md', '{}');

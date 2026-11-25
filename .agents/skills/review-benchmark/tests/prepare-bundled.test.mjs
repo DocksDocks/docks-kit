@@ -6,7 +6,7 @@ import { test } from 'vitest';
 import { BUN_RUNTIME } from '../../../../cli/test/lib/cliEntry.ts';
 import { PROJECT_CONFIG } from '../scripts/omp.mjs';
 import * as prepare from '../scripts/prepare.mjs';
-import { bundledSchema } from '../scripts/score.mjs';
+import { BUNDLED_DIR, BUNDLED_OMP_VERSION, bundledSchema } from '../scripts/score.mjs';
 import {
   agentsOnBun,
   CONFIGS,
@@ -23,23 +23,31 @@ import {
   put,
   readJson,
   readText,
+  REPO_ROOT,
   SKILL_DIR,
   tierOverrides,
+  VERIFIED_OMP,
 } from './helpers.mjs';
 
 // Plan #229 step 3: the bundled arms.
 //
 // - prepareAgents({ bundled: true, model, efforts, tiers?, project }): renders `review-bench-bundled-reviewer-<config>`
-//   and `review-bench-bundled-security-<config>` from bundled/omp-19.1.1/ with `structured: true`, without `bash`,
-//   `lsp`, and `spawns`, and with the pinned model and effort. It needs a `--project` of its own and refuses to
-//   replace the setup of another `agents` run there. It stops when `omp --version` is not 19.1.1, and it takes no
-//   option of the other `agents` runs.
+//   and `review-bench-bundled-security-<config>` from the vendored folder of BUNDLED_OMP_VERSION (score.mjs) with
+//   `structured: true`, without `bash`, `lsp`, and `spawns`, and with the pinned model and effort. It needs a
+//   `--project` of its own and refuses to replace the setup of another `agents` run there. It stops when
+//   `omp --version` is not BUNDLED_OMP_VERSION, and it takes no option of the other `agents` runs.
 // - `prepare.mjs case` with the arms R1 (`reviewer`, the full diff) and V1 (`security-reviewer`, the changed files as
 //   scope, from the Git listing of the full diff) on a case of a `cases/bundled/` folder. It checks the seed rule on
 //   the changes that Git applies, and V1 needs a security seed. Each run records the vendored omp version as
 //   `bundledOmp` in its meta.json.
 
-const VENDORED = path.join(SKILL_DIR, 'bundled', 'omp-19.1.1');
+// Each version text comes from the vendored release of score.mjs, so a refresh of the vendored agents after a raise of
+// the omp pin changes no test.
+const VENDORED = BUNDLED_DIR;
+// The installed omp releases that `agents --bundled` refuses: the next patch release, and the omp floor when it is
+// below the vendored release (a release below the floor stops at the floor check of the omp preflight first).
+const NEWER_OMP = BUNDLED_OMP_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
+const OMP_FLOOR = prepare.ompPins(REPO_ROOT).floor;
 const AGENT_FRONTMATTER = /^---\n([\s\S]*?)\n---\n/;
 
 // The vendored file `name` and the rendered agent `file`: the top-level frontmatter lines and the body of each.
@@ -91,11 +99,11 @@ test('agents --bundled renders both bundled agents per configuration in structur
       { name: 'low', model: MODEL, effort: 'low', tier: null },
       { name: 'high', model: MODEL, effort: 'high', tier: null },
     ],
-    bundled: { ompVersion: '19.1.1' },
-    ompVersion: '19.1.1',
+    bundled: { ompVersion: BUNDLED_OMP_VERSION },
+    ompVersion: VERIFIED_OMP,
   });
   assert.equal(projectConfig(project), null);
-  assert.ok(lines.includes(`wrote 4 bundled agent files of omp 19.1.1 to ${agentDir} for low, high`));
+  assert.ok(lines.includes(`wrote 4 bundled agent files of omp ${BUNDLED_OMP_VERSION} to ${agentDir} for low, high`));
   const tools = { reviewer: 'read, find, grep, glob, web_search, ast_grep', security: 'read, find, grep, glob, ast_grep' };
   const files = { reviewer: 'reviewer.md', security: 'security-reviewer.md' };
   for (const effort of ['low', 'high']) {
@@ -132,14 +140,16 @@ test('agents --bundled refuses another omp version and the options of the other 
   const root = neutralScratch();
   const project = path.join(root, 'project');
   const configsFile = path.join(project, '.omp', 'agents', 'review-bench-configs.json');
-  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
+  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: BUNDLED_OMP_VERSION } });
   const before = readText(configsFile);
   const args = ['--bundled', '--model', MODEL, '--efforts', 'high', '--project', project];
   assert.equal(
-    agentsRefusal(args, fakeOmp({ version: '19.1.2' })),
-    `omp 19.1.2 is installed, but ${VENDORED} holds the bundled agents of omp 19.1.1; run agents --bundled with omp 19.1.1, or vendor the agents of omp 19.1.2 as SOURCE.md in that folder tells`,
+    agentsRefusal(args, fakeOmp({ version: NEWER_OMP })),
+    `omp ${NEWER_OMP} is installed, but ${VENDORED} holds the bundled agents of omp ${BUNDLED_OMP_VERSION}; run agents --bundled with omp ${BUNDLED_OMP_VERSION}, or vendor the agents of omp ${NEWER_OMP} as SOURCE.md in that folder tells`,
   );
-  assert.match(agentsRefusal(args, fakeOmp({ version: '19.1.0' })), /^omp 19\.1\.0 is installed/);
+  if (OMP_FLOOR !== BUNDLED_OMP_VERSION) {
+    assert.ok(agentsRefusal(args, fakeOmp({ version: OMP_FLOOR })).startsWith(`omp ${OMP_FLOOR} is installed, but `));
+  }
   // The refused runs change no file.
   assert.equal(readText(configsFile), before);
   assert.deepEqual(fs.readdirSync(path.dirname(configsFile)), ['review-bench-configs.json']);
@@ -239,7 +249,7 @@ function bundledRepo() {
   // case reads the repository of the checkout that holds the script, so the scripts go into the case repository.
   const script = copyScripts(repo);
   const project = path.join(root, 'project');
-  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
+  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: BUNDLED_OMP_VERSION } });
   const writeCase = (id, { security = true, seed, fix, folder = 'bundled' }) => {
     const dir = path.join(root, 'cases', folder);
     const known = {
@@ -326,7 +336,7 @@ test('case writes the R1 and V1 prompts of a bundled case with the read-scope ru
   for (const arm of ['R1-low', 'V1-low']) {
     assert.deepEqual(readJson(path.join(caseDir, arm, 'run-1', 'meta.json')), {
       config: CONFIGS.low,
-      bundledOmp: '19.1.1',
+      bundledOmp: BUNDLED_OMP_VERSION,
     });
   }
   // The full diff runs from the base to the head with the seed, so the seeded line is an added line of it.
@@ -436,7 +446,7 @@ test('case refuses a bundled case whose seed edits a file that the snapshot and 
   // case hides the skill folder of the checkout that holds the script, so the scripts go into the case repository.
   const script = copyScripts(repo);
   const project = path.join(root, 'project');
-  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: '19.1.1' } });
+  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: BUNDLED_OMP_VERSION } });
   const id = 'bundled-sec-09';
   const dir = path.join(root, 'cases', 'bundled');
   const known = {
