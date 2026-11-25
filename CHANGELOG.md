@@ -13,8 +13,9 @@
 - code-guardrails: error output that is only a line break or a NUL byte now
   fails the scan, as other error output does.
 - code-guardrails: the block runs the scan in a new Bash in privileged mode,
-  so the functions, variables, options, and debug hooks of the calling shell
-  do not change it, and `set -a` no longer makes `awk` and `sort` fail on a
+  without the exported variables that change how Bash runs, so the functions,
+  variables, options, and debug hooks of the calling shell do not change what
+  runs in that Bash, and `set -a` no longer makes `awk` and `sort` fail on a
   large match stream. Its commands get only `PATH`, `HOME`, `TMPDIR`,
   `XDG_CONFIG_HOME`, `LANG`, `LC_*`, and `GIT_*` from the environment. The
   block needs an `env` with `-0`.

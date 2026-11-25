@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-25"
-  content_hash: "d89885779720b08b7f33438e7d68c05f2c7adc650f91b108951ed6e426c0da0d"
+  content_hash: "42c9ce4ffda0322c5a63124e30d535cf24e026f350daaf8eae603e3742d37493"
 ---
 
 # Code Guardrails
@@ -204,17 +204,20 @@ gives wrong results; leave such a file out with a pathspec.
 ```bash
 # Run the scan in a new bash in privileged mode (-p): it reads no startup file and no
 # BASH_ENV, takes no function from the environment, and ignores SHELLOPTS and
-# BASHOPTS there, so the functions, debug hooks, variables, and settings of the
-# calling shell cannot change it.
-command bash --noprofile --norc -p -s <<'SCAN'
+# BASHOPTS there. env also removes the exported variables that change how bash runs
+# (POSIXLY_CORRECT, BASH_COMPAT, TMOUT, FUNCNEST, EXECIGNORE). So the functions, debug
+# hooks, variables, and settings of the calling shell do not change what runs inside
+# it. A debug hook of the calling shell still runs before this one line, as it runs
+# before any command.
+command env -u POSIXLY_CORRECT -u BASH_COMPAT -u TMOUT -u FUNCNEST -u EXECIGNORE \
+  bash --noprofile --norc -p -s <<'SCAN'
 # The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,
 # XDG_CONFIG_HOME (Git reads its user config from HOME and XDG_CONFIG_HOME), LANG,
 # LC_*, and GIT_*. `env -0` lists every entry of the real environment, also the
 # function entries that bash did not take, and `run` removes each other entry by name
 # with `env -u`, so no value goes into a command line. An empty record after the list
 # shows that `env -0` succeeded. The reader uses the C locale, so a byte that starts a
-# multibyte character cannot hide the NUL after it. TMOUT would limit each read.
-unset -v TMOUT
+# multibyte character cannot hide the NUL after it.
 drop=() listed=
 while LC_ALL=C IFS= read -r -d '' entry; do
   if [ -z "$entry" ]; then listed=yes; break; fi
@@ -222,7 +225,7 @@ while LC_ALL=C IFS= read -r -d '' entry; do
     '' | PATH | HOME | TMPDIR | XDG_CONFIG_HOME | LANG | LC_* | GIT_*) ;;
     *) drop+=(-u "${entry%%=*}") ;;
   esac
-done < <(command env -0 && printf '\0')
+done < <(command env -0 < /dev/null && printf '\0')
 if [ "$listed" != yes ]; then
   echo "scan failed: env -0 cannot list the environment" >&2; exit 2
 fi
@@ -278,9 +281,10 @@ scan() {
     LC_ALL=C IFS= read -r -d '' errors && LC_ALL=C IFS= read -r -d '' end; } < <( {
     { status=0; found=$(matches "$@" 4>&-) || status=$?
       printf '%s\0%s\0' "$status" "$found" >&4; } 2>&1 |
-      { LC_ALL=C; errors=''
-        while IFS= read -r -d '' part; do errors="$errors$part?"; done
-        printf '%s\0%s\0' "$errors$part" end; } 4>&-; } 4>&1 ) ||
+      { LC_ALL=C; segments=()
+        while IFS= read -r -d '' part; do segments+=("$part"); done
+        segments+=("$part"); IFS='?'
+        printf '%s\0%s\0' "${segments[*]}" end; } 4>&-; } 4>&1 ) ||
     [ "$end" != end ]; then
     echo "scan failed: cannot read the matches" >&2; return 2
   fi
@@ -322,11 +326,14 @@ older also keep the script of the scan shell in a temporary file of their own.
 
 The block runs no text that it reads, also when Git writes trace output into a file
 descriptor of the scan. It runs the scan in a new Bash in privileged mode, so the
-functions, variables, options, and debug hooks of your shell do not change the scan,
-and `set -a` does not send the matches to other commands. The commands of the scan get
-only the environment variables that the comment in the block lists. When a Git setting
-of your project lives in another environment variable, add that name to the list. The
-block needs an `env` command with the `-0` option (GNU coreutils, or macOS).
+functions, variables, options, and debug hooks of your shell do not change what runs
+in that Bash, and `set -a` does not send the matches to other commands. A debug hook
+of your shell still runs before the line that starts that Bash. Your exported
+variables still reach that Bash, except the ones that change how Bash runs, which the
+first comment in the block names. The commands of the scan get only the environment
+variables that the second comment lists. When a Git setting of your project lives in
+another environment variable, add that name to the list. The block needs an `env`
+command with the `-0` option (GNU coreutils, or macOS).
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short

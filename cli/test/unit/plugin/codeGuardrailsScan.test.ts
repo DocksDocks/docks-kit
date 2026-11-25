@@ -13,18 +13,19 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { IS_ROOT } from "../../lib/agentDocs/harness.ts";
+import { SPAWN_TIMEOUT_MS } from "../../lib/spawnTimeout";
 
 /**
  * The "Find scattered values" block of the code-guardrails skill, which the
  * kit plugin ships, run with `bash` on fixture Git repositories as an agent
- * runs it (DocksDocks/docks-kit#237). The block is POSIX shell code that needs
- * `bash`, `git`, `tr`, `awk`, and `sort`, so the suite does not run on Windows.
+ * runs it (DocksDocks/docks-kit#237). The block is Bash code that needs `bash`,
+ * `git`, `tr`, `awk`, `sort`, and POSIX file modes, so the suite does not run on Windows.
  */
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..", "..");
 const SKILL = join(REPO_ROOT, "SoT/.omp/plugin/skills/code-guardrails/SKILL.md");
 const FENCE = "```bash\n";
 /** The last write of the capture: the error field and the end mark. */
-const END_WRITE = `printf '%s\\0%s\\0' "$errors$part" end`;
+const END_WRITE = `printf '%s\\0%s\\0' "\${segments[*]}" end`;
 
 /** The bash block of the "Find scattered values" section of the shipped skill. */
 function scanBlock(): string {
@@ -66,7 +67,12 @@ function fixture(): Fixture {
 }
 
 function git(fx: Fixture, cwd: string, ...args: ReadonlyArray<string>): void {
-  const child = spawnSync("git", [...args], { cwd, env: fx.env, encoding: "utf8" });
+  const child = spawnSync("git", [...args], {
+    cwd,
+    env: fx.env,
+    encoding: "utf8",
+    timeout: SPAWN_TIMEOUT_MS,
+  });
   expect(child.status, child.stderr).toBe(0);
 }
 
@@ -109,12 +115,15 @@ function scan(fx: Fixture, cwd: string, options: ScanOptions = {}): ScanRun {
     script,
     `${options.before ?? ""}\n${options.block ?? scanBlock()}\n${options.after ?? ""}\n`,
   );
+  // A timeout stops a scan that hangs, so the case fails with its name instead of blocking the run.
   const child = spawnSync("bash", [...(options.flags ?? []), script], {
     cwd,
     env: { ...fx.env, ...options.env },
     encoding: "utf8",
     maxBuffer: SCAN_OUTPUT_BYTES,
+    timeout: SPAWN_TIMEOUT_MS,
   });
+  expect(child.signal, `the scan stopped on ${child.signal}`).toBeNull();
   return { status: child.status, stdout: child.stdout, stderr: child.stderr };
 }
 
@@ -125,6 +134,9 @@ function shim(fx: Fixture, name: string, body: string, shebang = "#!/bin/sh"): N
   chmodSync(join(dir, name), 0o755);
   return { PATH: `${dir}:${fx.env["PATH"]}` };
 }
+
+/** `text` as one single-quoted shell word, also when it holds a single quote. */
+const shellQuote = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
 
 /** The absolute path of the command `name` that the scan finds on PATH. */
 function realCommand(fx: Fixture, name: string): string {
@@ -166,6 +178,17 @@ function largeRepo(fx: Fixture, count: number): string {
 
 const pairRepo = (fx: Fixture, dir: string): string =>
   repo(fx, dir, { "a.py": "a = 1234\n", "b.py": "b = 1234\n" });
+
+/** A UTF-8 locale of this host, if it has one. */
+const UTF8_LOCALE = lines(spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout ?? "").find(
+  (name) => /utf-?8$/i.test(name),
+);
+/**
+ * Environment names that the commands of the scan may get. The shell of a shim adds PWD, and also SHLVL and `_`
+ * when `/bin/sh` is Bash (macOS).
+ */
+const KEPT_NAMES =
+  "^(PATH|HOME|TMPDIR|XDG_CONFIG_HOME|LANG|LC_[A-Z_]*|GIT_[A-Za-z0-9_]*|PWD|SHLVL|_)=";
 
 describe.skipIf(process.platform === "win32")("code-guardrails scan block", () => {
   describe("earlier behavior", () => {
@@ -254,6 +277,25 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       expect(run.stderr).not.toContain("command not found");
     });
 
+    it("gives no command of the capture its private descriptor", () => {
+      const fx = fixture();
+      const dir = mkdtempSync(join(fx.root, "probes-"));
+      // Each probe reports when descriptor 4 is open in it, then runs the real command.
+      for (const name of ["git", "tr"]) {
+        const real = shellQuote(realCommand(fx, name));
+        // `true` is a regular builtin: a failed redirection of it does not end the shell.
+        const body = `if ( true >&4 ) 2>/dev/null; then echo "descriptor 4 is open in ${name}" >&2; fi\nexec ${real} "$@"`;
+        writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
+        chmodSync(join(dir, name), 0o755);
+      }
+      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
+        env: { PATH: `${dir}:${fx.env["PATH"]}` },
+      });
+      expect(run.stderr).not.toContain("descriptor 4 is open");
+      expect(run.status, run.stderr).toBe(0);
+      expect(lines(run.stdout)).toEqual(["2\t1234\t a.py:1 b.py:1"]);
+    });
+
     it("keeps a large match stream out of the environment of its commands, and keeps the caller's allexport", () => {
       const fx = fixture();
       const count = 60_000;
@@ -266,12 +308,15 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       expect(lines(run.stdout)).toHaveLength(count);
     });
 
-    it("fails when the capture ends without its end mark", () => {
+    it.each([
+      ["without its end mark", `printf '%s\\0' "\${segments[*]}"`],
+      ["with another end mark", `printf '%s\\0%s\\0' "\${segments[*]}" ends`],
+    ])("fails when the capture ends %s", (_, write) => {
       const fx = fixture();
       const block = scanBlock();
       expect(block).toContain(END_WRITE);
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        block: block.replace(END_WRITE, `printf '%s\\0' "$errors$part"`),
+        block: block.replace(END_WRITE, write),
       });
       expect(run.status).toBe(2);
       expect(lines(run.stderr)).toContain("scan failed: cannot read the matches");
@@ -284,7 +329,7 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       const fx = fixture();
       const tr = realCommand(fx, "tr");
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        env: shim(fx, "tr", `${write}\nexec '${tr}' "$@"`),
+        env: shim(fx, "tr", `${write}\nexec ${shellQuote(tr)} "$@"`),
       });
       expect(run.status).toBe(2);
       expect(lines(run.stderr)).toContain("scan failed with status 2");
@@ -301,7 +346,11 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       ],
       ["functions named printf and read", "printf() { echo hijack >&2; }; read() { return 1; }"],
       ["a debug hook that every function inherits", 'trap "echo hook >&2" DEBUG; set -T'],
-      ["startup settings in the environment", "export SHELLOPTS=xtrace BASH_ENV=/dev/null"],
+      // EXECIGNORE would also change the command search of the calling shell itself, so it is not in this case.
+      [
+        "exported variables that change how Bash runs",
+        "export FUNCNEST=2 BASH_COMPAT=31 POSIXLY_CORRECT=1",
+      ],
     ])("gives the normal result with %s in the calling shell", (_, before) => {
       const fx = fixture();
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), { before });
@@ -310,10 +359,28 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       expect(run.stderr).not.toContain("hijack");
     });
 
+    it("starts the scan shell without the caller's trace setting and BASH_ENV file", () => {
+      const fx = fixture();
+      const marker = join(fx.root, "bash-env-ran");
+      const bashEnv = join(fx.root, "bash-env.sh");
+      writeFileSync(bashEnv, `touch ${shellQuote(marker)}\n`);
+      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
+        before: `set -x; export SHELLOPTS BASH_ENV=${shellQuote(bashEnv)}`,
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(lines(run.stdout)).toEqual(NORMAL);
+      // The caller traces its own launch line; a traced scan shell would also print its scan calls.
+      expect(run.stderr).not.toContain("+ scan -w");
+      expect(existsSync(marker)).toBe(false);
+    });
+
     it("waits for a slow scan when the caller exports a read timeout", () => {
       const fx = fixture();
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        env: { ...shim(fx, "git", `sleep 2\nexec '${realCommand(fx, "git")}' "$@"`), TMOUT: "1" },
+        env: {
+          ...shim(fx, "git", `sleep 2\nexec ${shellQuote(realCommand(fx, "git"))} "$@"`),
+          TMOUT: "1",
+        },
       });
       expect(run.status, run.stderr).toBe(0);
       expect(lines(run.stdout)).toEqual(NORMAL);
@@ -331,12 +398,12 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
         const scripts = {
           env: [
             'case "$1" in -0)',
-            `  if [ -e '${calls}' ]; then echo env >> '${calls}'; ${later}; fi`,
-            `  echo env >> '${calls}'; ${first} ;;`,
+            `  if [ -e ${shellQuote(calls)} ]; then echo env >> ${shellQuote(calls)}; ${later}; fi`,
+            `  echo env >> ${shellQuote(calls)}; ${first} ;;`,
             "esac",
-            `exec '${realEnv}' "$@"`,
+            `exec ${shellQuote(realEnv)} "$@"`,
           ].join("\n"),
-          git: `echo git >> '${calls}'\nexec '${realGit}' "$@"`,
+          git: `echo git >> ${shellQuote(calls)}\nexec ${shellQuote(realGit)} "$@"`,
         };
         for (const [command, body] of Object.entries(scripts)) {
           writeFileSync(join(shims, command), `#!/bin/sh\n${body}\n`);
@@ -353,7 +420,7 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       );
       expect(failing.calls).toEqual(["env"]);
       // A second, partial list would hide a failure if the scan read it.
-      const once = withShims("once", `exec '${realEnv}' -0`, partial);
+      const once = withShims("once", `exec ${shellQuote(realEnv)} -0`, partial);
       expect(once.run.status, once.run.stderr).toBe(0);
       expect(lines(once.run.stdout)).toEqual(NORMAL);
       expect(once.calls.filter((call) => call === "env")).toEqual(["env"]);
@@ -365,7 +432,7 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       const wrapper = shim(
         fx,
         "tr",
-        `printf x > /dev/null\nexec '${realCommand(fx, "tr")}' "$@"`,
+        `printf x > /dev/null\nexec ${shellQuote(realCommand(fx, "tr"))} "$@"`,
         "#!/usr/bin/env bash",
       );
       const exported = scan(fx, dir, {
@@ -383,28 +450,24 @@ describe.skipIf(process.platform === "win32")("code-guardrails scan block", () =
       }
     });
 
-    it("keeps other variables from its commands in a UTF-8 locale, also after a value with a broken character", () => {
-      const fx = fixture();
-      const locales = spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout ?? "";
-      const utf8 = lines(locales).find((name) => /utf-?8$/i.test(name));
-      if (utf8 === undefined) return;
-      // Each value ends in the first byte of a two-byte UTF-8 character; the tr shim reports any SECRET_ variable.
-      const tr = realCommand(fx, "tr");
-      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        env: {
-          ...shim(
-            fx,
-            "tr",
-            `if env | grep -q '^SECRET_'; then echo leaked >&2; fi\nexec '${tr}' "$@"`,
-          ),
-          LC_ALL: utf8,
-        },
-        before:
-          "export BROKEN_A=$'a\\xc3' SECRET_1=1 BROKEN_B=$'b\\xc3' SECRET_2=2 BROKEN_C=$'c\\xc3' SECRET_3=3",
-      });
-      expect(run.stderr).not.toContain("leaked");
-      expect(run.status, run.stderr).toBe(0);
-      expect(lines(run.stdout)).toEqual(NORMAL);
-    });
+    it.skipIf(UTF8_LOCALE === undefined)(
+      "keeps other variables from its commands in a UTF-8 locale, also after values with a broken character",
+      () => {
+        const fx = fixture();
+        // Each BROKEN_ value ends in the first byte of a two-byte UTF-8 character, which can hide the NUL after
+        // it from a reader in a UTF-8 locale on Bash 5.2. The tr shim reports each name outside the kept list,
+        // so the entry after a broken value counts, whatever its name.
+        const tr = realCommand(fx, "tr");
+        const report = `env | grep -v -E '${KEPT_NAMES}' | sed 's/=.*//; s/^/leaked /' >&2`;
+        const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
+          env: { ...shim(fx, "tr", `${report}\nexec ${shellQuote(tr)} "$@"`), LC_ALL: UTF8_LOCALE },
+          before:
+            "export BROKEN_A=$'a\\xc3' SECRET_1=1 BROKEN_B=$'b\\xc3' SECRET_2=2 BROKEN_C=$'c\\xc3' SECRET_3=3",
+        });
+        expect(run.stderr).not.toContain("leaked");
+        expect(run.status, run.stderr).toBe(0);
+        expect(lines(run.stdout)).toEqual(NORMAL);
+      },
+    );
   });
 });
