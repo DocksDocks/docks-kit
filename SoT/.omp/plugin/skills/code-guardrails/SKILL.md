@@ -5,7 +5,7 @@ user-invocable: true
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-25"
-  content_hash: "e9df21991e8754fe240a2e854f7df2ac7c1af19fa7694de2c2d770d3e1d4b091"
+  content_hash: "cec6b1f71232adedc107594f3cf8f379ddf460ded8c4febd89733cf07fbf4f1b"
 ---
 
 # Code Guardrails
@@ -209,8 +209,10 @@ gives wrong results; leave such a file out with a pathspec.
 # that change how bash starts and runs (POSIXLY_CORRECT, BASH_COMPAT, BASH_XTRACEFD,
 # TMOUT, FUNCNEST, EXECIGNORE) and finds bash on PATH. So the functions, debug hooks,
 # variables, and settings of the calling shell do not change what runs inside it. The
-# backslash keeps an alias named `command` from replacing that word. A debug hook of the
-# calling shell still runs before this one line, as it runs before any command.
+# backslash keeps an alias named `command` from replacing that word; this needs the
+# `command` builtin, so a function named `command` or `enable -n command` still changes
+# this line. A debug hook of the calling shell still runs before this one line, as it
+# runs before any command.
 \command /usr/bin/env -u POSIXLY_CORRECT -u BASH_COMPAT -u BASH_XTRACEFD -u TMOUT \
   -u FUNCNEST -u EXECIGNORE bash --noprofile --norc -p -s <<'SCAN'
 # The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,

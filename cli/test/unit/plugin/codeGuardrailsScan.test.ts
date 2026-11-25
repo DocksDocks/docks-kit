@@ -402,9 +402,9 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
 
     it("starts bash without the exported variables that change how bash starts and runs", () => {
       const fx = fixture();
-      // A forwarding bash in a folder whose name holds a space. It records each start of the scan shell (-s)
-      // that came through the case wrapper, then runs the real bash. It finds its files through $0, so its
-      // shell source holds no path.
+      // A forwarding bash in a folder whose name holds a space. It records each start of the scan shell (an
+      // argument that is exactly -s) that came through the case wrapper, then runs the real bash. It finds its
+      // files through $0, so its shell source holds no path.
       const forwarder = join(fx.root, "bash dir");
       mkdirSync(forwarder);
       symlinkSync(realCommand(fx, "bash"), join(forwarder, "real-bash"));
@@ -413,7 +413,8 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
         [
           "#!/bin/sh",
           'here=$(dirname "$0")',
-          'case " $* " in *" -s "*) [ "$SCAN_PROBE" = wrapper ] && echo scan-shell >> "$here/launches" ;; esac',
+          'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done',
+          'if [ -n "$scan_shell" ] && [ "$SCAN_PROBE" = wrapper ]; then echo scan-shell >> "$here/launches"; fi',
           'exec "$here/real-bash" "$@"',
           "",
         ].join("\n"),
@@ -427,10 +428,15 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       expect(resolvedBash).toBe(join(forwarder, "bash"));
       // The case wrapper, first on PATH, writes the environment of the scan shell as NUL-ended records. It reads
       // the exported entries (`env`), not its own shell variables: when /bin/sh is Bash (macOS), that shell sets
-      // POSIXLY_CORRECT for itself without exporting it.
+      // POSIXLY_CORRECT for itself without exporting it. `env -0` reads no input, so the script of the scan
+      // shell stays on standard input for Bash.
       const capture = join(fx.root, "scan-shell-env");
       const wrapper = [
-        `case " $* " in *" -s "*) env -0 > ${shellQuote(capture)} || exit 97; export SCAN_PROBE=wrapper ;; esac`,
+        'scan_shell=; for arg in "$@"; do [ "$arg" = -s ] && scan_shell=yes; done',
+        'if [ -n "$scan_shell" ]; then',
+        `  env -0 < /dev/null > ${shellQuote(capture)} || exit 97`,
+        "  export SCAN_PROBE=wrapper",
+        "fi",
         `exec ${shellQuote(resolvedBash)} "$@"`,
       ].join("\n");
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
@@ -446,10 +452,11 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       ).toBe(true);
       const records = readFileSync(capture, "utf8");
       expect(records.endsWith("\0"), "the environment capture is incomplete").toBe(true);
-      const names = records
-        .slice(0, -1)
-        .split("\0")
-        .map((entry) => entry.slice(0, entry.indexOf("=")));
+      const entries = records.slice(0, -1).split("\0");
+      for (const entry of entries) {
+        expect(entry, "an environment record without a name").toMatch(/^[^=]+=/);
+      }
+      const names = entries.map((entry) => entry.slice(0, entry.indexOf("=")));
       expect(names).toContain("PATH");
       const startupNames = [
         "POSIXLY_CORRECT",
