@@ -350,10 +350,9 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       ],
       ["functions named printf and read", "printf() { echo hijack >&2; }; read() { return 1; }"],
       ["a debug hook that every function inherits", 'trap "echo hook >&2" DEBUG; set -T'],
-      // EXECIGNORE would also change the command search of the calling shell itself, so it is not in this case.
       [
-        "exported variables that change how Bash runs",
-        "export FUNCNEST=2 BASH_COMPAT=31 POSIXLY_CORRECT=1",
+        "exported variables that change how Bash starts, runs, and finds commands",
+        "export FUNCNEST=2 BASH_COMPAT=31 POSIXLY_CORRECT=1 EXECIGNORE='*'",
       ],
     ])("gives the normal result with %s in the calling shell", (_, before) => {
       const fx = fixture();
@@ -378,13 +377,22 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
       expect(existsSync(marker)).toBe(false);
     });
 
-    it("keeps the script of the scan shell from an env wrapper that reads its input", () => {
+    it("keeps the script of the scan shell from wrappers that read their input", () => {
       const fx = fixture();
-      // The wrapper reads all of its input when it lists the environment or would start a shell.
-      const drain = `case " $* " in *" -0 "* | *" bash "*) cat > /dev/null ;; esac\nexec ${shellQuote(realCommand(fx, "env"))} "$@"`;
-      const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), { env: shim(fx, "env", drain) });
-      expect(run.status, run.stderr).toBe(0);
-      expect(lines(run.stdout)).toEqual(NORMAL);
+      // Each wrapper reads all of its input when it lists the environment or would start a shell.
+      const drainer = (name: string) =>
+        `case " $* " in *" -0 "* | *" bash "* | *" -s "*) cat > /dev/null ;; esac\nexec ${shellQuote(realCommand(fx, name))} "$@"`;
+      const dir = pairRepo(fx, join(fx.root, "pair"));
+      const envOnPath = scan(fx, dir, { env: shim(fx, "env", drainer("env")) });
+      // A bash wrapper in the command cache of the calling shell, not on PATH.
+      const cached = join(fx.root, "cached-bash");
+      writeFileSync(cached, `#!/bin/sh\n${drainer("bash")}\n`);
+      chmodSync(cached, 0o755);
+      const bashInCache = scan(fx, dir, { before: `hash -p ${shellQuote(cached)} bash` });
+      for (const run of [envOnPath, bashInCache]) {
+        expect(run.status, run.stderr).toBe(0);
+        expect(lines(run.stdout)).toEqual(NORMAL);
+      }
     });
 
     it("waits for a slow scan when the caller exports a read timeout", () => {
