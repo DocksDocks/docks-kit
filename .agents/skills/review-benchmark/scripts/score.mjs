@@ -442,6 +442,9 @@ export const BUNDLED_DIR = path.join(BENCHMARK_DIR, 'bundled', `omp-${BUNDLED_OM
 const BUNDLED_REVIEWERS = new Set(['reviewer', 'security-reviewer']);
 const isBundledReviewer = (reviewer) => BUNDLED_REVIEWERS.has(reviewer);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// A YAML mapping of a vendored schema: a plain object. isRecord also accepts the Date of a tagged scalar such as
+// `!!timestamp 2026-01-01`, which is no JTD schema node, no `metadata` object, and no `properties` map.
+const isMapping = (value) => isRecord(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 // The severity of a `reviewer` finding from its priority P0 to P3, and of a `security-reviewer` finding from its
 // severity.
 const PRIORITY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
@@ -457,9 +460,9 @@ export function bundledSchema(reviewer) {
     const extracted = extractFrontmatter(readText(file, `; restore the vendored agents of omp ${BUNDLED_OMP_VERSION}`));
     const parsed = extracted.ok ? parseFrontmatter(extracted.text) : extracted;
     const output = parsed.ok ? parsed.value.output : undefined;
-    if (!isRecord(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
+    if (!isMapping(output)) fail(`${file} has no output schema under \`output\` in its frontmatter`);
     const problems = schemaFormProblems(output, 'output');
-    if (!isRecord(output.properties) && !isRecord(output.optionalProperties)) {
+    if (!isMapping(output.properties) && !isMapping(output.optionalProperties)) {
       problems.unshift('output is not a properties form, so its yield sections have no field names');
     }
     if (problems.length) {
@@ -510,7 +513,7 @@ const SCHEMA_KEYWORDS = new Set(['metadata', 'nullable', ...Object.values(SCHEMA
 // type without a check (JTD_JSON_TYPES), a keyword with a value of the wrong shape, or a node inside itself (a YAML
 // alias can make one), in this node or below it. `ancestors` holds the nodes above `schema`.
 function schemaFormProblems(schema, at, ancestors = new Set()) {
-  if (!isRecord(schema)) return [`${at} is not an object`];
+  if (!isMapping(schema)) return [`${at} is not an object`];
   if (ancestors.has(schema)) return [`${at} is a node that contains itself`];
   const keys = Object.keys(schema);
   const unknown = keys.filter((key) => !SCHEMA_KEYWORDS.has(key));
@@ -519,7 +522,7 @@ function schemaFormProblems(schema, at, ancestors = new Set()) {
   if (forms.length > 1) return [`${at} has more than one form: ${forms.join(', ')}`];
   if (Object.hasOwn(schema, 'nullable') && typeof schema.nullable !== 'boolean') return [`${at}.nullable is not true or false`];
   // RFC 8927 section 2.2: the value of `metadata` is an object.
-  if (Object.hasOwn(schema, 'metadata') && !isRecord(schema.metadata)) return [`${at}.metadata is not an object`];
+  if (Object.hasOwn(schema, 'metadata') && !isMapping(schema.metadata)) return [`${at}.metadata is not an object`];
   const below = new Set(ancestors).add(schema);
   switch (forms[0]) {
     case 'enum':
@@ -541,7 +544,7 @@ function schemaFormProblems(schema, at, ancestors = new Set()) {
         problems.push(`${at}.additionalProperties is not true or false`);
       }
       for (const key of ['properties', 'optionalProperties'].filter((name) => Object.hasOwn(schema, name))) {
-        if (!isRecord(schema[key])) problems.push(`${at}.${key} is not an object`);
+        if (!isMapping(schema[key])) problems.push(`${at}.${key} is not an object`);
         else for (const [name, field] of Object.entries(schema[key])) problems.push(...schemaFormProblems(field, `${at}.${key}.${name}`, below));
       }
       return problems;
@@ -609,10 +612,9 @@ export function structuredProblem(reviewer, value) {
 // `bundledOmp`). This score.mjs holds the agents and the schemas of BUNDLED_OMP_VERSION only, and the schema of
 // another release can differ, so the command stops when a run has no meta.json, records no release, or records
 // another release. Its one refusal has a line for each group that has runs, and each line names every run of its
-// group, because the operator repairs or scores again each run. A label or a recorded release with a line break gets
-// the escape `\n` or `\r`, so each group stays on one line.
+// group, because the operator repairs or scores again each run. Each label and recorded release goes through
+// refusalField, so each group stays on one line and no two runs look alike.
 function checkBundledRuns(command, folders) {
-  const oneLine = (text) => text.replaceAll('\r', '\\r').replaceAll('\n', '\\n');
   const unrecorded = [];
   const others = [];
   for (const { label, dir, reviewers } of folders) {
@@ -621,8 +623,8 @@ function checkBundledRuns(command, folders) {
     for (const reviewer of bundled) bundledSchema(reviewer);
     const metaFile = path.join(dir, 'meta.json');
     const recorded = fs.existsSync(metaFile) ? readJson(metaFile)?.bundledOmp : undefined;
-    if (typeof recorded !== 'string') unrecorded.push(oneLine(label));
-    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${oneLine(label)} (omp ${oneLine(recorded)})`);
+    if (typeof recorded !== 'string') unrecorded.push(refusalField(label));
+    else if (recorded !== BUNDLED_OMP_VERSION) others.push(`${refusalField(label)} (omp ${refusalField(recorded)})`);
   }
   const lines = [];
   if (unrecorded.length) {
@@ -636,6 +638,15 @@ function checkBundledRuns(command, folders) {
     );
   }
   if (lines.length) fail(lines.join('\n'));
+}
+
+// A run label or a recorded release in a line of a refusal: the text as it is when it is not empty and has no comma,
+// parenthesis, quote, backslash, control character, or Unicode line or paragraph separator; else the text as a JSON
+// string with these separators escaped too (JSON.stringify keeps them). So a value stays on its line, the commas and
+// parentheses of the line separate the values, and a plain value never looks like a quoted one.
+function refusalField(text) {
+  if (/^[^,()"\\\p{Cc}\p{Zl}\p{Zp}]+$/u.test(text)) return text;
+  return JSON.stringify(text).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 }
 
 // The locator text and the file of one location of a structured finding.
