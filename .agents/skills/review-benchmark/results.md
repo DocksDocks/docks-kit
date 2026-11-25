@@ -1674,10 +1674,10 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 
 ### Setup
 
-- Configurations: `openai-codex/gpt-6.1-terra` and `openai-codex/gpt-6.2-sol`, effort `high`, no `--tiers`, so each run took the tier of the parent session (`tier.subagent: inherit`). omp 19.1.1, the vendored version. Every reviewer transcript shows the served tier `priority`, the parent tier.
+- Configurations: `openai-codex/gpt-6.1-terra` and `openai-codex/gpt-6.2-sol`, effort `high`, no `--tiers`, so each run requested the tier of the parent session (`tier.subagent: inherit`, parent tier `priority`). omp 19.1.1, the vendored version. Every matched reviewer transcript records the tier `priority`. The omp 19.1.1 Codex adapter records the requested tier when a response says `default` or `auto` or names no tier, so the transcripts cannot rule out a downgrade.
 - Cases: the 20 cases of `cases/bundled/` for `R1` (`reviewer`, full diff) and the 10 cases with a security seed for `V1` (`security-reviewer`, the changed files as scope). One run per configuration and case: 60 reviews.
 - Dispatch: from the session in the repository root, in 8 groups of at most 8 background tasks, each group with the same prompts at both configurations in alternating order. All 60 tasks completed, and `transcripts` matched all 60.
-- Judges: 5 Claude task agents (`anthropic/claude-opus-5-5` in every judge transcript) on disjoint case groups, merged into one `judgments.json` (129 candidate pairs, 163 ratings). Three judges ran listing or search commands against the rule of `references/judge.md`; one grep printed one unrelated line of `results.md`. The finding ids stayed opaque.
+- Judges: 5 Claude task agents on disjoint case groups. Four of them ran commands against the rule of `references/judge.md` (one grep printed one line of `results.md`), so their answers were discarded, and four new judges judged those cases with the read, grep, glob, and write tools only. The used parts come from judges whose transcripts show only these tools, no forbidden path, and `anthropic/claude-opus-5-5`. They are merged into one `judgments.json` (129 candidate pairs, 163 ratings).
 
 ### `reviewer` (`report --arms R1-gpt-6.1-terra-high,R1-gpt-6.2-sol-high --reference R1-gpt-6.1-terra-high`)
 
@@ -1694,8 +1694,8 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Seconds max | 87.4 | 291.3 |
 | Known found per run | 0.83 | 1.00 |
 | Escaped per run | 0.17 | 0.00 |
-| Valid extras per run | 1.33 | 4.35 |
-| Wrong per run | 0.28 | 0.41 |
+| Valid extras per run | 1.39 | 4.41 |
+| Wrong per run | 0.22 | 0.35 |
 | Unjudged per run | 0.00 | 0.00 |
 | Unknown ratings per run | 0.00 | 0.00 |
 | Unknown pairs per run | 0.00 | 0.00 |
@@ -1715,7 +1715,7 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Model | openai-codex/gpt-6.1-terra | openai-codex/gpt-6.2-sol |
 | Effort | high | high |
 | Served tier | priority | priority |
-| Wrong findings / runs | 5 / 18 | 7 / 17 |
+| Wrong findings / runs | 4 / 18 | 6 / 17 |
 | Unknown ratings / runs | 0 / 18 | 0 / 17 |
 | Reads of missing paths | 1 | 0 |
 | Cases shared with R1-gpt-6.1-terra-high | - | 15 |
@@ -1724,7 +1724,7 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Escaped per 50 known on the cases shared with R1-gpt-6.1-terra-high (this column / R1-gpt-6.1-terra-high) | - | 0.00 / 6.67 |
 | Loop seconds difference from R1-gpt-6.1-terra-high, 90% interval | - | - |
 | Cases with an escaped difference from R1-gpt-6.1-terra-high | - | 2 |
-| Wrong findings more than R1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 0.3491 |
+| Wrong findings more than R1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 0.3423 |
 | Unknown ratings more than R1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 1.0000 |
 | Cases with known defects shared with R1-gpt-6.1-terra-high | - | 15 |
 | Seeded cases of the shared cases with known defects | - | 15 of 15 (1.00) |
@@ -1745,8 +1745,8 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Seconds max | 54.7 | 267.9 |
 | Known found per run | 0.80 | 0.86 |
 | Escaped per run | 0.20 | 0.14 |
-| Valid extras per run | 0.50 | 2.14 |
-| Wrong per run | 0.40 | 1.14 |
+| Valid extras per run | 0.50 | 2.57 |
+| Wrong per run | 0.40 | 0.71 |
 | Unjudged per run | 0.00 | 0.00 |
 | Unknown ratings per run | 0.00 | 0.00 |
 | Unknown pairs per run | 0.00 | 0.00 |
@@ -1766,7 +1766,7 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Model | openai-codex/gpt-6.1-terra | openai-codex/gpt-6.2-sol |
 | Effort | high | high |
 | Served tier | priority | priority |
-| Wrong findings / runs | 4 / 10 | 8 / 7 |
+| Wrong findings / runs | 4 / 10 | 5 / 7 |
 | Unknown ratings / runs | 0 / 10 | 0 / 7 |
 | Reads of missing paths | 0 | 0 |
 | Cases shared with V1-gpt-6.1-terra-high | - | 7 |
@@ -1775,7 +1775,7 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | Escaped per 50 known on the cases shared with V1-gpt-6.1-terra-high (this column / V1-gpt-6.1-terra-high) | - | 7.14 / 14.29 |
 | Loop seconds difference from V1-gpt-6.1-terra-high, 90% interval | - | - |
 | Cases with an escaped difference from V1-gpt-6.1-terra-high | - | 3 |
-| Wrong findings more than V1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 0.0678 |
+| Wrong findings more than V1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 0.2916 |
 | Unknown ratings more than V1-gpt-6.1-terra-high, one-sided exact Poisson p | - | 1.0000 |
 | Cases with known defects shared with V1-gpt-6.1-terra-high | - | 7 |
 | Seeded cases of the shared cases with known defects | - | 7 of 7 (1.00) |
@@ -1783,8 +1783,14 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 
 ### Invalid runs
 
-- `bundled-bug-05` `R1` Sol, `bundled-bug-08` `R1` Terra, `bundled-sec-08` `R1` Terra, `bundled-sec-09` `R1` Sol: read outside the scope (a `grep` result in the omp session folder of the run, which holds the cached pages of a web search).
-- `bundled-sec-03` `R1` Sol, `bundled-sec-03` `V1` Sol, `bundled-sec-04` `V1` Sol, `bundled-sec-06` `V1` Sol: read outside the scope (`skill://` reads).
+- `bundled-bug-05` `R1-gpt-6.2-sol-high` `run-1`: read outside the scope
+- `bundled-bug-08` `R1-gpt-6.1-terra-high` `run-1`: read outside the scope
+- `bundled-sec-03` `R1-gpt-6.2-sol-high` `run-1`: read outside the scope
+- `bundled-sec-03` `V1-gpt-6.2-sol-high` `run-1`: read outside the scope
+- `bundled-sec-04` `V1-gpt-6.2-sol-high` `run-1`: read outside the scope
+- `bundled-sec-06` `V1-gpt-6.2-sol-high` `run-1`: read outside the scope
+- `bundled-sec-08` `R1-gpt-6.1-terra-high` `run-1`: read outside the scope
+- `bundled-sec-09` `R1-gpt-6.2-sol-high` `run-1`: read outside the scope
 
 ### Cost
 
@@ -1795,16 +1801,16 @@ Plan #229 added the arms `R1` and `V1` and the planted cases of `cases/bundled/`
 | `V1` Terra | 10 | $1.64 |
 | `V1` Sol | 10 | $8.37 |
 
-- Judges: 5 dispatches, $13.20 at list prices.
+- Judges: 9 dispatches (5 first judges and 4 replacements), $22.71 at list prices.
 
 ### Decision
 
 - `reviewer`: no move. The two configurations share 15 valid cases of 20, and the rule needs 18. On these 15 cases, Sol escaped 0.00 known defects per 50 and Terra 6.67, and the 90% interval of the difference is [-13.33, 0.00], so it does not lie wholly below 0 either.
 - `security-reviewer`: no move. The two configurations share 7 valid cases of 10, and the rule needs 9. On these 7 cases, Sol escaped 7.14 per 50 and Terra 14.29, with the interval [-28.57, 14.29].
-- Both agents stay on the `reviewer` role, `openai-codex/gpt-6.1-terra:high`, tier `inherit`. No served tier differed from the parent tier.
-- Sol took about 4 to 6 times the median seconds and 3 to 7 times the median tokens, and cost about 5 times as much as Terra in both arms. It gave more wrong findings per run (`R1` 0.41 against 0.28, `V1` 1.14 against 0.40; one-sided exact Poisson p 0.35 and 0.07).
+- Both agents stay on the `reviewer` role, `openai-codex/gpt-6.1-terra:high`, tier `inherit`. No matched transcript recorded a tier other than the parent tier.
+- Sol took about 4 to 6 times the median seconds and 3 to 7 times the median tokens, and cost about 5 times as much as Terra in both arms. It gave more wrong findings per run (`R1` 0.35 against 0.22, `V1` 0.71 against 0.40; one-sided exact Poisson p 0.34 and 0.29).
 
 ### Limits
 
 - One run per case, planted defects only (see Bundled agents, Limits). The read-scope check made 8 of 60 runs invalid. Six of them are Sol runs, so the valid coverage of Sol is lower than that of Terra.
-- The `grep` results in the session folder come from the cached pages of the web search of a run. The read scope counts them as reads outside the inputs.
+- Four invalid runs grepped files in the omp session folder of the run, in its `url-search` folder; the read scope counts them as reads outside the inputs. Four Sol runs read `skill://` URIs.
