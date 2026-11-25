@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-11-25 - docks-kit 0.29.5: the code-guardrails scan runs no text that it reads
+
+### Fixed
+
+- code-guardrails, "Find scattered values": the scan no longer runs the text
+  that it collects with `eval`. Before, Git trace output sent to the capture
+  descriptor (`GIT_TRACE_SETUP=4`) ran as shell code; a repository path with
+  `;touch PWNED;` created that file. The scan now reads its status, matches,
+  and error output as NUL-ended fields with an end mark, and an incomplete
+  read fails with `scan failed: cannot read the matches`.
+- code-guardrails: error output that is only a line break or a NUL byte now
+  fails the scan, as other error output does.
+- code-guardrails: the block runs the scan in a new Bash in privileged mode,
+  so the functions, variables, options, and debug hooks of the calling shell
+  do not change it, and `set -a` no longer makes `awk` and `sort` fail on a
+  large match stream. Its commands get only `PATH`, `HOME`, `TMPDIR`,
+  `XDG_CONFIG_HOME`, `LANG`, `LC_*`, and `GIT_*` from the environment. The
+  block needs an `env` with `-0`.
+- A unit test runs the shipped block on fixture Git repositories
+  (`cli/test/unit/plugin/codeGuardrailsScan.test.ts`).
+
 ## 2026-11-24 - docks-kit 0.29.4: tested omp 19.1.1 and pi-intercom 0.19.0 pins
 
 ### Changed

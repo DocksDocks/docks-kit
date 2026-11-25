@@ -4,8 +4,8 @@ description: "Use when setting up strict linter rules for TypeScript (oxlint, an
 user-invocable: true
 metadata:
   pattern: tool-wrapper
-  updated: "2026-11-24"
-  content_hash: "8955cef86e5c803cfe56b1437d0cd5d4365f3083ebf03c099c7a8fae8198f073"
+  updated: "2026-11-25"
+  content_hash: "d89885779720b08b7f33438e7d68c05f2c7adc650f91b108951ed6e426c0da0d"
 ---
 
 # Code Guardrails
@@ -202,11 +202,37 @@ change the result. A file name that holds a newline breaks the 3-line framing an
 gives wrong results; leave such a file out with a pathspec.
 
 ```bash
+# Run the scan in a new bash in privileged mode (-p): it reads no startup file and no
+# BASH_ENV, takes no function from the environment, and ignores SHELLOPTS and
+# BASHOPTS there, so the functions, debug hooks, variables, and settings of the
+# calling shell cannot change it.
+command bash --noprofile --norc -p -s <<'SCAN'
+# The commands of the scan get only these environment variables: PATH, HOME, TMPDIR,
+# XDG_CONFIG_HOME (Git reads its user config from HOME and XDG_CONFIG_HOME), LANG,
+# LC_*, and GIT_*. `env -0` lists every entry of the real environment, also the
+# function entries that bash did not take, and `run` removes each other entry by name
+# with `env -u`, so no value goes into a command line. An empty record after the list
+# shows that `env -0` succeeded. The reader uses the C locale, so a byte that starts a
+# multibyte character cannot hide the NUL after it. TMOUT would limit each read.
+unset -v TMOUT
+drop=() listed=
+while LC_ALL=C IFS= read -r -d '' entry; do
+  if [ -z "$entry" ]; then listed=yes; break; fi
+  case ${entry%%=*} in
+    '' | PATH | HOME | TMPDIR | XDG_CONFIG_HOME | LANG | LC_* | GIT_*) ;;
+    *) drop+=(-u "${entry%%=*}") ;;
+  esac
+done < <(command env -0 && printf '\0')
+if [ "$listed" != yes ]; then
+  echo "scan failed: env -0 cannot list the environment" >&2; exit 2
+fi
+run() { command env "${drop[@]}" "$@"; }
+
 # Print each value that appears in 2 or more files: file count, value, locations.
 # Input: 3 lines per match: file name, line number, matched text.
 # Returns failure when awk or sort fails.
 group() {
-  awk '
+  run awk '
     NR % 3 == 1 { file = $0; next }
     NR % 3 == 2 { line = $0; next }
     {
@@ -219,16 +245,17 @@ group() {
       if (!((v, file) in seen)) { seen[v, file] = 1; files[v]++ }
       where[v] = where[v] " " file ":" line
     }
-    END { for (v in files) if (files[v] > 1) print files[v] "\t" v "\t" where[v] }' | sort -rn
+    END { for (v in files) if (files[v] > 1) print files[v] "\t" v "\t" where[v] }' | run sort -rn
   local s=("${PIPESTATUS[@]}")
   [ "${s[0]}" -eq 0 ] && [ "${s[1]}" -eq 0 ]
 }
 langs=('*.ts' '*.rs' '*.swift' '*.py' '*.sh')
 
 # Print the matches as 3 lines each. Return the git grep status, or 2 when tr fails.
+# git grep reads no input, so it cannot take the script of this shell.
 matches() {
-  git grep --untracked --no-recurse-submodules --no-column --no-color -z -I -n -o \
-    "$@" -- "${langs[@]}" | tr '\0' '\n'
+  run git grep --untracked --no-recurse-submodules --no-column --no-color -z -I -n -o \
+    "$@" -- "${langs[@]}" < /dev/null | run tr '\0' '\n'
   local s=("${PIPESTATUS[@]}")
   [ "${s[1]}" -eq 0 ] || return 2
   return "${s[0]}"
@@ -238,11 +265,25 @@ matches() {
 # git grep also exits with 0 or 1 after a read error, so any error output fails the scan.
 # The scan holds the matches in memory and groups them only after these checks pass.
 scan() {
-  local found='' errors='' status='' vars
-  # Read the matches, the error output, and the status of matches into shell variables.
-  vars=$( { errors=$( { status=0; found=$(matches "$@") || status=$?
-    declare -p found status >&4; } 2>&1 ); declare -p errors; } 4>&1 )
-  eval "$vars"
+  local status found errors end part
+  export -n status found errors end part
+  # Read the status, the matches, the error output, and an end mark as 4 fields that
+  # each end with a NUL character. The fields are data: the scan runs no text that it
+  # reads. Descriptor 4 carries the first 2 fields; no command that the scan starts
+  # gets it. The error output goes through a pipe to the read builtin, which keeps line
+  # breaks and turns each NUL into `?`, so all error output stays visible. The end mark
+  # follows the complete error field. The readers use the C locale, so a byte that
+  # starts a multibyte character cannot hide the NUL after it.
+  if ! { LC_ALL=C IFS= read -r -d '' status && LC_ALL=C IFS= read -r -d '' found &&
+    LC_ALL=C IFS= read -r -d '' errors && LC_ALL=C IFS= read -r -d '' end; } < <( {
+    { status=0; found=$(matches "$@" 4>&-) || status=$?
+      printf '%s\0%s\0' "$status" "$found" >&4; } 2>&1 |
+      { LC_ALL=C; errors=''
+        while IFS= read -r -d '' part; do errors="$errors$part?"; done
+        printf '%s\0%s\0' "$errors$part" end; } 4>&-; } 4>&1 ) ||
+    [ "$end" != end ]; then
+    echo "scan failed: cannot read the matches" >&2; return 2
+  fi
   case $status in '' | *[!0-9]*) echo "scan failed: cannot read the matches" >&2; return 2 ;; esac
   if [ "$status" -le 1 ] && [ -n "$errors" ]; then status=2; fi
   if [ "$status" -gt 1 ]; then
@@ -259,6 +300,7 @@ scan -w -E '(0[xXbBoO][0-9a-fA-F_]+|[0-9][0-9_.]*[0-9])(_?([iu](8|16|32|64|128|s
 
 # Quoted strings on one line. The grouping drops strings under 4 characters.
 scan -E "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'"
+SCAN
 ```
 
 The checks match candidates on one line only. They count `'cache.key'` and
@@ -270,10 +312,21 @@ an apostrophe in a comment.
 When git grep exits with 1, no file matched, and the scan succeeds. A higher git grep
 status, any error output from git grep or `tr` (such as a file that git cannot read),
 or a failure of `tr`, `awk`, or `sort` means that the scan failed: the block prints an
-error, stops, and returns a nonzero status. Do not read the empty output of a failed
-scan as "no repeated values". The scan holds the matches in memory and writes no
-temporary file of its own, so a very large match stream uses more memory. `sort` can
-still use its own temporary files for a large input.
+error, stops, and returns a nonzero status. Error output that is only a line break or a
+NUL byte counts too; the block shows each NUL byte as `?`. When the scan cannot read
+back all of its results, it prints "scan failed: cannot read the matches". Do not read
+the empty output of a failed scan as "no repeated values". The scan holds the matches in
+memory and writes no temporary file of its own, so a very large match stream uses more
+memory. `sort` can still use its own temporary files for a large input. Bash 5.0 and
+older also keep the script of the scan shell in a temporary file of their own.
+
+The block runs no text that it reads, also when Git writes trace output into a file
+descriptor of the scan. It runs the scan in a new Bash in privileged mode, so the
+functions, variables, options, and debug hooks of your shell do not change the scan,
+and `set -a` does not send the matches to other commands. The commands of the scan get
+only the environment variables that the comment in the block lists. When a Git setting
+of your project lives in another environment variable, add that name to the list. The
+block needs an `env` command with the `-0` option (GNU coreutils, or macOS).
 
 The output is a list of candidates, not a list of defects. The checks include test
 files, so they also find a production value copied into a test constant. Short
