@@ -399,7 +399,9 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
 
     it("starts bash without the exported variables that change how bash starts and runs", () => {
       const fx = fixture();
-      // The bash wrapper first on PATH reports each such variable that reaches it, then starts the real bash.
+      // The bash wrapper first on PATH reports each such variable in its environment, then starts the real bash.
+      // It reads `env`, not its own shell variables: when /bin/sh is Bash (macOS), that shell sets POSIXLY_CORRECT
+      // for itself.
       const names = [
         "POSIXLY_CORRECT",
         "BASH_COMPAT",
@@ -408,11 +410,10 @@ describe.skipIf(WINDOWS)("code-guardrails scan block", () => {
         "FUNCNEST",
         "EXECIGNORE",
       ];
-      const report = names
-        .map((name) => `[ -z "\${${name}+set}" ] || echo "${name} reached bash" >&2`)
-        .join("\n");
+      const report = `env | grep -E '^(${names.join("|")})=' | sed 's/=.*/ reached bash/' >&2`;
+      const realBash = realCommand(fx, "bash");
       const run = scan(fx, pairRepo(fx, join(fx.root, "pair")), {
-        env: shim(fx, "bash", `${report}\nexec ${shellQuote(realCommand(fx, "bash"))} "$@"`),
+        env: shim(fx, "bash", `${report}\nexec ${shellQuote(realBash)} "$@"`, `#!${realBash}`),
         before:
           "export POSIXLY_CORRECT=1 BASH_COMPAT=31 BASH_XTRACEFD=2 TMOUT=1 FUNCNEST=2 EXECIGNORE=nothing",
       });
