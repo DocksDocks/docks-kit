@@ -725,9 +725,10 @@ test('a failed group reports an existing refused member, not its label', () => {
   const standalone = [{ name: 'read', path: 'bundle.zip:missing.md', error: true }];
   assert.deepEqual(score.readScope(standalone, { ...scope, cwd: root }), { outside: ['bundle.zip'] });
   // Code review round 2: the alternatives pass of a call clears only the missing targets of that call. Two failed reads
-  // share the target `settings.json`, but only the second one names an existing file, `settings.json?q=.mode`, so the
-  // first one stays a read of a missing path in either order.
-  put(root, 'settings.json?q=.mode', '{}\n');
+  // share the target `settings.json`, but only the second one names a path that `lstat` finds: `settings.json?q=.mode`
+  // is a dangling link, so omp could not read it (round 3). The first read stays a read of a missing path in either
+  // order.
+  fs.symlinkSync(path.join(root, 'gone.json'), path.join(root, 'settings.json?q=.mode'));
   const reads2 = [
     { name: 'read', path: 'settings.json', error: true },
     { name: 'read', path: 'settings.json?q=.mode', error: true },
