@@ -51,61 +51,59 @@ function assertUntouched(
 type RefusalCase = {
   readonly name: string;
   readonly options?: LandedPlanOptions;
-  readonly prepare?: (plan: LandedPlan) => void;
+  readonly prepare?: (context: PlanCliContext, plan: LandedPlan) => void;
   readonly refusal: (plan: LandedPlan) => string;
 };
 
+const REFUSALS: ReadonlyArray<RefusalCase> = [
+  {
+    name: "no closing keyword",
+    options: { prBody: "Refs #ISSUE" },
+    refusal: (plan) =>
+      `pull request #${plan.pr} has no closing keyword for plan #${plan.number} in its description; ask the owner before you add \`Closes #${plan.number}\` to the merged pull request, then run archive again`,
+  },
+  {
+    name: "a merge into another branch",
+    options: { base: "release" },
+    refusal: (plan) =>
+      `pull request #${plan.pr} merged into release; archive requires a merge into DocksDocks/fixture:main`,
+  },
+  {
+    name: "a non-terminal step",
+    options: { status: "in-flight" },
+    refusal: () => "archive refused: non-terminal step fix_parser",
+  },
+  {
+    // A merged closing pull request does not replace review approval.
+    name: "a review that asks for repair",
+    prepare: (context, plan) =>
+      context.addIssueComment(plan.number, "## Code review\n\ncode-review: repair\nFix data loss."),
+    refusal: () => "archive requires Code-review: pass",
+  },
+  {
+    name: "another owner",
+    prepare: (context, plan) =>
+      context.updateIssue(plan.number, (entry) => {
+        entry.assignees = ["other-agent"];
+      }),
+    refusal: (plan) => `plan #${plan.number} is owned by other-agent`,
+  },
+];
+
 describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive, retire, and list", () => {
-  it(
-    "archive refuses an open or closed plan without landing proof, finished work, a review pass, or ownership",
-    () => {
+  // One case per refusal and landing keeps the spawns of each case near one plan (see spawnTimeout.ts).
+  it.each(REFUSALS.flatMap((refusal) => ["open", "closed"].map((kind) => ({ ...refusal, kind }))))(
+    "archive refuses an open or closed plan without landing proof, finished work, a review pass, or ownership: $name, $kind plan",
+    ({ name, options, prepare, refusal, kind }) => {
       const context = planCliContext();
-      const cases: ReadonlyArray<RefusalCase> = [
-        {
-          name: "no closing keyword",
-          options: { prBody: "Refs #ISSUE" },
-          refusal: (plan) =>
-            `pull request #${plan.pr} has no closing keyword for plan #${plan.number} in its description; ask the owner before you add \`Closes #${plan.number}\` to the merged pull request, then run archive again`,
-        },
-        {
-          name: "a merge into another branch",
-          options: { base: "release" },
-          refusal: (plan) =>
-            `pull request #${plan.pr} merged into release; archive requires a merge into DocksDocks/fixture:main`,
-        },
-        {
-          name: "a non-terminal step",
-          options: { status: "in-flight" },
-          refusal: () => "archive refused: non-terminal step fix_parser",
-        },
-        {
-          // A merged closing pull request does not replace review approval.
-          name: "a review that asks for repair",
-          prepare: (plan) =>
-            context.addIssueComment(
-              plan.number,
-              "## Code review\n\ncode-review: repair\nFix data loss.",
-            ),
-          refusal: () => "archive requires Code-review: pass",
-        },
-        {
-          name: "another owner",
-          prepare: (plan) =>
-            context.updateIssue(plan.number, (entry) => {
-              entry.assignees = ["other-agent"];
-            }),
-          refusal: (plan) => `plan #${plan.number} is owned by other-agent`,
-        },
-      ];
-      for (const { name, options, prepare, refusal } of cases) {
-        for (const [kind, land, state] of landings(context)) {
-          const label = `${name}, ${kind} plan`;
-          const plan = land(label, options);
-          prepare?.(plan);
-          refuse(archive(context, plan), refusal(plan));
-          assertUntouched(context, plan, state, label);
-        }
-      }
+      const landing = landings(context).find(([candidate]) => candidate === kind);
+      if (landing === undefined) throw new Error(`no landing of kind ${kind}`);
+      const [, land, state] = landing;
+      const label = `${name}, ${kind} plan`;
+      const plan = land(label, options);
+      prepare?.(context, plan);
+      refuse(archive(context, plan), refusal(plan));
+      assertUntouched(context, plan, state, label);
     },
     SPAWN_TIMEOUT_MS,
   );

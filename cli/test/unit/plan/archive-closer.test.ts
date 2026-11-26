@@ -203,27 +203,26 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive closer", () => {
     SPAWN_TIMEOUT_MS,
   );
 
-  it(
-    "archive refuses a merged pull request whose description does not prove it closes the plan",
-    () => {
+  // Each pull request lists the plan in closingIssuesReferences, as one from the linked branch does; only a closing
+  // keyword in its description proves that it closes the plan. One case per description keeps the spawns of each case
+  // near one plan (see spawnTimeout.ts).
+  const descriptions: Array<[string, string | null]> = [
+    ["number prefix", "Closes #ISSUE0"],
+    ["number suffix", "Closes #ISSUEa"],
+    ["keyword prefix", "notCloses #ISSUE"],
+    ["issue URL", "Closes https://github.com/DocksDocks/fixture/issues/ISSUE"],
+    ["different repository", "Fixes: Another/repo#ISSUE"],
+    ["keyword and reference in separate paragraphs", "Closes:\n\n#ISSUE is still open"],
+    ["keyword and reference on separate lines", "Closes\n#ISSUE"],
+    ["null PR description", null],
+  ];
+  it.each(descriptions)(
+    "archive refuses a merged pull request whose description does not prove it closes the plan: %s",
+    (name, prBody) => {
       const context = planCliContext();
-      // Each pull request lists the plan in closingIssuesReferences, as one from the linked branch does; only a closing
-      // keyword in its description proves that it closes the plan.
-      const descriptions: ReadonlyArray<readonly [string, string | null]> = [
-        ["number prefix", "Closes #ISSUE0"],
-        ["number suffix", "Closes #ISSUEa"],
-        ["keyword prefix", "notCloses #ISSUE"],
-        ["issue URL", "Closes https://github.com/DocksDocks/fixture/issues/ISSUE"],
-        ["different repository", "Fixes: Another/repo#ISSUE"],
-        ["keyword and reference in separate paragraphs", "Closes:\n\n#ISSUE is still open"],
-        ["keyword and reference on separate lines", "Closes\n#ISSUE"],
-        ["null PR description", null],
-      ];
-      for (const [name, prBody] of descriptions) {
-        const plan = context.closedPlan(name, { prBody });
-        refuse(archive(context, plan), noClosingKeyword(plan));
-        expect(context.issue(plan.number).labels, name).toStrictEqual(["plan", "plan:ongoing"]);
-      }
+      const plan = context.closedPlan(name, { prBody });
+      refuse(archive(context, plan), noClosingKeyword(plan));
+      expect(context.issue(plan.number).labels, name).toStrictEqual(["plan", "plan:ongoing"]);
     },
     SPAWN_TIMEOUT_MS,
   );
@@ -325,34 +324,33 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan archive closer", () => {
     SPAWN_TIMEOUT_MS,
   );
 
-  it(
-    "archive leaves a plan open when its close fails before or after the comment; a rerun closes it with one comment",
-    () => {
+  // gh posts the comment in one request and closes the plan in a second, so the close can fail on either side of it.
+  // One case per side keeps the spawns of each case near one plan (see spawnTimeout.ts).
+  it.each([
+    ["before the comment", "issueCloseErrorBeforeWriteOnce", false],
+    ["after the comment", "issueCloseErrorAfterCommentOnce", true],
+  ] as const)(
+    "archive leaves a plan open when its close fails %s; a rerun closes it with one comment",
+    (point, fault, commented) => {
       const context = planCliContext();
       const failure = "HTTP 502: Bad Gateway (https://api.github.com/graphql)";
-      // gh posts the comment in one request and closes the plan in a second, so the close can fail on either side of it.
-      for (const [point, fault, commented] of [
-        ["before the comment", "issueCloseErrorBeforeWriteOnce", false],
-        ["after the comment", "issueCloseErrorAfterCommentOnce", true],
-      ] as const) {
-        const plan = context.landedPlan(`close fails ${point}`);
-        const closed = { author: "plan-agent", body: closeComment(plan.pr) };
-        context.updateState((state) => {
-          state[fault] = failure;
-        });
-        refuse(archive(context, plan), `gh issue close failed: ${failure}`);
-        const comments = commented ? [REVIEW, closed] : [REVIEW];
-        expect(stored(context, plan.number), point).toStrictEqual({ ...ONGOING, comments });
-        const rerun = archive(context, plan);
-        expectSuccess(rerun, `rerun archive after a close that failed ${point}`);
-        expect(rerun.stdout, point).toBe(finished(plan));
-        expect(stored(context, plan.number), point).toStrictEqual({
-          state: "CLOSED",
-          stateReason: "COMPLETED",
-          labels: ["plan"],
-          comments: [REVIEW, closed],
-        });
-      }
+      const plan = context.landedPlan(`close fails ${point}`);
+      const closed = { author: "plan-agent", body: closeComment(plan.pr) };
+      context.updateState((state) => {
+        state[fault] = failure;
+      });
+      refuse(archive(context, plan), `gh issue close failed: ${failure}`);
+      const comments = commented ? [REVIEW, closed] : [REVIEW];
+      expect(stored(context, plan.number), point).toStrictEqual({ ...ONGOING, comments });
+      const rerun = archive(context, plan);
+      expectSuccess(rerun, `rerun archive after a close that failed ${point}`);
+      expect(rerun.stdout, point).toBe(finished(plan));
+      expect(stored(context, plan.number), point).toStrictEqual({
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        labels: ["plan"],
+        comments: [REVIEW, closed],
+      });
     },
     SPAWN_TIMEOUT_MS,
   );

@@ -142,52 +142,70 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan budgets", () => {
     SPAWN_TIMEOUT_MS,
   );
 
-  it(
-    "an edit of a started v5 plan advises a child plan for new rows, new paths, and changed Task or Done when",
-    () => {
+  // One case per edit keeps the spawns of each case near one plan (see spawnTimeout.ts). Each case starts from a
+  // started v5 plan; the removed-path case starts from a row that holds the second path, so its edit removes one.
+  const row =
+    "| 1 | fix_parser | Fix parser | src/parser.mjs | - | local | in-flight | Records round-trip |";
+  const startedPlan = (context: PlanCliContext, text: string = body("in-flight")): number => {
+    const plan = context.createPlan("started v5 plan", text);
+    context.updateIssue(plan, (entry) => {
+      entry.labels = ["plan", "plan:ongoing"];
+    });
+    return plan;
+  };
+  const twoPaths = (status: string): string =>
+    body(status).replace("| src/parser.mjs |", "| src/parser.mjs, src/lexer.mjs |");
+  const advisedEdits: Array<[name: string, change: (text: string) => string]> = [
+    [
+      "an added row",
+      (text: string): string =>
+        text.replace(
+          row,
+          `${row}\n| 2 | add_docs | Add docs | docs/a.md | - | local | planned | Docs exist |`,
+        ),
+    ],
+    [
+      "an added Files path",
+      (text: string): string =>
+        text.replace("| src/parser.mjs |", "| src/parser.mjs, src/lexer.mjs |"),
+    ],
+    [
+      "a changed Task",
+      (text: string): string => text.replace("| Fix parser |", "| Rewrite parser |"),
+    ],
+    [
+      "a changed Done when",
+      (text: string): string =>
+        text.replace("| Records round-trip |", "| Records and dates round-trip |"),
+    ],
+  ];
+  it.each(advisedEdits)(
+    "an edit of a started v5 plan advises a child plan for new rows, new paths, and changed Task or Done when: %s",
+    (name, change) => {
       const context = planCliContext();
-      const plan = context.createPlan("started v5 plan", body("in-flight"));
-      context.updateIssue(plan, (entry) => {
-        entry.labels = ["plan", "plan:ongoing"];
-      });
-      const row =
-        "| 1 | fix_parser | Fix parser | src/parser.mjs | - | local | in-flight | Records round-trip |";
-      for (const [name, change] of [
-        [
-          "an added row",
-          (text: string): string =>
-            text.replace(
-              row,
-              `${row}\n| 2 | add_docs | Add docs | docs/a.md | - | local | planned | Docs exist |`,
-            ),
-        ],
-        [
-          "an added Files path",
-          (text: string): string =>
-            text.replace("| src/parser.mjs |", "| src/parser.mjs, src/lexer.mjs |"),
-        ],
-        [
-          "a changed Task",
-          (text: string): string => text.replace("| Fix parser |", "| Rewrite parser |"),
-        ],
-        [
-          "a changed Done when",
-          (text: string): string =>
-            text.replace("| Records round-trip |", "| Records and dates round-trip |"),
-        ],
-      ] as const) {
-        expect(scopeAdvice(context.edit(plan, change)), name).toStrictEqual([SCOPE(plan)]);
-      }
-      for (const [name, change] of [
-        ["an evidence edit", (text: string): string => text.replace("Not run.", "Smoke passed.")],
-        [
-          "a removed Files path",
-          (text: string): string => text.replace("src/parser.mjs, src/lexer.mjs", "src/parser.mjs"),
-        ],
-        ["a no-op edit", (text: string): string => text],
-      ] as const) {
-        expect(scopeAdvice(context.edit(plan, change)), name).toStrictEqual([]);
-      }
+      const plan = startedPlan(context);
+      expect(scopeAdvice(context.edit(plan, change)), name).toStrictEqual([SCOPE(plan)]);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  const quietEdits: Array<
+    [name: string, start: (status: string) => string, change: (text: string) => string]
+  > = [
+    ["an evidence edit", body, (text: string): string => text.replace("Not run.", "Smoke passed.")],
+    [
+      "a removed Files path",
+      twoPaths,
+      (text: string): string => text.replace("src/parser.mjs, src/lexer.mjs", "src/parser.mjs"),
+    ],
+    ["a no-op edit", body, (text: string): string => text],
+  ];
+  it.each(quietEdits)(
+    "an edit of a started v5 plan gives no scope advice for %s",
+    (name, start, change) => {
+      const context = planCliContext();
+      const plan = startedPlan(context, start("in-flight"));
+      expect(scopeAdvice(context.edit(plan, change)), name).toStrictEqual([]);
     },
     SPAWN_TIMEOUT_MS,
   );

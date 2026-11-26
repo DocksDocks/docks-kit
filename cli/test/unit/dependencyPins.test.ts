@@ -132,21 +132,27 @@ function installedPackage(name: string, parent: string | undefined): Installed |
 }
 
 /**
- * List every installed package as a label below the root `node_modules`, at
- * every depth, so `@effect/platform-bun` and
+ * List every installed package that a hoisted install holds as a label below
+ * the root `node_modules`, at every depth, so `@effect/platform-bun` and
  * `@effect/platform-bun/node_modules/ws` both appear. A nested copy that
  * defeats a root pin can sit at any depth, and a walk that stops at the top
- * level would not see it. `.bin` and `.cache` are package-manager
- * bookkeeping, not packages. A symbolic link is listed but never descended
- * into, because a workspace link points back into the tree and would make the
- * walk cycle.
+ * level would not see it. An unscoped package name cannot begin with a dot
+ * (npm `package.json` name rules), so a dot entry directly in a
+ * `node_modules` folder is tool bookkeeping, not a package: `.bin`, `.cache`,
+ * or the store `.bun` of Bun's isolated linker, whose `.bun/node_modules`
+ * links would otherwise read as nested copies. A scoped name can begin with a
+ * dot, so entries inside a scope folder are all kept. A symbolic link is
+ * listed but never descended into, because a workspace link points back into
+ * the tree and would make the walk cycle. So the walk proves a hoisted
+ * install, the layout of CI and of a published install; in an isolated
+ * install it sees only the top-level links, not the copies in the store.
  */
 function installedPackages(): Array<string> {
   const labels: Array<string> = [];
   const collect = (prefix: string): void => {
     for (const entry of readdirSync(join(MODULES_DIR, prefix), { withFileTypes: true })) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (entry.name === ".bin" || entry.name === ".cache") continue;
+      if (entry.name.startsWith(".")) continue;
       const scopeLink = entry.isSymbolicLink();
       const packages = entry.name.startsWith("@")
         ? readdirSync(join(MODULES_DIR, prefix, entry.name), { withFileTypes: true })
@@ -340,7 +346,8 @@ describe("root dependency pins", () => {
     expect(unpinnedPrereleaseTransitives(withPin, alternationRange)).toEqual([]);
   });
 
-  it("installs every root dependency at its pinned version with no nested copy at any depth", () => {
+  // The nested-copy walk proves a hoisted install, as CI and a published install have (see installedPackages).
+  it("installs every root dependency at its pinned version with no nested copy at any depth of a hoisted install", () => {
     const parents = installedPackages();
     const shadows: Array<string> = [];
     for (const [name, pin] of Object.entries(rootDependencies)) {
@@ -366,9 +373,10 @@ describe("root dependency pins", () => {
    * declarations are exact, so the range scan sees nothing float. The pin
    * checks above skip the package as well, because it is no root dependency.
    * Only the installed closure shows the split, so this walk compares the
-   * version of every installed copy at every depth.
+   * version of every installed copy at every depth of a hoisted install (see
+   * installedPackages).
    */
-  it("installs no package at two distinct versions when either carries a prerelease tail", () => {
+  it("installs no package at two distinct versions in a hoisted install when either carries a prerelease tail", () => {
     const copies = new Map<string, Map<string, string>>();
     for (const label of installedPackages()) {
       const cut = label.lastIndexOf("/node_modules/");

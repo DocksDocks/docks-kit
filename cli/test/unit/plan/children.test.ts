@@ -679,89 +679,88 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan child plans", () => {
     SPAWN_TIMEOUT_MS,
   );
 
-  it(
-    "a plan archived with its landing pull request gets only the open-child recovery",
-    () => {
+  // One case per recovery keeps the spawns of each case near one plan (see spawnTimeout.ts).
+  const ownRow =
+    "| 1 | fix_parser | Fix parser | src/parser.mjs | - | local | done | Records round-trip |";
+  const ownWorkRefusal = (number: number): string =>
+    `archive refused: plan #${number} has its own landing work; archive it with --pr`;
+  const noFinishedChild = (number: number): string =>
+    `archive refused: no child of plan #${number} finished; retire the parent`;
+  const recoveries: Array<
+    [
+      name: string,
+      rows: (child: number, unlinked: number) => ReadonlyArray<string>,
+      childReason: string,
+      refusal: (number: number) => string,
+      closedByGitHub: boolean,
+    ]
+  > = [
+    ["only a retired child", () => [ownRow], "NOT_PLANNED", ownWorkRefusal, false],
+    [
+      "an unlinked child row",
+      (_child, unlinked) => [
+        ownRow,
+        `| 2 | note | Note the issue | - | - | local | done | child #${unlinked} finished |`,
+      ],
+      "COMPLETED",
+      ownWorkRefusal,
+      false,
+    ],
+    // Parent rows, but the landing pull request is the proof, so the plan is no parent to recover.
+    [
+      "parent rows and only a retired child",
+      (child) => parentRows([child]),
+      "NOT_PLANNED",
+      noFinishedChild,
+      false,
+    ],
+    [
+      "parent rows and only a retired child, closed by GitHub",
+      (child) => parentRows([child]),
+      "NOT_PLANNED",
+      noFinishedChild,
+      true,
+    ],
+  ];
+  it.each(recoveries)(
+    "a plan archived with its landing pull request gets only the open-child recovery: %s",
+    (name, rows, childReason, refusal, closedByGitHub) => {
       const context = planCliContext();
-      const ownRow =
-        "| 1 | fix_parser | Fix parser | src/parser.mjs | - | local | done | Records round-trip |";
       const unlinked = context.createPlan("unlinked issue");
-      const ownWork = (number: number): string =>
-        `archive refused: plan #${number} has its own landing work; archive it with --pr`;
-      const noFinishedChild = (number: number): string =>
-        `archive refused: no child of plan #${number} finished; retire the parent`;
-      const recoveries: ReadonlyArray<
-        readonly [
-          name: string,
-          rows: (child: number) => ReadonlyArray<string>,
-          childReason: string,
-          refusal: (number: number) => string,
-          closedByGitHub: boolean,
-        ]
-      > = [
-        ["only a retired child", () => [ownRow], "NOT_PLANNED", ownWork, false],
-        [
-          "an unlinked child row",
-          () => [
-            ownRow,
-            `| 2 | note | Note the issue | - | - | local | done | child #${unlinked} finished |`,
-          ],
-          "COMPLETED",
-          ownWork,
-          false,
-        ],
-        // Parent rows, but the landing pull request is the proof, so the plan is no parent to recover.
-        [
-          "parent rows and only a retired child",
-          (child) => parentRows([child]),
-          "NOT_PLANNED",
-          noFinishedChild,
-          false,
-        ],
-        [
-          "parent rows and only a retired child, closed by GitHub",
-          (child) => parentRows([child]),
-          "NOT_PLANNED",
-          noFinishedChild,
-          true,
-        ],
-      ];
-      for (const [name, rows, childReason, refusal, closedByGitHub] of recoveries) {
-        const plan = context.landedPlan(`landed plan with ${name}`);
-        const child = context.createChild("child", plan.number).number;
-        closeChild(context, child, childReason);
-        setSteps(context, plan.number, rows(child));
-        if (closedByGitHub)
-          context.updateIssue(plan.number, (entry) => {
-            entry.state = "CLOSED";
-            entry.stateReason = "COMPLETED";
-            entry.timelineItems = [{ __typename: "ClosedEvent", closer: plan.closer }];
-          });
-        expectSuccess(
-          archive(context, String(plan.number), "--pr", String(plan.pr)),
-          `archive --pr with ${name}`,
-        );
-        const finished = parentState(context, plan.number);
-        expect(
-          finished.comments.at(-1)?.endsWith(`Archived with landing pull request #${plan.pr}`),
-          `${name}: the archive records its landing pull request`,
-        ).toBe(true);
-        expect(
-          closedAdvice(context, plan.number),
-          `${name}: show gives no recovery advice`,
-        ).toStrictEqual([]);
-        context.updateState((state) => {
-          state.calls = [];
+      const plan = context.landedPlan(`landed plan with ${name}`);
+      const child = context.createChild("child", plan.number).number;
+      closeChild(context, child, childReason);
+      setSteps(context, plan.number, rows(child, unlinked));
+      if (closedByGitHub)
+        context.updateIssue(plan.number, (entry) => {
+          entry.state = "CLOSED";
+          entry.stateReason = "COMPLETED";
+          entry.timelineItems = [{ __typename: "ClosedEvent", closer: plan.closer }];
         });
-        // Both retries finish or refuse without a write, and the rerun posts no second record.
-        refuse(archive(context, String(plan.number)), refusal(plan.number));
-        expectSuccess(
-          archive(context, String(plan.number), "--pr", String(plan.pr)),
-          `archive --pr again with ${name}`,
-        );
-        expect(mutations(context), `${name}: no reopen and no second record`).toStrictEqual([]);
-        expect(parentState(context, plan.number)).toStrictEqual(finished);
-      }
+      expectSuccess(
+        archive(context, String(plan.number), "--pr", String(plan.pr)),
+        `archive --pr with ${name}`,
+      );
+      const finished = parentState(context, plan.number);
+      expect(
+        finished.comments.at(-1)?.endsWith(`Archived with landing pull request #${plan.pr}`),
+        `${name}: the archive records its landing pull request`,
+      ).toBe(true);
+      expect(
+        closedAdvice(context, plan.number),
+        `${name}: show gives no recovery advice`,
+      ).toStrictEqual([]);
+      context.updateState((state) => {
+        state.calls = [];
+      });
+      // Both retries finish or refuse without a write, and the rerun posts no second record.
+      refuse(archive(context, String(plan.number)), refusal(plan.number));
+      expectSuccess(
+        archive(context, String(plan.number), "--pr", String(plan.pr)),
+        `archive --pr again with ${name}`,
+      );
+      expect(mutations(context), `${name}: no reopen and no second record`).toStrictEqual([]);
+      expect(parentState(context, plan.number)).toStrictEqual(finished);
     },
     SPAWN_TIMEOUT_MS,
   );
