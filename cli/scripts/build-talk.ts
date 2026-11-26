@@ -48,13 +48,20 @@ const SCOPE_PREFIX = "@";
 
 const COMMENT_END = "*/";
 
-// The emitted-text rules for host modules. A rule matches what Bun emits, so
-// it also sees an import that a dependency adds.
-const HOST_STATIC_IMPORT = /(?<![\w$.])import\s*(?:[\w$*{][^;"'`()]*?from\s*)?["']@oh-my-pi\//g;
-const HOST_EXPORT_FROM = /(?<![\w$.])export\s*[*{][^;"'`()]*?from\s*["']@oh-my-pi\//g;
-const HOST_REQUIRE = /require\s*\(\s*["'`]@oh-my-pi\//g;
-const DYNAMIC_IMPORT = /(?<![\w$.])import\s*\(/g;
-const STRING_LITERAL_ARGUMENT = /^\s*(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')\s*\)/;
+// The host-import rules check the emitted code, so they also see an import
+// that a dependency adds. Bun reports the static forms. The other rules match
+// codeOnly(), so text in a string, a comment, or a regular expression does not
+// match them.
+const HOST_PREFIX = "@oh-my-pi/";
+const DYNAMIC_IMPORT_KIND = "dynamic-import";
+// `import(`, but not a property call such as `x.import(`. A spread `...import(` is an import.
+const DYNAMIC_IMPORT = /(?<![\w$]|(?<!\.)\.\s*)import\s*\(/g;
+// In codeOnly() text, a string literal is two quotes with only spaces between them.
+const ONE_STRING_ARGUMENT = /\s*(?:" *"|' *')\s*\)/y;
+// A call of `require`, `__require`, or `import.meta.require` whose argument starts
+// with a quote. Bun emits `__require` for a `require` call, and scanImports does
+// not report it.
+const REQUIRE_CALL = /(?<![\w$])[\w$]*require\s*\(\s*(?=["'`])/g;
 const SNIPPET_LENGTH = 60;
 
 /** A package that adds code to the bundle has no license file. */
@@ -115,24 +122,183 @@ function snippet(code: string, at: number): string {
 /** The ways the emitted code breaks the host-import rules; empty when it holds. */
 export function hostImportProblems(code: string): ReadonlyArray<string> {
   const problems: Array<string> = [];
-  for (const match of code.matchAll(HOST_STATIC_IMPORT)) {
-    problems.push(`static import at offset ${match.index}: ${snippet(code, match.index)}`);
+  for (const { kind, path } of new Bun.Transpiler({ loader: "js" }).scanImports(code)) {
+    if (path.startsWith(HOST_PREFIX) && kind !== DYNAMIC_IMPORT_KIND) {
+      problems.push(`${kind} of ${JSON.stringify(path)}`);
+    }
   }
-  for (const match of code.matchAll(HOST_EXPORT_FROM)) {
-    problems.push(`export from at offset ${match.index}: ${snippet(code, match.index)}`);
+  const masked = codeOnly(code);
+  for (const match of masked.matchAll(REQUIRE_CALL)) {
+    // The match ends at the quote that starts the argument.
+    if (code.startsWith(HOST_PREFIX, match.index + match[0].length + 1)) {
+      problems.push(`require at offset ${match.index}: ${snippet(code, match.index)}`);
+    }
   }
-  for (const match of code.matchAll(HOST_REQUIRE)) {
-    problems.push(`require at offset ${match.index}: ${snippet(code, match.index)}`);
-  }
-  for (const match of code.matchAll(DYNAMIC_IMPORT)) {
-    const argument = code.slice(match.index + match[0].length);
-    if (!STRING_LITERAL_ARGUMENT.test(argument)) {
+  for (const match of masked.matchAll(DYNAMIC_IMPORT)) {
+    ONE_STRING_ARGUMENT.lastIndex = match.index + match[0].length;
+    if (!ONE_STRING_ARGUMENT.test(masked)) {
       problems.push(
         `dynamic import without one string literal at offset ${match.index}: ${snippet(code, match.index)}`,
       );
     }
   }
   return problems;
+}
+
+const SPACE_CHAR = /\s/;
+const WORD_CHAR = /[\w$\u0080-\uffff]/;
+/** After one of these words, a "/" starts a regular expression. */
+const WORDS_BEFORE_EXPRESSION: Readonly<Record<string, true>> = {
+  await: true,
+  case: true,
+  delete: true,
+  do: true,
+  else: true,
+  in: true,
+  instanceof: true,
+  new: true,
+  of: true,
+  return: true,
+  throw: true,
+  typeof: true,
+  void: true,
+  yield: true,
+};
+/** After the "(...)" of one of these words, a "/" starts a regular expression. */
+const CONTROL_WORDS: Readonly<Record<string, true>> = {
+  for: true,
+  if: true,
+  while: true,
+  with: true,
+};
+
+/** `code` with the text of each string literal, template literal, comment, and
+ * regular expression literal replaced by spaces. Quotes, backticks, the `${` and
+ * `}` of a template, and the slashes and flags of a regular expression stay.
+ * Each offset stays the same. A "/" starts a regular expression at the start,
+ * after an operator, an opening bracket, `}`, a word such as `return`, or the
+ * `)` of `if (...)`, `for (...)`, `while (...)`, or `with (...)`; otherwise it
+ * is a division. */
+export function codeOnly(code: string): string {
+  const parts: Array<string> = [];
+  let copied = 0;
+  const blank = (from: number, to: number): void => {
+    const end = Math.min(to, code.length);
+    if (end <= from) return;
+    parts.push(code.slice(copied, from), " ".repeat(end - from));
+    copied = end;
+  };
+  // The brace depth at each open template `${`, innermost last.
+  const templateBraces: Array<number> = [];
+  // For each open "(": whether a control word comes just before it.
+  const parenAfterControl: Array<boolean> = [];
+  let braces = 0;
+  let regexNext = true;
+  let word = "";
+  let at = 0;
+
+  // Skip template text from `at` to the closing backtick or the next `${`.
+  const templateText = (): void => {
+    const start = at;
+    while (at < code.length && code[at] !== "`" && !(code[at] === "$" && code[at + 1] === "{")) {
+      at += code[at] === "\\" ? 2 : 1;
+    }
+    blank(start, at);
+    if (code[at] === "`") {
+      at += 1;
+      regexNext = false;
+    } else if (at < code.length) {
+      at += 2;
+      templateBraces.push(braces);
+      regexNext = true;
+    }
+  };
+
+  while (at < code.length) {
+    const char = code[at] ?? "";
+    const next = code[at + 1];
+    if (SPACE_CHAR.test(char)) {
+      at += 1;
+      continue;
+    }
+    if (WORD_CHAR.test(char)) {
+      const start = at;
+      while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
+      word = code.slice(start, at);
+      regexNext = WORDS_BEFORE_EXPRESSION[word] === true;
+      continue;
+    }
+    // A comment keeps the word and the "/" rule of the token before it.
+    if (char === "/" && next === "/") {
+      const end = code.indexOf("\n", at);
+      const stop = end === -1 ? code.length : end;
+      blank(at, stop);
+      at = stop;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = code.indexOf("*/", at + 2);
+      const stop = end === -1 ? code.length : end + 2;
+      blank(at, stop);
+      at = stop;
+      continue;
+    }
+    const before = word;
+    word = "";
+    if (char === '"' || char === "'") {
+      let end = at + 1;
+      while (end < code.length && code[end] !== char) end += code[end] === "\\" ? 2 : 1;
+      blank(at + 1, end);
+      at = end + 1;
+      regexNext = false;
+      continue;
+    }
+    if (char === "`") {
+      at += 1;
+      templateText();
+      continue;
+    }
+    if (char === "/" && regexNext) {
+      let end = at + 1;
+      let inClass = false;
+      while (end < code.length && code[end] !== "\n") {
+        const bodyChar = code[end];
+        if (bodyChar === "\\") {
+          end += 2;
+          continue;
+        }
+        if (bodyChar === "/" && !inClass) break;
+        if (bodyChar === "[") inClass = true;
+        else if (bodyChar === "]") inClass = false;
+        end += 1;
+      }
+      blank(at + 1, end);
+      at = end + 1;
+      while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
+      regexNext = false;
+      continue;
+    }
+    if (char === "}" && templateBraces.at(-1) === braces) {
+      templateBraces.pop();
+      at += 1;
+      templateText();
+      continue;
+    }
+    // A regular expression cannot follow `++` or `--`, so a "/" there is a division.
+    if ((char === "+" || char === "-") && next === char) {
+      at += 2;
+      regexNext = false;
+      continue;
+    }
+    if (char === "(") parenAfterControl.push(CONTROL_WORDS[before] === true);
+    if (char === "{") braces += 1;
+    if (char === "}") braces -= 1;
+    if (char === ")") regexNext = parenAfterControl.pop() ?? false;
+    else regexNext = char !== "]";
+    at += 1;
+  }
+  parts.push(code.slice(copied));
+  return parts.join("");
 }
 
 /** The package that holds a metafile input path, or undefined for source outside node_modules.

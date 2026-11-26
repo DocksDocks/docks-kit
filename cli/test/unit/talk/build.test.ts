@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GENERATED_HEADER, packageOfInput } from "../../../scripts/build-talk";
+import { codeOnly, GENERATED_HEADER, packageOfInput } from "../../../scripts/build-talk";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
 
@@ -270,20 +270,124 @@ describe("talk build host imports", () => {
     expect(readFileSync(join(outDir, "talk.js"), "utf8")).toContain(HOST_LITERAL);
   });
 
-  const rejected: ReadonlyArray<readonly [string, string]> = [
-    ["a static import", 'import * as tui from "@oh-my-pi/pi-tui";\nexport const t = tui;\n'],
-    ["an export from", 'export { width } from "@oh-my-pi/pi-tui/text/width";\n'],
-    ["a require call", 'export const load = () => require("@oh-my-pi/pi-tui");\n'],
-    ["a dynamic import of a variable", "export const load = (name) => import(name);\n"],
+  it("accepts import-like text in strings, templates, comments, and regular expressions", () => {
+    const legalComment =
+      '/*! legal import(name) import x from "@oh-my-pi/a" require("@oh-my-pi/a") */';
+    const pattern = String.raw`/import(name)|require\("@oh-my-pi\/a"\)|"/`;
+    const entry = tempProject(
+      "import-like-text",
+      [
+        "export const texts = [",
+        '  "import(name)",',
+        "  'import x from \"@oh-my-pi/a\"',",
+        "  'require(\"@oh-my-pi/a\")',",
+        '  `import(name) ${`${String(Math.random())}`} import x from "@oh-my-pi/a" require("@oh-my-pi/a")`,',
+        "];",
+        legalComment,
+        `export const pattern = ${pattern};`,
+        "",
+      ].join("\n"),
+      {},
+    );
+    const outDir = tempDir("import-like-text-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const bundle = readFileSync(join(outDir, "talk.js"), "utf8");
+    // The text reaches the emitted code, so the check saw it.
+    expect(bundle).toContain('"import(name)"');
+    expect(bundle).toContain(`'import x from "@oh-my-pi/a"'`);
+    expect(bundle).toContain(`'require("@oh-my-pi/a")'`);
+    expect(bundle).toContain("`import(name) ${");
+    expect(bundle).toContain(legalComment);
+    expect(bundle).toContain(pattern);
+  });
+
+  const rejected: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      "a static import",
+      'import * as tui from "@oh-my-pi/pi-tui";\nexport const t = tui;\n',
+      'import-statement of "@oh-my-pi/pi-tui"',
+    ],
+    [
+      "an export from",
+      'export { width } from "@oh-my-pi/pi-tui/text/width";\n',
+      'import-statement of "@oh-my-pi/pi-tui/text/width"',
+    ],
+    [
+      "an export star from",
+      'export * from "@oh-my-pi/pi-tui";\n',
+      'import-statement of "@oh-my-pi/pi-tui"',
+    ],
+    [
+      "a require call",
+      'export const load = () => require("@oh-my-pi/pi-tui");\n',
+      "require at offset",
+    ],
+    [
+      "an import.meta.require call",
+      'export const load = () => import.meta.require("@oh-my-pi/pi-tui");\n',
+      "require at offset",
+    ],
+    [
+      "a dynamic import of a variable",
+      "export const load = (name) => import(name);\n",
+      "dynamic import without one string literal",
+    ],
+    [
+      "a dynamic import of a concatenation",
+      'export const load = (name) => import("@oh-my-pi/" + name);\n',
+      "dynamic import without one string literal",
+    ],
   ];
 
-  it.each(rejected)("fails on %s with HostImportError", (label, source) => {
+  it.each(rejected)("fails on %s with HostImportError", (label, source, problem) => {
     const entry = tempProject(label.replaceAll(" ", "-"), source, {});
     const outDir = tempDir("rejected-out");
     const result = runBuild(["--entry", entry, "--out", outDir]);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("HostImportError");
+    expect(result.stderr).toContain(problem);
     expect(existsSync(join(outDir, "talk.js"))).toBe(false);
+  });
+});
+
+/** Spaces in place of `text`. */
+function blank(text: string): string {
+  return " ".repeat(text.length);
+}
+
+describe("talk build code-only text", () => {
+  it.each([
+    ["string literals", `a("x'y", 'p"q', "e\\"s")`, `a("   ", '   ', "    ")`],
+    ["a line comment", 'a // b("x")\nc', `a ${blank('// b("x")')}\nc`],
+    ["a block comment", "a/* import(n) */b", `a${blank("/* import(n) */")}b`],
+    [
+      "a comment between a word and a regular expression",
+      "return /*c*/ /'/",
+      `return ${blank("/*c*/")} / /`,
+    ],
+    ["template text", "`t}{x`", "`    `"],
+    ["nested templates", '`t${`u${v}w`}x` + "r"', '` ${` ${v} `} ` + " "'],
+    ["braces in a template expression", "`a${ {b:1}.b }c`", "` ${ {b:1}.b } `"],
+    ["a division", 'a / b / "q"', 'a / b / " "'],
+    [
+      "a regular expression at the start",
+      String.raw`/"[/]import(n)\//g, "q"`,
+      `/${blank(String.raw`"[/]import(n)\/`)}/g, " "`,
+    ],
+    [
+      "a regular expression after a word such as return",
+      "return /'/.test(s)",
+      "return / /.test(s)",
+    ],
+    ["a regular expression after the ) of if", "if (s) /'/.test(s)", "if (s) / /.test(s)"],
+    ["a regular expression after }", "{}/'/.test(s)", "{}/ /.test(s)"],
+    ["a division after the ) of a call", 'f(s) / 2 / "q"', 'f(s) / 2 / " "'],
+    ["a division after ]", 'a[0] / 2 / "q"', 'a[0] / 2 / " "'],
+    ["a division after ++", 'a++ / 2 / "q"', 'a++ / 2 / " "'],
+  ])("blanks the text of %s", (_label, code, expected) => {
+    expect(codeOnly(code)).toBe(expected);
   });
 });
 
