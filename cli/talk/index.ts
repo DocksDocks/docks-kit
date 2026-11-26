@@ -1,6 +1,7 @@
 // Entry of the talk extension bundle; `cli/scripts/build-talk.ts` builds it
-// into `talk.js`. It exports the transport API of plan #249; #250 adds the
-// extension factory.
+// into `talk.js`. omp loads its default export, the extension factory
+// (plan #250); the transport API of plan #249 stays exported for the tests.
+export { default } from "./extension";
 export {
   type Client,
   DIAL_SLOTS,
