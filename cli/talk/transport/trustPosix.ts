@@ -11,10 +11,12 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  futimesSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   renameSync,
   rmdirSync,
@@ -22,7 +24,7 @@ import {
   writeSync,
 } from "node:fs";
 import { posix } from "node:path";
-import { Context, Effect, Layer, Option, Predicate, Schema } from "effect";
+import { Clock, Context, Effect, Layer, Option, Predicate, Schema } from "effect";
 
 import { DARWIN_CHMOD, DARWIN_LS, runTool } from "./folder";
 
@@ -291,14 +293,16 @@ const fileError = (path: string, operation: string, error: unknown): TalkFileErr
     code: errorCode(error),
   });
 
-const fileCall = <A>(
+/** Runs one synchronous file system call; a throw becomes `TalkFileError` with the Node error code. */
+export const fileCall = <A>(
   path: string,
   operation: string,
   call: () => A,
 ): Effect.Effect<A, TalkFileError> =>
   Effect.try({ try: call, catch: (error) => fileError(path, operation, error) });
 
-const liveView: PathView = {
+/** The live `lstat` and `readlink` reads. */
+export const liveView: PathView = {
   lstat: (path) => {
     try {
       const stats = lstatSync(path, { bigint: true, throwIfNoEntry: false });
@@ -569,3 +573,67 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
     (fd) => Effect.sync(() => closeSync(fd)),
   );
 });
+
+// --- Kept descriptors (E8 Lifetime) ---------------------------------------------
+
+/** The state of a published secret file: still the file that the publisher wrote, or replaced. */
+export type KeptFileState = "intact" | "replaced";
+
+// Reads up to `limit` bytes from offset 0 of the descriptor.
+function readFromStart(fd: number, limit: number): Uint8Array {
+  const buffer = new Uint8Array(limit);
+  let filled = 0;
+  while (filled < limit) {
+    const count = readSync(fd, buffer, filled, limit - filled, filled);
+    if (count === 0) break;
+    filled += count;
+  }
+  return buffer.subarray(0, filled);
+}
+
+/**
+ * Checks a published secret file through the descriptor that the publisher
+ * kept: `fstat` of the descriptor must show a regular file of the user with
+ * mode exactly 0600 and the same file as `lstat` of the name; only then are
+ * the bytes read through the descriptor compared with `bytes`. Any other state
+ * counts as replaced. The caller checks the registry folder first.
+ */
+export const keptSecretFileState = Effect.fn("keptSecretFileState")(function* (
+  file: SecretFile,
+  bytes: Uint8Array,
+) {
+  const system = yield* TalkPosixSystem;
+  const replaced: KeptFileState = "replaced";
+  const held = yield* fileCall(file.path, "fstat", () =>
+    entryStat(fstatSync(file.fd, { bigint: true })),
+  );
+  if (secretFileFault(held, system.user) !== undefined) return replaced;
+  const named = system.view.lstat(file.path);
+  if (named._tag === "Failed") {
+    return yield* new TalkFileError({ path: file.path, reason: `lstat failed: ${named.reason}` });
+  }
+  if (named._tag === "Missing" || !isSameFile(named.stat, held)) return replaced;
+  // One byte more than expected shows a longer file.
+  const read = yield* fileCall(file.path, "read", () =>
+    readFromStart(file.fd, bytes.byteLength + 1),
+  );
+  const same = Buffer.from(read).equals(Buffer.from(bytes));
+  const state: KeptFileState = same ? "intact" : "replaced";
+  return state;
+});
+
+/** Sets the access and modification times of a kept secret file to now, through its descriptor (`futimes`). */
+export const refreshSecretFile = Effect.fn("refreshSecretFile")(function* (file: SecretFile) {
+  const seconds = (yield* Clock.currentTimeMillis) / 1000;
+  yield* fileCall(file.path, "futimes", () => futimesSync(file.fd, seconds, seconds));
+});
+
+/** Closes a kept descriptor. A descriptor that is already closed stays closed. */
+export const closeSecretFile = (file: SecretFile): Effect.Effect<void> =>
+  Effect.sync(() => {
+    try {
+      closeSync(file.fd);
+    } catch {
+      // The descriptor is closed already.
+    }
+  });
