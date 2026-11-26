@@ -136,17 +136,21 @@ function installedPackage(name: string, parent: string | undefined): Installed |
  * every depth, so `@effect/platform-bun` and
  * `@effect/platform-bun/node_modules/ws` both appear. A nested copy that
  * defeats a root pin can sit at any depth, and a walk that stops at the top
- * level would not see it. `.bin` and `.cache` are package-manager
- * bookkeeping, not packages. A symbolic link is listed but never descended
- * into, because a workspace link points back into the tree and would make the
- * walk cycle.
+ * level would not see it. An unscoped package name cannot begin with a dot
+ * (npm `package.json` name rules), so a dot entry directly in a
+ * `node_modules` folder is tool bookkeeping, not a package: `.bin`, `.cache`,
+ * or the store `.bun` of Bun's isolated linker, whose `.bun/node_modules`
+ * links would otherwise read as nested copies. A scoped name can begin with a
+ * dot, so entries inside a scope folder are all kept. A symbolic link is
+ * listed but never descended into, because a workspace link points back into
+ * the tree and would make the walk cycle.
  */
 function installedPackages(): Array<string> {
   const labels: Array<string> = [];
   const collect = (prefix: string): void => {
     for (const entry of readdirSync(join(MODULES_DIR, prefix), { withFileTypes: true })) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (entry.name === ".bin" || entry.name === ".cache") continue;
+      if (entry.name.startsWith(".")) continue;
       const scopeLink = entry.isSymbolicLink();
       const packages = entry.name.startsWith("@")
         ? readdirSync(join(MODULES_DIR, prefix, entry.name), { withFileTypes: true })

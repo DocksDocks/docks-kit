@@ -485,45 +485,42 @@ function failingRepo(failure: GitFailure): Repo & { readonly failureEnv: Env } {
 }
 
 describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("base instructions", () => {
-  it(
-    "the plan-manager base-instructions block copies the target text of each symlink",
-    () => {
-      for (const fixture of FIXTURES) {
-        const { result, folder } = buildFolder(fixture.make());
-        expect(result.status, `${fixture.name}: ${result.stderr}`).toBe(0);
-        const manifest = [...fixture.expected]
-          .map(([file, text]) => `${text === null ? "absent" : "copied"} ${file}\n`)
-          .join("");
-        expect(readFileSync(join(folder, "MANIFEST"), "utf8"), fixture.name).toBe(manifest);
-        for (const [file, text] of fixture.expected) {
-          const copy = join(folder, ...file.split("/"));
-          if (text === null) expect(existsSync(copy), `${file} is not copied`).toBe(false);
-          else {
-            expect(lstatSync(copy).isFile(), `${file} is a regular file`).toBe(true);
-            expect(readFileSync(copy, "utf8"), `${file} holds the base text of its target`).toBe(
-              text,
-            );
-          }
+  // One case per fixture keeps the spawns of each case near one fixture (see spawnTimeout.ts).
+  it.each(FIXTURES)(
+    "the plan-manager base-instructions block copies the target text of each symlink: $name",
+    (fixture) => {
+      const { result, folder } = buildFolder(fixture.make());
+      expect(result.status, `${fixture.name}: ${result.stderr}`).toBe(0);
+      const manifest = [...fixture.expected]
+        .map(([file, text]) => `${text === null ? "absent" : "copied"} ${file}\n`)
+        .join("");
+      expect(readFileSync(join(folder, "MANIFEST"), "utf8"), fixture.name).toBe(manifest);
+      for (const [file, text] of fixture.expected) {
+        const copy = join(folder, ...file.split("/"));
+        if (text === null) expect(existsSync(copy), `${file} is not copied`).toBe(false);
+        else {
+          expect(lstatSync(copy).isFile(), `${file} is a regular file`).toBe(true);
+          expect(readFileSync(copy, "utf8"), `${file} holds the base text of its target`).toBe(
+            text,
+          );
         }
       }
     },
     SPAWN_TIMEOUT_MS,
   );
 
-  it(
-    "the code-review base read prints the target text of a symlink and exits 1 for a bad link",
-    () => {
-      for (const fixture of FIXTURES) {
-        const { repo, base, env } = fixture.make();
-        for (const [file, text] of [...fixture.expected, ...fixture.extra]) {
-          const result = sh(repo, baseRead(base, file), env);
-          expect(result.status, `${fixture.name} ${file}: ${result.stderr}`).toBe(
-            text === null ? 1 : 0,
-          );
-          expect(result.stdout, `${fixture.name} ${file} gives the base text of its target`).toBe(
-            text ?? "",
-          );
-        }
+  it.each(FIXTURES)(
+    "the code-review base read prints the target text of a symlink and exits 1 for a bad link: $name",
+    (fixture) => {
+      const { repo, base, env } = fixture.make();
+      for (const [file, text] of [...fixture.expected, ...fixture.extra]) {
+        const result = sh(repo, baseRead(base, file), env);
+        expect(result.status, `${fixture.name} ${file}: ${result.stderr}`).toBe(
+          text === null ? 1 : 0,
+        );
+        expect(result.stdout, `${fixture.name} ${file} gives the base text of its target`).toBe(
+          text ?? "",
+        );
       }
     },
     SPAWN_TIMEOUT_MS,

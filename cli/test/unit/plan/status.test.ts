@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PLAN_CLI_HOST_SUPPORTED,
+  type PlanCliContext,
   body,
   expectSuccess,
   planCliContext,
@@ -9,31 +10,55 @@ import {
 } from "../../lib/plan/harness";
 import { SPAWN_TIMEOUT_MS } from "../../lib/spawnTimeout";
 
+// A plan whose event history shows that work started, while its phase label still reads drafting.
+function frozenPlan({ createPlan, updateIssue }: PlanCliContext): number {
+  const frozen = createPlan("frozen steps");
+  updateIssue(frozen, (entry) => {
+    entry.events = [{ event: "labeled", label: { name: "plan:ongoing" } }];
+  });
+  return frozen;
+}
+
 describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
+  // The event history keeps step state frozen even if phase labels are reset. One case per step field keeps the
+  // spawns of each case near one plan (see spawnTimeout.ts).
+  it.each([
+    ["Status", "| planned |", "| done |"],
+    ["Id", "| fix_parser |", "| renamed |"],
+    ["Depends", "| - |", "| 2 |"],
+  ] as Array<[string, string, string]>)(
+    "history freezes the step %s once work starts",
+    (name, before, after) => {
+      const context = planCliContext();
+      const frozen = frozenPlan(context);
+      const result = context.edit(frozen, (text) => text.replace(before, after));
+      expect(result.status, `${name} must stay frozen`).toBe(1);
+      expect(result.stderr).toMatch(/^step state is frozen once work starts: .+\n$/);
+      expect(context.issue(frozen).body, `${name} refusal must preserve the remote body`).toBe(
+        body(),
+      );
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
   it(
-    "history freezes step state once work starts, and status refuses transitions that erase started work",
+    "history keeps a Task edit open once work starts",
     () => {
-      const { run, issue, updateIssue, createPlan, edit } = planCliContext();
-      // The event history keeps step state frozen even if phase labels are reset.
-      const frozen = createPlan("frozen steps");
-      updateIssue(frozen, (entry) => {
-        entry.events = [{ event: "labeled", label: { name: "plan:ongoing" } }];
-      });
-      for (const [name, before, after] of [
-        ["Status", "| planned |", "| done |"],
-        ["Id", "| fix_parser |", "| renamed |"],
-        ["Depends", "| - |", "| 2 |"],
-      ] as const) {
-        const result = edit(frozen, (text) => text.replace(before, after));
-        expect(result.status, `${name} must stay frozen`).toBe(1);
-        expect(result.stderr).toMatch(/^step state is frozen once work starts: .+\n$/);
-        expect(issue(frozen).body, `${name} refusal must preserve the remote body`).toBe(body());
-      }
+      const context = planCliContext();
+      const frozen = frozenPlan(context);
       expectSuccess(
-        edit(frozen, (text) => text.replace("Fix parser", "Repair parser")),
+        context.edit(frozen, (text) => text.replace("Fix parser", "Repair parser")),
         "task text edit",
       );
-      expect(issue(frozen).body).toMatch(/Repair parser/);
+      expect(context.issue(frozen).body).toMatch(/Repair parser/);
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "a history event after the first page freezes step state",
+    () => {
+      const { issue, updateIssue, createPlan, edit } = planCliContext();
       const pagedHistory = createPlan("ongoing history beyond first page");
       updateIssue(pagedHistory, (entry) => {
         entry.events = [
@@ -51,7 +76,15 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
       expect(issue(pagedHistory).body, "a late history event freezes the original step state").toBe(
         body(),
       );
+    },
+    SPAWN_TIMEOUT_MS,
+  );
 
+  it(
+    "status refuses transitions that erase started work",
+    () => {
+      const context = planCliContext();
+      const { run, issue, createPlan } = context;
       // Labels cannot erase started work, but drafting can enter implementation.
       const transitions = createPlan("status transitions");
       expectSuccess(run("status", String(transitions), "ongoing"), "drafting to ongoing");
@@ -61,7 +94,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
         "illegal plan status transition: ongoing -> planned",
       );
       refuse(
-        run("status", String(frozen), "planned"),
+        run("status", String(frozenPlan(context)), "planned"),
         "illegal plan status transition: drafting -> planned",
       );
     },

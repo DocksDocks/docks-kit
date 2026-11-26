@@ -194,16 +194,20 @@ describe.skipIf(!AGENT_DOCS_HOST_SUPPORTED)(
 
     // omp parses the frontmatter as YAML and skips an agent whose name or description is no string. A YAML 1.2
     // core-schema reader reads each value as a boolean, a number, a flow collection, an alias, a block sequence, a block
-    // mapping, or a reserved indicator, not as a string.
-    it("refuses a name or description that is no YAML string", () => {
-      const tools = "tools: Read";
-      for (const value of ["true", "TRUE", "False", "123", "0x1f", "1e5", "[rev]", "{a: b}"]) {
+    // mapping, or a reserved indicator, not as a string. One case per value keeps each case to one spawn (see
+    // spawnTimeout.ts).
+    it.each(["true", "TRUE", "False", "123", "0x1f", "1e5", "[rev]", "{a: b}"])(
+      "refuses a name that is no YAML string: %s",
+      (value) => {
         expectRefusalOf(
-          convertAgent(claudeAgent(`name: ${value}`, AGENT_DESCRIPTION, tools)),
+          convertAgent(claudeAgent(`name: ${value}`, AGENT_DESCRIPTION, "tools: Read")),
           "name is no YAML string",
         );
-      }
-      for (const lines of [
+      },
+    );
+
+    it.each(
+      [
         ["description: [review]"],
         ["description: true"],
         ["description: True # a comment"],
@@ -226,12 +230,12 @@ describe.skipIf(!AGENT_DOCS_HOST_SUPPORTED)(
         ["description:", "  - Reviews a diff.", "  - Finds bugs."],
         ["description: # the list", "- Reviews a diff."],
         ["description:", "  [review]"],
-      ]) {
-        expectRefusalOf(
-          convertAgent(claudeAgent(AGENT_NAME, ...lines, tools)),
-          "description is no YAML string",
-        );
-      }
+      ].map((lines) => ({ lines, text: lines.join(" / ") })),
+    )("refuses a description that is no YAML string: $text", ({ lines }) => {
+      expectRefusalOf(
+        convertAgent(claudeAgent(AGENT_NAME, ...lines, "tools: Read")),
+        "description is no YAML string",
+      );
     });
 
     it("refuses a block mapping value as no YAML string; a colon in a block scalar, in quotes, or before no space is text", () => {
