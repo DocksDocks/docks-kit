@@ -229,27 +229,28 @@ describe("talk build package of a metafile input", () => {
     expect(packageOfInput(input, cwd)).toEqual({ name, dir: resolve(cwd, dir) });
   });
 
-  // An input on another Windows drive keeps that drive inside the path.
+  // An input on another Windows drive keeps that drive inside the path. The
+  // working folder is on D:, so each case changes the drive.
   it.each([
     [
       "../../../C:/Users/u/Temp/p/node_modules/alpha-pkg/index.js",
       "alpha-pkg",
-      "C:/Users/u/Temp/p/node_modules/alpha-pkg",
+      "C:\\Users\\u\\Temp\\p\\node_modules\\alpha-pkg",
     ],
     [
       "..\\..\\C:\\Users\\u\\node_modules\\outer\\node_modules\\inner\\x.js",
       "inner",
-      "C:/Users/u/node_modules/outer/node_modules/inner",
+      "C:\\Users\\u\\node_modules\\outer\\node_modules\\inner",
     ],
-    ["/C:/p/node_modules/outer/index.js", "outer", "C:/p/node_modules/outer"],
+    ["/C:/p/node_modules/outer/index.js", "outer", "C:\\p\\node_modules\\outer"],
   ])("on Windows, starts %s again at its drive", (input, name, dir) => {
-    expect(packageOfInput(input, cwd, "win32")).toEqual({ name, dir: resolve(cwd, dir) });
+    expect(packageOfInput(input, "D:\\a\\repo", "win32")).toEqual({ name, dir });
   });
 
   it("on POSIX, keeps a folder named C: in the path", () => {
-    expect(packageOfInput("/C:/p/node_modules/outer/index.js", cwd, "linux")).toEqual({
+    expect(packageOfInput("/C:/p/node_modules/outer/index.js", "/project", "linux")).toEqual({
       name: "outer",
-      dir: resolve(cwd, "/C:/p/node_modules/outer"),
+      dir: "/C:/p/node_modules/outer",
     });
   });
 

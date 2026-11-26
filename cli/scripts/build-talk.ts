@@ -17,7 +17,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 import { parseArgs } from "node:util";
 
 const REPO_DIR = resolve(import.meta.dirname, "..", "..");
@@ -431,7 +431,8 @@ export function packageOfInput(
     if (rootEnd >= parts.length || nameParts.some((part) => part.length === 0)) continue;
     return {
       name: nameParts.join("/"),
-      dir: resolve(cwd, parts.slice(0, rootEnd).join("/")),
+      // The path rules of `platform`, so a test can check each system on any system.
+      dir: (platform === "win32" ? win32 : posix).resolve(cwd, parts.slice(0, rootEnd).join("/")),
     };
   }
   return undefined;
