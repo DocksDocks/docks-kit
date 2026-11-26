@@ -18,15 +18,25 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Effect, Layer, Logger, type Scope } from "effect";
+import { Effect, Fiber, Layer, Logger, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { processAlive } from "../../../talk/transport/client";
-import { MAX_BUFFERED_BYTES, makeConnection } from "../../../talk/transport/connection";
+import { makeClient, processAlive } from "../../../talk/transport/client";
+import {
+  type Connection,
+  MAX_BUFFERED_BYTES,
+  makeConnection,
+} from "../../../talk/transport/connection";
 import type { Endpoint } from "../../../talk/transport/endpoint";
-import { PROTOCOL_VERSION } from "../../../talk/transport/handshake";
-import { HeldRequests, type Listener, makeListener } from "../../../talk/transport/listener";
+import { Nonce, PROTOCOL_VERSION, computeHmac } from "../../../talk/transport/handshake";
+import {
+  HeldRequests,
+  type Listener,
+  type ListenerStatus,
+  closeAfterDefect,
+  makeListener,
+} from "../../../talk/transport/listener";
 import {
   type PublishedEntry,
   type RegistryEntry,
@@ -35,6 +45,7 @@ import {
   entryFileName,
 } from "../../../talk/transport/registry";
 import { TalkDpapi, sealEntries } from "../../../talk/transport/sealWindows";
+import { TalkTransport } from "../../../talk/transport/transport";
 import { TalkFileError, TalkPosixSystem } from "../../../talk/transport/trustPosix";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
@@ -145,6 +156,29 @@ describe("withdrawal fence of held requests", () => {
     expect(held.admit(3)).toBe(false);
     expect(held.size).toBe(0);
   });
+
+  const fakeConnection = (closes: Array<string>): Connection => ({
+    read: Effect.never,
+    write: () => Effect.void,
+    finish: Effect.void,
+    close: Effect.sync(() => {
+      closes.push("close");
+    }),
+    bufferedBytes: () => 0,
+  });
+
+  it("closes the connection after a handler defect only while the request is still held", async () => {
+    const closes: Array<string> = [];
+    const held = new HeldRequests();
+    held.admit(1);
+    held.admit(2);
+    await Effect.runPromise(closeAfterDefect(held, 1, fakeConnection(closes)));
+    expect(closes).toEqual(["close"]);
+    // A withdrawal took request 2 first: it answers `not-live` and ends the connection itself.
+    held.end();
+    await Effect.runPromise(closeAfterDefect(held, 2, fakeConnection(closes)));
+    expect(closes).toEqual(["close"]);
+  });
 });
 
 describe("processAlive (E6)", () => {
@@ -241,15 +275,15 @@ function withListener<A>(
 
 const promised = <A>(run: () => Promise<A>) => Effect.promise(run);
 
-/** Polls the listener status in real time, while the test clock stands still. */
+/** Polls a listener status in real time, while the test clock stands still. */
 const statusUntil = (
-  listener: Listener,
-  check: (status: Effect.Success<Listener["status"]>) => boolean,
+  source: { readonly status: Effect.Effect<ListenerStatus> },
+  check: (status: ListenerStatus) => boolean,
   what: string,
 ) =>
   Effect.gen(function* () {
     const started = Date.now();
-    while (!check(yield* listener.status)) {
+    while (!check(yield* source.status)) {
       if (Date.now() - started > SETTLE_MS) {
         return yield* Effect.die(new Error(`timed out waiting for ${what}`));
       }
@@ -530,6 +564,146 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       );
     } finally {
       rmSync(held, { force: true });
+      cleanUp();
+    }
+  });
+
+  it("closes an unauthenticated connection at the production default deadline of 1 s", async () => {
+    fresh();
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const transport = yield* TalkTransport;
+          yield* transport.register({ sessionId: "default", name: "default", cwd: base });
+          const { endpoint } = yield* transport.status;
+          const raw = yield* promised(() => rawConnect(endpoint!));
+          yield* statusUntil(transport, (s) => s.unauthenticated === 1, "the accepted connection");
+          yield* TestClock.adjust(999);
+          yield* promised(() => sleep(200));
+          expect(raw.closedAt).toBeUndefined();
+          yield* TestClock.adjust(1);
+          yield* promised(() =>
+            waitFor(() => raw.closedAt !== undefined, SETTLE_MS, "the close at 1 s"),
+          );
+        }).pipe(
+          // No handshake option: the layer uses its default.
+          Effect.provide(
+            TalkTransport.layer({ folder }).pipe(Layer.provideMerge(TestClock.layer())),
+          ),
+        ),
+      );
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("keeps a newer kept entry when a late proof of an older attempt arrives", async () => {
+    fresh();
+    const servers: Array<Server> = [];
+    const secret = randomBytes(32);
+    const instanceId = hex(8);
+    const sessionId = "late";
+    const target = { instanceId, sessionId };
+    try {
+      mkdirSync(folder, { mode: 0o700 });
+      chmodSync(folder, 0o700);
+      const entryPath = join(folder, entryFileName(instanceId, sessionId));
+      const writeEntryAt = (path: string, startTime: number): void => {
+        const entry: RegistryEntry = {
+          version: PROTOCOL_VERSION,
+          instanceId,
+          sessionId,
+          name: sessionId,
+          cwd: base,
+          processId: process.pid,
+          endpoint: { kind: "unix", path },
+          startTime,
+          secret: secret.toString("hex"),
+        };
+        writeFileSync(entryPath, encodeEntry(entry), { mode: 0o600 });
+        chmodSync(entryPath, 0o600);
+      };
+      // A listener that holds the secret; `gate` holds back its challenge.
+      const startFake = async (path: string, label: string, gate: Promise<void>) => {
+        let hellos = 0;
+        const server = createServer((socket) => {
+          socket.on("error", () => undefined);
+          const frames: Array<{ readonly type?: string }> = [];
+          let buffered: Buffer = Buffer.alloc(0);
+          let listenerNonce = Nonce.make(hex(32));
+          let clientNonce = listenerNonce;
+          socket.on("data", (chunk: Buffer) => {
+            const before = frames.length;
+            buffered = takeFrames(Buffer.concat([buffered, chunk]), frames);
+            for (const received of frames.slice(before) as Array<Record<string, unknown>>) {
+              if (received["type"] === "hello") {
+                hellos += 1;
+                clientNonce = Nonce.make(String(received["nonce"]));
+                listenerNonce = Nonce.make(hex(32));
+                void gate.then(() =>
+                  socket.write(
+                    frame({
+                      type: "challenge",
+                      nonce: listenerNonce,
+                      hmac: computeHmac(secret, {
+                        role: "listener",
+                        clientNonce,
+                        listenerNonce,
+                        instanceId,
+                        sessionId,
+                      }),
+                    }),
+                  ),
+                );
+              } else if (received["type"] === "proof") {
+                socket.write(frame({ type: "ready" }));
+              } else if (received["type"] === "request") {
+                socket.write(
+                  frame({
+                    type: "response",
+                    id: received["id"],
+                    result: { status: "ok", body: label },
+                  }),
+                );
+              }
+            }
+          });
+        });
+        servers.push(server);
+        const listening = Promise.withResolvers<void>();
+        server.listen({ path }, () => listening.resolve());
+        await listening.promise;
+        return { hellos: () => hellos };
+      };
+      const gate = Promise.withResolvers<void>();
+      const firstPath = join(folder, `${hex(8)}.sock`);
+      const secondPath = join(folder, `${hex(8)}.sock`);
+      const first = await startFake(firstPath, "first", gate.promise);
+      await startFake(secondPath, "second", Promise.resolve());
+      writeEntryAt(firstPath, 1);
+      const results = await Effect.runPromise(
+        Effect.gen(function* () {
+          const client = yield* makeClient({ requestTimeoutMs: 5_000, probeTimeoutMs: 500 });
+          const early = yield* Effect.forkChild(client.request(target, "echo", null));
+          yield* promised(() => waitFor(() => first.hellos() === 1, SETTLE_MS, "the first hello"));
+          // A listing observes a newer entry before the first attempt proves the secret.
+          writeEntryAt(secondPath, 2);
+          yield* client.list;
+          gate.resolve();
+          const earlyResult = yield* Fiber.join(early);
+          unlinkSync(entryPath);
+          const laterResult = yield* client.request(target, "echo", null);
+          return [earlyResult, laterResult];
+        }).pipe(
+          Effect.provide(
+            TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer)),
+          ),
+        ),
+      );
+      // The late proof did not roll the kept entry back to the first endpoint.
+      expect(results).toEqual(["first", "second"]);
+    } finally {
+      for (const server of servers) server.close();
       cleanUp();
     }
   });
@@ -864,10 +1038,21 @@ describe("talk transport between spawned Bun peers", () => {
       const slow = await startPeer({ TALK_PEER_REPAIR_MS: "600000" });
       const registration = await slow.call<Registration>("register", { sessionId: "slow" });
       await b.call("list");
-      // A never listed this target; its first request passes the proof, then times out.
-      expect(
-        await a.send("request", { target: targetOf(registration), kind: "wait", timeoutMs: 300 }),
-      ).toMatchObject({ ok: false, outcome: "timeout" });
+      // A never listed this target; its first request passes the proof, then times out. The
+      // timeout leaves room for a slow first lookup (a cold PowerShell start on Windows), and the
+      // test sees the blocked handler start before the request expires.
+      const firstTimeoutMs = WINDOWS ? 20_000 : 2_000;
+      const first = a.send("request", {
+        target: targetOf(registration),
+        kind: "wait",
+        timeoutMs: firstTimeoutMs,
+      });
+      await waitFor(
+        async () => (await status(slow)).heldRequests === 1,
+        firstTimeoutMs,
+        "the blocked handler",
+      );
+      expect(await first).toMatchObject({ ok: false, outcome: "timeout" });
       const path = join(folder, registration.fileName);
       unlinkSync(path);
       expect(

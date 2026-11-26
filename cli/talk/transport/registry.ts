@@ -11,7 +11,6 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readSync,
   readdirSync,
   renameSync,
   unlinkSync,
@@ -44,6 +43,7 @@ import {
   keptSecretFileState,
   liveView,
   publishSecretFile,
+  readFromStart,
   readSecretFile,
   refreshSecretFile,
   sizeFault,
@@ -235,23 +235,21 @@ const entryNames = (folder: string) =>
 const lstatName = (path: string) =>
   fileCall(path, "lstat", () => lstatSync(path, { throwIfNoEntry: false }));
 
-/** Reads at most `limit` bytes from the start of a file; `undefined` when the name went away. */
-const readAtMost = (path: string, limit: number) =>
+/**
+ * Reads a file whose `lstat` showed `size` bytes. The buffer holds that size
+ * plus one sentinel byte, within the hard limit. Gives `undefined` when the
+ * name went away and `"changed"` when the file has another length now.
+ */
+export const readObserved = (path: string, size: number) =>
   fileCall(path, "read", () => {
     const fd = openSync(path, "r");
     try {
-      const buffer = new Uint8Array(limit);
-      let filled = 0;
-      while (filled < limit) {
-        const count = readSync(fd, buffer, filled, limit - filled, filled);
-        if (count === 0) break;
-        filled += count;
-      }
-      return buffer.subarray(0, filled);
+      return readFromStart(fd, Math.min(size, MAX_SECRET_FILE_BYTES) + 1);
     } finally {
       closeSync(fd);
     }
   }).pipe(
+    Effect.map((bytes): Uint8Array | "changed" => (bytes.byteLength === size ? bytes : "changed")),
     Effect.catchIf(
       (error) => error.code === "ENOENT",
       () => Effect.undefined,
@@ -290,8 +288,8 @@ export class TalkRegistry extends Context.Service<
     Layer.effect(TalkRegistry, makePosixRegistry(folder));
 
   /** Windows: DPAPI-sealed entry files in a folder that has no folder rules. */
-  static readonly layerWindows = (folder: string) =>
-    Layer.effect(TalkRegistry, makeWindowsRegistry(folder));
+  static readonly layerWindows = (folder: string, seams: WindowsSeams = {}) =>
+    Layer.effect(TalkRegistry, makeWindowsRegistry(folder, seams));
 
   /** The implementation of this system, with its live dependencies. */
   static readonly layer = (folder: string): Layer.Layer<TalkRegistry, TalkTrustError> =>
@@ -347,16 +345,16 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
     return listing;
   });
 
-  // `None` only for a lookup that completed without a usable entry: a missing name, no regular file,
-  // or a rejected entry (its own mode, owner, size, or content). Folder and I/O failures pass up.
+  // `None` only for a lookup that completed without a usable entry: a missing name, no regular
+  // file, or content that does not decode (also content above the size limit). A trust fault of
+  // the entry file (owner, mode, a replaced name), a folder fault, and an I/O failure pass up.
   const read = Effect.fn("TalkRegistry.read")(function* (fileName: string) {
     if (!ENTRY_NAME.test(fileName) || !(yield* folderPresent)) return Option.none<RegistryEntry>();
-    const path = join(folder, fileName);
     return yield* readOne(fileName).pipe(
       Effect.catchTags({
         TalkEntryRejected: () => Effect.succeedNone,
+        TalkFileTooLarge: () => Effect.succeedNone,
         TalkFolderMissingError: () => Effect.succeedNone,
-        TalkTrustError: (error) => (error.path === path ? Effect.succeedNone : Effect.fail(error)),
       }),
     );
   });
@@ -424,7 +422,15 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
   });
 });
 
-const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
+/** Test seams of the Windows registry. */
+export interface WindowsSeams {
+  /** Writes the sealed blob to the temporary file; default `writeFileSync`. */
+  readonly writeFile?: (fd: number, bytes: Uint8Array) => void;
+}
+
+const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string, seams: WindowsSeams) {
+  const writeFile =
+    seams.writeFile ?? ((fd: number, bytes: Uint8Array) => writeFileSync(fd, bytes));
   const dpapi = yield* TalkDpapi;
   const withDpapi = <A, E>(effect: Effect.Effect<A, E, TalkDpapi>): Effect.Effect<A, E> =>
     Effect.provideService(effect, TalkDpapi, dpapi);
@@ -454,10 +460,13 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
       if (stats.size > MAX_SECRET_FILE_BYTES) {
         return yield* new TalkEntryRejected({ fileName, reason: sizeFault(stats.size) });
       }
-      const bytes = yield* readAtMost(path, MAX_SECRET_FILE_BYTES + 1);
+      const bytes = yield* readObserved(path, stats.size);
       if (bytes === undefined) return Option.none<Uint8Array>();
-      if (bytes.byteLength > MAX_SECRET_FILE_BYTES) {
-        return yield* new TalkEntryRejected({ fileName, reason: sizeFault(bytes.byteLength) });
+      if (bytes === "changed") {
+        return yield* new TalkEntryRejected({
+          fileName,
+          reason: "the file changed during the read",
+        });
       }
       return Option.some(bytes);
     });
@@ -527,7 +536,7 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
     // The exclusive open made the temporary file, so any later failure removes it.
     let open = true;
     yield* Effect.gen(function* () {
-      yield* fileCall(temporaryPath, "write", () => writeFileSync(fd, blob));
+      yield* fileCall(temporaryPath, "write", () => writeFile(fd, blob));
       open = false;
       yield* fileCall(temporaryPath, "close", () => closeSync(fd));
       yield* fileCall(path, "rename", () => renameSync(temporaryPath, path));
@@ -559,9 +568,9 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
     if (stats === undefined || !stats.isFile() || stats.size !== published.bytes.byteLength) {
       return replaced;
     }
-    const bytes = yield* readAtMost(published.path, published.bytes.byteLength + 1);
+    const bytes = yield* readObserved(published.path, published.bytes.byteLength);
     const state: KeptFileState =
-      bytes !== undefined && Buffer.from(bytes).equals(Buffer.from(published.bytes))
+      bytes instanceof Uint8Array && Buffer.from(bytes).equals(Buffer.from(published.bytes))
         ? "intact"
         : "replaced";
     return state;

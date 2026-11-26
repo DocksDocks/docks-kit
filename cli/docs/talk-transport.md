@@ -19,12 +19,18 @@ pi-intercom.
 3. The bundled code.
 
 The build fails when a package that adds code has no `LICENSE`,
-`LICENSE.md`, or `LICENSE.txt`. It keeps `@oh-my-pi/*` external and fails when
-the emitted code loads a host module in another form than a dynamic `import`
-of one string literal: a static `import`, an `export ... from`, a `require`,
-or a dynamic `import` of an expression. The package smoke
-(`cli/scripts/package-smoke.ts`) fails when the tarball holds a `cli/talk/`
-entry.
+`LICENSE.md`, or `LICENSE.txt`; it reads the license of the package after the
+last `node_modules` folder of each input, so a nested package counts on its
+own. It keeps `@oh-my-pi/*` external and fails when the emitted code loads a
+host module in another form than a dynamic `import` of one string literal: a
+static `import`, an `export ... from`, a `require` (also Bun's `__require` and
+`import.meta.require`), or a dynamic `import` of an expression. The check
+finds static forms with `Bun.Transpiler.scanImports` and reads the other forms
+in code only, so import-like text in strings, templates, comments, and
+regular expressions does not fail the build. The build writes `talk.js`
+through an exclusive temporary file and a rename, so it never follows an
+existing link. The package smoke (`cli/scripts/package-smoke.ts`) fails when
+the tarball holds a `cli/talk/` entry, a folder entry included.
 
 ## Registry folder
 
@@ -178,8 +184,8 @@ second live registration with the same session id in one process fails.
 A listing removes an entry and its socket only when the entry decoded, its
 endpoint is missing or refuses the connection, and its process id is not
 alive. A timeout, `EACCES`, `EMFILE`, or a failed handshake never prunes. A
-client keeps its own entry of a pruned target, so its next send gets
-`not-live`.
+client keeps its own entry of a pruned target; its next send still applies
+the endpoint and process id checks above.
 
 ### Repair
 

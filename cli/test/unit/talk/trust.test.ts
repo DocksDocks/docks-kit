@@ -886,12 +886,38 @@ describe("runTool deadline", () => {
   });
 
   it("kills a command that runs past its deadline and fails with a named reason", async () => {
-    const started = Date.now();
-    const error = await Effect.runPromise(
-      Effect.flip(runTool(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], "", 300)),
-    );
-    expect(error).toBeInstanceOf(TalkToolError);
-    expect(error.reason).toMatch(/did not end within 300 ms/);
-    expect(Date.now() - started).toBeLessThan(10_000);
+    const dir = mkdtempSync(join(tmpdir(), "talk-tool-"));
+    const pidFile = join(dir, "pid");
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    let pid = 0;
+    try {
+      const script = `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 30000)`;
+      const deadlineMs = 2_000;
+      const started = Date.now();
+      const error = await Effect.runPromise(
+        Effect.flip(runTool(process.execPath, ["-e", script], "", deadlineMs)),
+      );
+      expect(error).toBeInstanceOf(TalkToolError);
+      expect(error.reason).toMatch(/did not end within 2000 ms/);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      pid = Number(readFileSync(pidFile, "utf8"));
+      expect(pid).toBeGreaterThan(0);
+      // The deadline killed the child: no process holds its id soon after.
+      const deadline = Date.now() + 5_000;
+      while (alive(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(alive(pid)).toBe(false);
+    } finally {
+      if (pid > 0 && alive(pid)) process.kill(pid, "SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

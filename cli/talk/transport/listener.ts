@@ -155,6 +155,18 @@ interface ServedConnection {
   readonly held: HeldRequests;
 }
 
+/**
+ * The end of a request whose handler failed with a defect: the request gets no
+ * answer, so the connection closes and the client fails at once. When a
+ * withdrawal took the request first, the withdrawal answers `not-live` and
+ * ends the connection, so this leaves the connection alone.
+ */
+export const closeAfterDefect = (
+  held: HeldRequests,
+  id: number,
+  connection: Connection,
+): Effect.Effect<void> => Effect.suspend(() => (held.claim(id) ? connection.close : Effect.void));
+
 /** A registration that this listener served; ended ones stay until the process ends. */
 interface Served {
   readonly instanceId: string;
@@ -297,7 +309,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
             Effect.catchDefect((defect) =>
               Effect.andThen(
                 Effect.logWarning(`talk: the handler of ${request.kind} failed`, defect),
-                connection.close,
+                closeAfterDefect(link.held, request.id, connection),
               ),
             ),
           ),

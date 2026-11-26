@@ -15,7 +15,6 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readSync,
   readlinkSync,
   renameSync,
@@ -72,6 +71,15 @@ export class TalkFileError extends Schema.TaggedError<
   path: Schema.String,
   reason: Schema.String,
   code: Schema.optional(Schema.String),
+}) {}
+
+/** A secret file is above `MAX_SECRET_FILE_BYTES`; it is rejected without a whole read. */
+export class TalkFileTooLarge extends Schema.TaggedError<
+  TalkFileTooLarge,
+  { readonly brand: unique symbol }
+>()("TalkFileTooLarge", {
+  path: Schema.String,
+  reason: Schema.String,
 }) {}
 
 export type EntryKind = "folder" | "file" | "link" | "socket" | "fifo" | "other";
@@ -577,12 +585,12 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
         }
         const fault = secretFileFault(held, system.user);
         if (fault !== undefined) return yield* new TalkTrustError({ path, reason: fault });
-        // The size check comes before the read, so a large file is never read whole.
+        // The size check comes before the read, and the read stops one byte past the limit,
+        // so a file that grows after the `fstat` is never read whole.
         if (stats.size > BigInt(MAX_SECRET_FILE_BYTES)) {
-          return yield* new TalkTrustError({ path, reason: sizeFault(Number(stats.size)) });
+          return yield* new TalkFileTooLarge({ path, reason: sizeFault(Number(stats.size)) });
         }
-        const bytes: Uint8Array = yield* fileCall(path, "read", () => readFileSync(fd));
-        return Option.some(bytes);
+        return Option.some(yield* readSecretBytes(path, fd));
       }),
     (fd) => Effect.sync(() => closeSync(fd)),
   );
@@ -593,8 +601,8 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
 /** The state of a published secret file: still the file that the publisher wrote, or replaced. */
 export type KeptFileState = "intact" | "replaced";
 
-// Reads up to `limit` bytes from offset 0 of the descriptor.
-function readFromStart(fd: number, limit: number): Uint8Array {
+/** Reads up to `limit` bytes from offset 0 of the descriptor. */
+export function readFromStart(fd: number, limit: number): Uint8Array {
   const buffer = new Uint8Array(limit);
   let filled = 0;
   while (filled < limit) {
@@ -604,6 +612,22 @@ function readFromStart(fd: number, limit: number): Uint8Array {
   }
   return buffer.subarray(0, filled);
 }
+
+/**
+ * Reads a secret file through its descriptor: at most `MAX_SECRET_FILE_BYTES`
+ * plus one byte, and a file with more bytes fails with `TalkFileTooLarge`.
+ */
+export const readSecretBytes = (path: string, fd: number) =>
+  fileCall(path, "read", () => readFromStart(fd, MAX_SECRET_FILE_BYTES + 1)).pipe(
+    Effect.filterOrFail(
+      (bytes) => bytes.byteLength <= MAX_SECRET_FILE_BYTES,
+      () =>
+        new TalkFileTooLarge({
+          path,
+          reason: `the file has more than ${MAX_SECRET_FILE_BYTES} bytes, the limit`,
+        }),
+    ),
+  );
 
 /**
  * Checks a published secret file through the descriptor that the publisher

@@ -5,8 +5,8 @@
 // `{ "id": n, "op": "...", ... }` -> `{ "id": n, "ok": true, "value": ... }` or
 // `{ "id": n, "ok": false, "tag": ..., "outcome": ..., "reason": ... }`.
 // It prints `{ "ready": true, ... }` once the transport runs.
-// Ops: register, withdraw, list, request, probe, status, umask (sets the
-// process umask), dispose (ends the transport, the process stays), exit.
+// Ops: register, withdraw, list, request, probe, status, dispose (ends the
+// transport, the process stays), exit.
 // Request kinds: `echo` answers its body, `wait` never answers, and `die`
 // fails with a defect.
 // Environment: `TALK_PEER_REPAIR_MS` sets the repair interval (default 1000).
@@ -40,7 +40,6 @@ interface Command {
   readonly kind?: string;
   readonly body?: Schema.Json;
   readonly timeoutMs?: number;
-  readonly mask?: number;
 }
 
 const run = <A, E>(effect: Effect.Effect<A, E, Talk.TalkTransport>): Promise<A> =>
@@ -81,8 +80,6 @@ async function perform(command: Command): Promise<unknown> {
       return run(TalkTransport.use((transport) => transport.probe(target(command))));
     case "status":
       return run(TalkTransport.use((transport) => transport.status));
-    case "umask":
-      return process.umask(command.mask ?? 0o022);
     case "dispose":
       await runtime.dispose();
       return null;

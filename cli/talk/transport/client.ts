@@ -192,8 +192,17 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
       const authFailed: Exchange = { _tag: "AuthFailed" };
       return authFailed;
     }
-    // The listener proved the secret: the client reached this target and keeps its entry.
-    kept.set(targetKey(entry), entry);
+    // The listener proved the secret: the client reached this target and keeps its entry, unless
+    // a newer observation (a listing or a re-read) replaced the entry that this attempt used.
+    const key = targetKey(entry);
+    const current = kept.get(key);
+    if (
+      current === undefined ||
+      current === entry ||
+      (sameEndpoint(current.endpoint, entry.endpoint) && current.startTime === entry.startTime)
+    ) {
+      kept.set(key, entry);
+    }
     yield* connection.write({
       type: "proof",
       hmac: computeHmac(secret, { ...fields, role: "client" }),

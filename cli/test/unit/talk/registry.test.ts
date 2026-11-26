@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -44,6 +46,7 @@ import {
   entryFault,
   entryFileName,
   isTalkName,
+  readObserved,
   sessionKey,
   temporaryFileName,
 } from "../../../talk/transport/registry";
@@ -52,8 +55,10 @@ import {
   type EntryStat,
   MAX_SECRET_FILE_BYTES,
   TalkFileError,
+  TalkFileTooLarge,
   TalkPosixSystem,
   TalkTrustError,
+  readSecretBytes,
 } from "../../../talk/transport/trustPosix";
 
 // Registry entries, their names, and the endpoint choice (#249 E5 Names, E7).
@@ -591,22 +596,39 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     expect(error).toBeInstanceOf(TalkTrustError);
   });
 
-  it("passes a folder trust failure of a read up, and gives None for a rejected file", async () => {
+  it("passes trust faults of a lookup up and gives None only for an entry that is not there or does not decode", async () => {
     const published = await publish(entryFor(folder));
     try {
+      const lookup = (fileName: string) => TalkRegistry.use((registry) => registry.read(fileName));
+      // A missing name and content that does not decode complete without an entry.
+      expect(
+        Option.isNone(await runIn(layer, lookup(entryFileName("1111111111111111", SESSION)))),
+      ).toBe(true);
+      const garbage = entryFileName("2222222222222222", SESSION);
+      writeFileSync(join(folder, garbage), "garbage", { mode: 0o600 });
+      chmodSync(join(folder, garbage), 0o600);
+      expect(Option.isNone(await runIn(layer, lookup(garbage)))).toBe(true);
+      // A mode other than 0600 is a trust fault of the entry file, with its path and reason.
       chmodSync(published.path, 0o644);
-      const rejected = await runIn(
+      const modeError = await failIn(layer, lookup(published.fileName));
+      expect(modeError).toBeInstanceOf(TalkTrustError);
+      expect(modeError).toMatchObject({
+        path: published.path,
+        reason: expect.stringMatching(/0644/),
+      });
+      // A listing reports it as rejected with the reason and goes on.
+      const listing = await runIn(
         layer,
-        TalkRegistry.use((registry) => registry.read(published.fileName)),
+        TalkRegistry.use((registry) => registry.list),
       );
-      expect(Option.isNone(rejected)).toBe(true);
+      expect(listing.rejected).toContainEqual({
+        fileName: published.fileName,
+        reason: expect.stringMatching(/0644/),
+      });
       chmodSync(folder, 0o755);
-      const error = await failIn(
-        layer,
-        TalkRegistry.use((registry) => registry.read(published.fileName)),
-      );
-      expect(error).toBeInstanceOf(TalkTrustError);
-      expect(error).toMatchObject({ path: folder, reason: expect.stringMatching(/0755/) });
+      const folderError = await failIn(layer, lookup(published.fileName));
+      expect(folderError).toBeInstanceOf(TalkTrustError);
+      expect(folderError).toMatchObject({ path: folder, reason: expect.stringMatching(/0755/) });
     } finally {
       await runIn(
         layer,
@@ -800,7 +822,66 @@ const windowsCases = (label: string, dpapi: Layer.Layer<TalkDpapi>) =>
       expect(error).toBeInstanceOf(TalkFileError);
       expect(readdirSync(folder).sort()).toEqual([entryFileName(INSTANCE, SESSION), "keep.txt"]);
     });
+
+    it("removes its temporary file when the write after the exclusive open fails", async () => {
+      const failing = TalkRegistry.layerWindows(folder, {
+        writeFile: () => {
+          throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+        },
+      }).pipe(Layer.provide(dpapi));
+      writeFileSync(join(folder, "keep.txt"), "keep");
+      const error = await failIn(
+        failing,
+        TalkRegistry.use((registry) => registry.publish(tcpEntry())),
+      );
+      expect(error).toMatchObject({ code: "ENOSPC" });
+      expect(readdirSync(folder)).toEqual(["keep.txt"]);
+    });
   });
+
+describe("bounded entry reads (any system)", () => {
+  let base = "";
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "tr-"));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("reads a secret file through its descriptor up to the limit and rejects more bytes", async () => {
+    const small = join(base, "small");
+    const large = join(base, "large");
+    writeFileSync(small, "abc");
+    writeFileSync(large, Buffer.alloc(MAX_SECRET_FILE_BYTES + 100, 1));
+    const smallFd = openSync(small, "r");
+    const largeFd = openSync(large, "r");
+    try {
+      expect(Buffer.from(await Effect.runPromise(readSecretBytes(small, smallFd)))).toEqual(
+        Buffer.from("abc"),
+      );
+      // The `fstat` check is not part of this read: a file that grew after it still fails here.
+      const error = await Effect.runPromise(Effect.flip(readSecretBytes(large, largeFd)));
+      expect(error).toBeInstanceOf(TalkFileTooLarge);
+      expect(error).toMatchObject({ path: large });
+    } finally {
+      closeSync(smallFd);
+      closeSync(largeFd);
+    }
+  });
+
+  it("reads a file at its observed length plus one sentinel byte and reports a length change", async () => {
+    const path = join(base, "blob");
+    writeFileSync(path, Buffer.alloc(10, 2));
+    const same = await Effect.runPromise(readObserved(path, 10));
+    expect(same instanceof Uint8Array && same.byteLength).toBe(10);
+    // The file has more or fewer bytes than its `lstat` showed.
+    expect(await Effect.runPromise(readObserved(path, 5))).toBe("changed");
+    expect(await Effect.runPromise(readObserved(path, 20))).toBe("changed");
+    expect(await Effect.runPromise(readObserved(join(base, "missing"), 3))).toBeUndefined();
+  });
+});
 
 describe("Windows registry branch lookup failures (any system)", () => {
   let base = "";
