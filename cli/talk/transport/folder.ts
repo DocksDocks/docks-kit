@@ -102,14 +102,19 @@ export interface ToolResult {
   readonly stderr: string;
 }
 
+/** The deadline of one system command; past it, the command is killed and fails. */
+export const TOOL_TIMEOUT_MS = 30_000;
+
 /**
  * Runs `command` with `args` and no shell, writes `input` to its standard
- * input, and waits for it to end. Interruption stops the command.
+ * input, and waits for it to end. Interruption and the deadline
+ * (`TOOL_TIMEOUT_MS` by default) kill the command.
  */
 export const runTool = Effect.fn("runTool")(function* (
   command: string,
   args: ReadonlyArray<string>,
   input = "",
+  timeoutMs: number = TOOL_TIMEOUT_MS,
 ) {
   return yield* Effect.callback<ToolResult, TalkToolError>((resume) => {
     let settled = false;
@@ -140,9 +145,17 @@ export const runTool = Effect.fn("runTool")(function* (
     child.stdin.end(input);
     return Effect.sync(() => {
       settled = true;
-      child.kill();
+      child.kill("SIGKILL");
     });
-  });
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: timeoutMs,
+      orElse: () =>
+        Effect.fail(
+          new TalkToolError({ command, reason: `the command did not end within ${timeoutMs} ms` }),
+        ),
+    }),
+  );
 });
 
 const darwinTempDir = Effect.fn("darwinTempDir")(function* () {

@@ -28,6 +28,9 @@ export type Hmac = typeof Hmac.Type;
 /** The instance id of a registration: 16 lowercase hex characters (#249 E5 Names). */
 export const InstanceId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{16}$/));
 
+/** The session id of a registration: any non-empty string. Entries and `hello` use it. */
+export const SessionId = Schema.NonEmptyString;
+
 /** The id of a request; the response carries the same id. */
 export const RequestId = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
@@ -36,7 +39,7 @@ export const Hello = Schema.Struct({
   type: Schema.Literal("hello"),
   version: Schema.Literal(PROTOCOL_VERSION),
   instanceId: InstanceId,
-  sessionId: Schema.NonEmptyString,
+  sessionId: SessionId,
   nonce: Nonce,
 });
 export type Hello = typeof Hello.Type;

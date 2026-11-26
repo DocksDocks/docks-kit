@@ -7,8 +7,11 @@
  */
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  lstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
+  readSync,
   readdirSync,
   renameSync,
   unlinkSync,
@@ -25,10 +28,11 @@ import {
   endpointKindFor,
   randomNameHex,
 } from "./endpoint";
-import { InstanceId, PROTOCOL_VERSION } from "./handshake";
+import { InstanceId, PROTOCOL_VERSION, SessionId } from "./handshake";
 import { TalkDpapi, type TalkSealError, sealEntries, unsealEntries } from "./sealWindows";
 import {
   type KeptFileState,
+  MAX_SECRET_FILE_BYTES,
   TalkFileError,
   type TalkFolderMissingError,
   TalkPosixSystem,
@@ -42,6 +46,7 @@ import {
   publishSecretFile,
   readSecretFile,
   refreshSecretFile,
+  sizeFault,
 } from "./trustPosix";
 
 // --- Names (E5 Names) ----------------------------------------------------------
@@ -78,7 +83,7 @@ export const Secret = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 export const RegistryEntry = Schema.Struct({
   version: Schema.Literal(PROTOCOL_VERSION),
   instanceId: InstanceId,
-  sessionId: Schema.NonEmptyString,
+  sessionId: SessionId,
   name: Schema.String,
   cwd: Schema.String,
   processId: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -226,6 +231,33 @@ const entryNames = (folder: string) =>
       .sort(),
   );
 
+/** `lstat` of a name; `undefined` when the name is missing. */
+const lstatName = (path: string) =>
+  fileCall(path, "lstat", () => lstatSync(path, { throwIfNoEntry: false }));
+
+/** Reads at most `limit` bytes from the start of a file; `undefined` when the name went away. */
+const readAtMost = (path: string, limit: number) =>
+  fileCall(path, "read", () => {
+    const fd = openSync(path, "r");
+    try {
+      const buffer = new Uint8Array(limit);
+      let filled = 0;
+      while (filled < limit) {
+        const count = readSync(fd, buffer, filled, limit - filled, filled);
+        if (count === 0) break;
+        filled += count;
+      }
+      return buffer.subarray(0, filled);
+    } finally {
+      closeSync(fd);
+    }
+  }).pipe(
+    Effect.catchIf(
+      (error) => error.code === "ENOENT",
+      () => Effect.undefined,
+    ),
+  );
+
 /** The registry folder and its entries; one implementation per system. */
 export class TalkRegistry extends Context.Service<
   TalkRegistry,
@@ -315,9 +347,18 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
     return listing;
   });
 
+  // `None` only for a lookup that completed without a usable entry: a missing name, no regular file,
+  // or a rejected entry (its own mode, owner, size, or content). Folder and I/O failures pass up.
   const read = Effect.fn("TalkRegistry.read")(function* (fileName: string) {
     if (!ENTRY_NAME.test(fileName) || !(yield* folderPresent)) return Option.none<RegistryEntry>();
-    return yield* readOne(fileName).pipe(Effect.orElseSucceed(() => Option.none<RegistryEntry>()));
+    const path = join(folder, fileName);
+    return yield* readOne(fileName).pipe(
+      Effect.catchTags({
+        TalkEntryRejected: () => Effect.succeedNone,
+        TalkFolderMissingError: () => Effect.succeedNone,
+        TalkTrustError: (error) => (error.path === path ? Effect.succeedNone : Effect.fail(error)),
+      }),
+    );
   });
 
   const publish = Effect.fn("TalkRegistry.publish")(function* (entry: RegistryEntry) {
@@ -403,19 +444,22 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
     return true;
   });
 
-  // The blob at a name; `None` for a name that holds no regular file.
+  // The blob at a name; `None` for a name that holds no regular file. A file above the size limit is
+  // rejected without a read.
   const readBlob = (fileName: string) =>
     Effect.gen(function* () {
       const path = join(folder, fileName);
-      const named = liveView.lstat(path);
-      if (named._tag !== "Found" || named.stat.kind !== "file") return Option.none<Uint8Array>();
-      return yield* fileCall(path, "read", () => new Uint8Array(readFileSync(path))).pipe(
-        Effect.asSome,
-        Effect.catchIf(
-          (error) => error.code === "ENOENT",
-          () => Effect.succeedNone,
-        ),
-      );
+      const stats = yield* lstatName(path);
+      if (stats === undefined || !stats.isFile()) return Option.none<Uint8Array>();
+      if (stats.size > MAX_SECRET_FILE_BYTES) {
+        return yield* new TalkEntryRejected({ fileName, reason: sizeFault(stats.size) });
+      }
+      const bytes = yield* readAtMost(path, MAX_SECRET_FILE_BYTES + 1);
+      if (bytes === undefined) return Option.none<Uint8Array>();
+      if (bytes.byteLength > MAX_SECRET_FILE_BYTES) {
+        return yield* new TalkEntryRejected({ fileName, reason: sizeFault(bytes.byteLength) });
+      }
+      return Option.some(bytes);
     });
 
   const openAll = (fileNames: ReadonlyArray<string>, blobs: ReadonlyArray<Uint8Array>) =>
@@ -452,8 +496,11 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
 
   const read = Effect.fn("TalkRegistry.read")(function* (fileName: string) {
     if (!ENTRY_NAME.test(fileName) || !(yield* folderPresent)) return Option.none<RegistryEntry>();
-    const blob = yield* readBlob(fileName);
+    const blob = yield* readBlob(fileName).pipe(
+      Effect.catchTag("TalkEntryRejected", () => Effect.succeedNone),
+    );
     if (Option.isNone(blob)) return Option.none<RegistryEntry>();
+    // A failed DPAPI batch passes up; a blob that does not open is a rejected entry.
     const [opened] = yield* openAll([fileName], [blob.value]);
     return opened !== undefined && Result.isSuccess(opened)
       ? Option.some(opened.success)
@@ -462,18 +509,42 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
 
   const publish = Effect.fn("TalkRegistry.publish")(function* (entry: RegistryEntry) {
     const fileName = entryFileName(entry.instanceId, entry.sessionId);
-    const [blob] = yield* withDpapi(sealEntries([encodeEntry(entry)]));
     const path = join(folder, fileName);
-    const temporaryPath = join(folder, temporaryFileName());
+    const text = encodeEntry(entry);
+    const plainBytes = utf8.encode(text).byteLength;
+    if (plainBytes > MAX_SECRET_FILE_BYTES) {
+      return yield* new TalkFileError({ path, reason: sizeFault(plainBytes) });
+    }
+    const [blob] = yield* withDpapi(sealEntries([text]));
     if (blob === undefined) {
       return yield* new TalkFileError({ path, reason: "DPAPI gave no sealed blob" });
     }
-    yield* fileCall(temporaryPath, "write", () =>
-      writeFileSync(temporaryPath, blob, { flag: "wx" }),
-    );
-    yield* fileCall(path, "rename", () => renameSync(temporaryPath, path)).pipe(
+    if (blob.byteLength > MAX_SECRET_FILE_BYTES) {
+      return yield* new TalkFileError({ path, reason: sizeFault(blob.byteLength) });
+    }
+    const temporaryPath = join(folder, temporaryFileName());
+    const fd = yield* fileCall(temporaryPath, "open", () => openSync(temporaryPath, "wx"));
+    // The exclusive open made the temporary file, so any later failure removes it.
+    let open = true;
+    yield* Effect.gen(function* () {
+      yield* fileCall(temporaryPath, "write", () => writeFileSync(fd, blob));
+      open = false;
+      yield* fileCall(temporaryPath, "close", () => closeSync(fd));
+      yield* fileCall(path, "rename", () => renameSync(temporaryPath, path));
+    }).pipe(
       Effect.tapError(() =>
-        Effect.ignore(fileCall(temporaryPath, "unlink", () => unlinkSync(temporaryPath))),
+        Effect.sync(() => {
+          try {
+            if (open) closeSync(fd);
+          } catch {
+            // The descriptor is closed already.
+          }
+          try {
+            unlinkSync(temporaryPath);
+          } catch {
+            // The error of the failed step tells the caller what went wrong.
+          }
+        }),
       ),
     );
     const published: PublishedEntry = { fileName, path, bytes: blob, fd: undefined };
@@ -482,18 +553,15 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string) {
 
   // Windows file ids can be reused, so the check compares the bytes at the name with the sealed blob.
   const check = Effect.fn("TalkRegistry.check")(function* (published: PublishedEntry) {
-    const named = liveView.lstat(published.path);
-    if (named._tag !== "Found" || named.stat.kind !== "file")
-      return "replaced" satisfies KeptFileState;
-    const bytes = yield* fileCall(published.path, "read", () => readFileSync(published.path)).pipe(
-      Effect.asSome,
-      Effect.catchIf(
-        (error) => error.code === "ENOENT",
-        () => Effect.succeedNone,
-      ),
-    );
+    const stats = yield* lstatName(published.path);
+    const replaced: KeptFileState = "replaced";
+    // Another size means other bytes; the compare then reads nothing.
+    if (stats === undefined || !stats.isFile() || stats.size !== published.bytes.byteLength) {
+      return replaced;
+    }
+    const bytes = yield* readAtMost(published.path, published.bytes.byteLength + 1);
     const state: KeptFileState =
-      Option.isSome(bytes) && bytes.value.equals(Buffer.from(published.bytes))
+      bytes !== undefined && Buffer.from(bytes).equals(Buffer.from(published.bytes))
         ? "intact"
         : "replaced";
     return state;

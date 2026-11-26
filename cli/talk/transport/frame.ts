@@ -8,7 +8,8 @@ import { Effect, Schema } from "effect";
 /** The largest body length that a frame can declare: 1 MiB. */
 export const MAX_FRAME_BYTES = 1_048_576;
 
-const HEADER_BYTES = 4;
+/** The byte count of the length header of a frame. */
+export const FRAME_HEADER_BYTES = 4;
 
 /** A frame that the codec cannot write or read. The connection that carries it closes. */
 export class FrameError extends Schema.TaggedError<FrameError, { readonly brand: unique symbol }>()(
@@ -41,9 +42,9 @@ export const encodeFrame = Effect.fnUntraced(function* (value: Schema.Json) {
   );
   const body = utf8Encoder.encode(text);
   if (body.byteLength > MAX_FRAME_BYTES) return yield* oversize(body.byteLength);
-  const frame = new Uint8Array(HEADER_BYTES + body.byteLength);
+  const frame = new Uint8Array(FRAME_HEADER_BYTES + body.byteLength);
   new DataView(frame.buffer).setUint32(0, body.byteLength);
-  frame.set(body, HEADER_BYTES);
+  frame.set(body, FRAME_HEADER_BYTES);
   return frame;
 });
 
@@ -74,7 +75,7 @@ export interface FrameDecoder {
 
 /** Make a frame reader with an empty buffer. */
 export const makeFrameDecoder = (): FrameDecoder => {
-  const header = new Uint8Array(HEADER_BYTES);
+  const header = new Uint8Array(FRAME_HEADER_BYTES);
   const headerView = new DataView(header.buffer);
   let headerFill = 0;
   // The body of a frame that spans chunks; a body inside one chunk is read in place.
@@ -100,11 +101,11 @@ export const makeFrameDecoder = (): FrameDecoder => {
         continue;
       }
       if (offset === end) break;
-      const count = Math.min(HEADER_BYTES - headerFill, end - offset);
+      const count = Math.min(FRAME_HEADER_BYTES - headerFill, end - offset);
       header.set(chunk.subarray(offset, offset + count), headerFill);
       headerFill += count;
       offset += count;
-      if (headerFill < HEADER_BYTES) break;
+      if (headerFill < FRAME_HEADER_BYTES) break;
       headerFill = 0;
       const length = headerView.getUint32(0);
       if (length > MAX_FRAME_BYTES) return yield* oversize(length);

@@ -55,7 +55,8 @@ folders stay unchanged.
 in the registry folder:
 
 - Entries: `<instance id>-<session key>.entry`. The instance id is 16 random
-  hex characters per process. The session key is the first 16 hex characters
+  hex characters per registration, so a session that registers again after a
+  withdrawal is a new target. The session key is the first 16 hex characters
   of the SHA-256 of the session id.
 - Sockets: `<16 hex>.sock`.
 - Temporary files: `.<16 hex>.tmp`.
@@ -83,21 +84,26 @@ Before each secret read and each secret write, `talk` checks the path again:
 - Publication: an exclusive `O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW` open of
   a temporary name with mode 0600, then `fchmod` 0600, because the umask can
   narrow the open mode, then the write and a rename to the entry name. The
-  listener keeps that descriptor until it replaces the entry or the
+  listener keeps that descriptor until a replacement publishes or the
   registration ends.
 - Client read: `lstat` first, and any object other than a regular file is
   skipped without an open, so a FIFO or a device cannot block the read. Then
   an `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` open, and `fstat` must show the same
   regular file of the user with mode exactly 0600.
+- Size: an entry file holds at most 64 KiB (`MAX_SECRET_FILE_BYTES`).
+  Publication refuses a larger entry, and a read checks the size before it
+  reads.
 
 A failed check stops the operation with an error that names the path and the
-reason.
+reason. A request whose entry lookup fails this way gets `unreachable` with
+that reason, not `not-found`.
 
 ### Windows
 
 Each entry file holds only a DPAPI blob. `talk` seals the whole entry JSON
 for the current user with the entropy `docks-kit-talk/v1`. One
-`powershell.exe` start seals or unseals a batch. Another account can neither
+`powershell.exe` start seals or unseals a batch. Every command that `talk`
+starts has a deadline of 30 s (`TOOL_TIMEOUT_MS`). Another account can neither
 read nor forge the secret, the endpoint, or the process id.
 
 ## Endpoints
@@ -128,26 +134,31 @@ picks.
   session id. Each side compares in constant time. The secret never crosses
   the connection.
 - Limits: at most 32 connections before `ready`, and 1 s from accept to the
-  end of the handshake.
+  end of the handshake. A connection pauses its socket when more than one
+  maximum frame plus its header waits unread.
 - Requests: `{ type: "request", id, kind, body }` and
   `{ type: "response", id, result }`. The kind `ping` answers liveness. A
-  request times out after 5 s by default, and a probe after 500 ms.
+  request times out after 5 s by default, and a probe after 500 ms. When the
+  listener cannot send a response, for example a result above 1 MiB, it
+  closes the connection.
 
 ### Withdrawal
 
-The listener first marks the registration ended. Each request that it holds
-for that registration gets `not-live`, each of its connections closes, and a
-new `hello` for it gets `ended` after the full proof. Then the listener
-removes the entry file. A failed removal stays pending, and each repair pass
-retries it. The listener keeps the ids and secrets of each registration that
-ended until the process ends.
+The listener first marks the registration ended and takes every request
+that it holds for it: each gets `not-live`, each connection of the
+registration closes, and a new `hello` for it gets `ended` after the full
+proof. A handler that has not started for such a request never starts. Then
+the listener removes the entry file. A failed removal stays pending until it
+succeeds or a new entry of that name publishes, and each repair pass retries
+it. The listener keeps the ids and secrets of each registration that ended
+until the process ends.
 
 ### Client outcomes
 
-A client keeps the entry of each target that it listed or reached, so a
-missing entry file alone does not stop a send. When the endpoint is missing
-or refuses the connection, the client reads the entry file of the target once
-more and retries on a new endpoint.
+A client keeps the entry of each target that it listed or reached (after the
+listener proof checked out), so a missing entry file alone does not stop a
+send. When the endpoint is missing or refuses the connection, the client
+reads the entry file of the target once more and retries on a new endpoint.
 
 | Outcome | When |
 |---|---|
@@ -158,22 +169,27 @@ more and retries on a new endpoint.
 | `unreachable` | Other connection failures, for example a missing endpoint while a process holds the process id of the target |
 | `unknown-kind` | The live target has no handler for the request kind |
 
-A process id in use counts as alive, whatever process holds it. A second
-live registration with the same session id in one process fails.
+A process counts as not alive only when `process.kill(pid, 0)` fails with
+`ESRCH`; a process id in use counts as alive, whatever process holds it. A
+second live registration with the same session id in one process fails.
 
 ### Pruning
 
 A listing removes an entry and its socket only when the entry decoded, its
 endpoint is missing or refuses the connection, and its process id is not
-alive. A timeout, `EACCES`, `EMFILE`, or a failed handshake never prunes.
+alive. A timeout, `EACCES`, `EMFILE`, or a failed handshake never prunes. A
+client keeps its own entry of a pruned target, so its next send gets
+`not-live`.
 
 ### Repair
 
-Every 60 s, the listener checks its entries. It publishes a missing or
-changed entry again and retries a failed publication on the next pass. When
-the registry folder is missing, it creates the folder again; on POSIX it also
-binds a new socket. On POSIX, every 6 hours it refreshes the times of its
-entry files through the descriptors that it kept.
+Every 60 s, the listener checks each of its entries on its own: a failure of
+one entry is logged, and the pass goes on with the others. It publishes a
+missing or changed entry again and retries a failed publication on the next
+pass. When the registry folder is missing, it creates the folder again; on
+POSIX it also binds a new socket. On POSIX, every 6 hours it refreshes the
+times of its entry files through the descriptors that it kept, and logs each
+failure with the path and the reason.
 
 ## Known limits
 

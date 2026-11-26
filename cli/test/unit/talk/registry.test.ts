@@ -6,6 +6,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -14,7 +16,7 @@ import {
 } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { Effect, Layer, Option } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -45,9 +47,10 @@ import {
   sessionKey,
   temporaryFileName,
 } from "../../../talk/transport/registry";
-import { TalkDpapi } from "../../../talk/transport/sealWindows";
+import { TalkDpapi, TalkSealError } from "../../../talk/transport/sealWindows";
 import {
   type EntryStat,
+  MAX_SECRET_FILE_BYTES,
   TalkFileError,
   TalkPosixSystem,
   TalkTrustError,
@@ -73,7 +76,7 @@ const entryFor = (folder: string, overrides: Partial<RegistryEntry> = {}): Regis
   name: "main",
   cwd: "/work",
   processId: 4242,
-  endpoint: { kind: "unix", path: join(folder, "fedcba9876543210.sock") },
+  endpoint: { kind: "unix", path: posix.join(folder, "fedcba9876543210.sock") },
   startTime: 1_700_000_000_000,
   secret: SECRET,
   ...overrides,
@@ -161,11 +164,11 @@ describe("entry Schema and rules", () => {
   it("rejects a socket path that is not a socket name directly in the folder", () => {
     for (const path of [
       "/tmp/elsewhere/fedcba9876543210.sock",
-      join(folder, "daemon.sock"),
-      join(folder, "sub", "fedcba9876543210.sock"),
-      join(folder, "..", "fedcba9876543210.sock"),
+      posix.join(folder, "daemon.sock"),
+      posix.join(folder, "sub", "fedcba9876543210.sock"),
+      `${folder}/../fedcba9876543210.sock`,
       "fedcba9876543210.sock",
-      join(folder, "fedcba9876543210.entry"),
+      posix.join(folder, "fedcba9876543210.entry"),
     ]) {
       const entry = entryFor(folder, { endpoint: { kind: "unix", path } });
       expect(entryFault(entry, fileName, folder, "unix"), path).toMatch(/socket path/);
@@ -529,16 +532,22 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     }
   });
 
-  it("refreshes the times of its own entry file through the kept descriptor", async () => {
+  it("refreshes the times of its own file through the kept descriptor, not the name", async () => {
     const published = await publish(entryFor(folder));
+    const aside = join(base, "aside.entry");
     try {
       const old = new Date("2001-01-01T00:00:00Z");
+      utimesSync(published.path, old, old);
+      // The published file moves aside, and a new file takes its old name.
+      renameSync(published.path, aside);
+      writeFileSync(published.path, "other", { mode: 0o600 });
       utimesSync(published.path, old, old);
       await runIn(
         layer,
         TalkRegistry.use((registry) => registry.refresh(published)),
       );
-      expect(statSync(published.path).mtimeMs).toBeGreaterThan(old.getTime() + 1000);
+      expect(statSync(aside).mtimeMs).toBeGreaterThan(old.getTime() + 1000);
+      expect(statSync(published.path).mtimeMs).toBe(old.getTime());
     } finally {
       await runIn(
         layer,
@@ -580,6 +589,57 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
       TalkRegistry.use((registry) => registry.publish(entryFor(folder))),
     );
     expect(error).toBeInstanceOf(TalkTrustError);
+  });
+
+  it("passes a folder trust failure of a read up, and gives None for a rejected file", async () => {
+    const published = await publish(entryFor(folder));
+    try {
+      chmodSync(published.path, 0o644);
+      const rejected = await runIn(
+        layer,
+        TalkRegistry.use((registry) => registry.read(published.fileName)),
+      );
+      expect(Option.isNone(rejected)).toBe(true);
+      chmodSync(folder, 0o755);
+      const error = await failIn(
+        layer,
+        TalkRegistry.use((registry) => registry.read(published.fileName)),
+      );
+      expect(error).toBeInstanceOf(TalkTrustError);
+      expect(error).toMatchObject({ path: folder, reason: expect.stringMatching(/0755/) });
+    } finally {
+      await runIn(
+        layer,
+        TalkRegistry.use((registry) => registry.release(published)),
+      );
+    }
+  });
+
+  it("refuses to publish an entry above the size limit and rejects a larger file without a read", async () => {
+    const big = entryFor(folder, { name: "n".repeat(MAX_SECRET_FILE_BYTES) });
+    const error = await failIn(
+      layer,
+      TalkRegistry.use((registry) => registry.publish(big)),
+    );
+    expect(error).toBeInstanceOf(TalkFileError);
+    expect(error).toMatchObject({ reason: expect.stringMatching(/limit of 65536 bytes/) });
+    expect(readdirSync(folder)).toEqual([]);
+    const fileName = entryFileName(INSTANCE, SESSION);
+    writeFileSync(join(folder, fileName), encodeEntry(big), { mode: 0o600 });
+    chmodSync(join(folder, fileName), 0o600);
+    const listing = await runIn(
+      layer,
+      TalkRegistry.use((registry) => registry.list),
+    );
+    expect(listing.entries).toEqual([]);
+    expect(listing.rejected).toEqual([
+      { fileName, reason: expect.stringMatching(/above the limit of 65536 bytes/) },
+    ]);
+    const read = await runIn(
+      layer,
+      TalkRegistry.use((registry) => registry.read(fileName)),
+    );
+    expect(Option.isNone(read)).toBe(true);
   });
 });
 
@@ -715,7 +775,62 @@ const windowsCases = (label: string, dpapi: Layer.Layer<TalkDpapi>) =>
         ),
       ).toBe(true);
     });
+
+    it("rejects a blob above the size limit without a read", async () => {
+      const fileName = entryFileName(INSTANCE, SESSION);
+      writeFileSync(join(folder, fileName), Buffer.alloc(MAX_SECRET_FILE_BYTES + 1, 7));
+      const listing = await runIn(
+        layer,
+        TalkRegistry.use((registry) => registry.list),
+      );
+      expect(listing.rejected).toEqual([
+        { fileName, reason: expect.stringMatching(/above the limit of 65536 bytes/) },
+      ]);
+    });
+
+    it("removes its temporary file when the rename fails", async () => {
+      const entry = tcpEntry();
+      // A folder at the entry name makes the rename fail.
+      mkdirSync(join(folder, entryFileName(INSTANCE, SESSION)));
+      writeFileSync(join(folder, "keep.txt"), "keep");
+      const error = await failIn(
+        layer,
+        TalkRegistry.use((registry) => registry.publish(entry)),
+      );
+      expect(error).toBeInstanceOf(TalkFileError);
+      expect(readdirSync(folder).sort()).toEqual([entryFileName(INSTANCE, SESSION), "keep.txt"]);
+    });
   });
+
+describe("Windows registry branch lookup failures (any system)", () => {
+  let base = "";
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "tr-"));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("passes a failed DPAPI batch of a read up instead of None", async () => {
+    const failing = Layer.succeed(
+      TalkDpapi,
+      TalkDpapi.of({
+        protect: (items) => Effect.succeed(items),
+        unprotect: () => Effect.fail(new TalkSealError({ reason: "DPAPI is not there" })),
+      }),
+    );
+    const layer = TalkRegistry.layerWindows(base).pipe(Layer.provide(failing));
+    const fileName = entryFileName(INSTANCE, SESSION);
+    writeFileSync(join(base, fileName), Buffer.from([1, 2, 3]));
+    const error = await failIn(
+      layer,
+      TalkRegistry.use((registry) => registry.read(fileName)),
+    );
+    expect(error).toBeInstanceOf(TalkSealError);
+  });
+});
 
 windowsCases("Windows registry branch (DPAPI stand-in, any system)", fakeDpapi);
 

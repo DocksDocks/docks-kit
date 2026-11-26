@@ -4,8 +4,11 @@
 // built bundle (argv[2]), runs the transport, and answers JSON lines on stdin:
 // `{ "id": n, "op": "...", ... }` -> `{ "id": n, "ok": true, "value": ... }` or
 // `{ "id": n, "ok": false, "tag": ..., "outcome": ..., "reason": ... }`.
-// It prints `{ "ready": true, ... }` once the transport runs. Request kinds:
-// `echo` answers its body, and `wait` never answers (for withdrawal tests).
+// It prints `{ "ready": true, ... }` once the transport runs.
+// Ops: register, withdraw, list, request, probe, status, umask (sets the
+// process umask), dispose (ends the transport, the process stays), exit.
+// Request kinds: `echo` answers its body, `wait` never answers, and `die`
+// fails with a defect.
 // Environment: `TALK_PEER_REPAIR_MS` sets the repair interval (default 1000).
 
 import { createInterface } from "node:readline";
@@ -37,6 +40,7 @@ interface Command {
   readonly kind?: string;
   readonly body?: Schema.Json;
   readonly timeoutMs?: number;
+  readonly mask?: number;
 }
 
 const run = <A, E>(effect: Effect.Effect<A, E, Talk.TalkTransport>): Promise<A> =>
@@ -49,30 +53,39 @@ const target = (command: Command): Talk.Target => {
 
 async function perform(command: Command): Promise<unknown> {
   switch (command.op) {
-    case "register":
+    case "register": {
+      const { sessionId } = command;
+      if (sessionId === undefined) throw new Error("register needs a sessionId");
       return run(
         TalkTransport.use((transport) =>
-          transport.register({
-            sessionId: command.sessionId ?? "",
-            name: command.name ?? "peer",
-            cwd: process.cwd(),
-          }),
+          transport.register({ sessionId, name: command.name ?? "peer", cwd: process.cwd() }),
         ),
       );
+    }
     case "withdraw":
-      return run(TalkTransport.use((transport) => transport.withdraw(command.sessionId ?? "")));
+      return run(TalkTransport.use((transport) => transport.withdraw(target(command))));
     case "list":
       return run(TalkTransport.use((transport) => transport.list));
     case "request":
       return run(
         TalkTransport.use((transport) =>
-          transport.request(target(command), command.kind ?? "echo", command.body ?? null, command.timeoutMs),
+          transport.request(
+            target(command),
+            command.kind ?? "echo",
+            command.body ?? null,
+            command.timeoutMs,
+          ),
         ),
       );
     case "probe":
       return run(TalkTransport.use((transport) => transport.probe(target(command))));
     case "status":
       return run(TalkTransport.use((transport) => transport.status));
+    case "umask":
+      return process.umask(command.mask ?? 0o022);
+    case "dispose":
+      await runtime.dispose();
+      return null;
     case "exit":
       await runtime.dispose();
       print({ id: command.id, ok: true, value: null });
@@ -88,16 +101,17 @@ const field = (error: unknown, name: string): unknown =>
 
 await run(
   TalkTransport.use((transport) =>
-    Effect.andThen(
+    Effect.all([
       transport.handle("echo", (body, context) =>
         Effect.succeed({ echo: body, by: context.registration.sessionId }),
       ),
       transport.handle("wait", () => Effect.never),
-    ),
+      transport.handle("die", () => Effect.die("the die kind fails on purpose")),
+    ]),
   ),
 );
 const status = await run(TalkTransport.use((transport) => transport.status));
-print({ ready: true, pid: process.pid, instanceId: status.instanceId, folder: status.folder });
+print({ ready: true, pid: process.pid, folder: status.folder });
 
 for await (const line of createInterface({ input: process.stdin })) {
   if (line.trim() === "") continue;

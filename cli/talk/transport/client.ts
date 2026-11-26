@@ -86,15 +86,19 @@ const sameEndpoint = (left: Endpoint, right: Endpoint): boolean =>
     : right.kind === "tcp" && left.port === right.port;
 
 /**
- * E6: a process id in use counts as alive, whatever process holds it. `EPERM`
- * means a process of another user holds it.
+ * E6: a process id in use counts as alive, whatever process holds it. Only
+ * `ESRCH` proves that no process holds it; every other error counts as alive.
+ * `kill` is a test seam.
  */
-export function processAlive(processId: number): boolean {
+export function processAlive(
+  processId: number,
+  kill: (processId: number, signal: number) => unknown = (pid, signal) => process.kill(pid, signal),
+): boolean {
   try {
-    process.kill(processId, 0);
+    kill(processId, 0);
     return true;
   } catch (error) {
-    return Predicate.hasProperty(error, "code") && error.code === "EPERM";
+    return !(Predicate.hasProperty(error, "code") && error.code === "ESRCH");
   }
 }
 
@@ -156,8 +160,15 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
   const kept = new Map<string, RegistryEntry>();
   let nextRequestId = 0;
 
+  // A lookup that fails (trust check, I/O, DPAPI) is no absence: it gives `unreachable` with the reason.
   const readEntry = (fileName: string) =>
-    registry.read(fileName).pipe(Effect.catch(() => Effect.succeedNone));
+    registry
+      .read(fileName)
+      .pipe(
+        Effect.mapError((error) =>
+          failed("unreachable", `the entry lookup failed: ${describeFailure(error)}`),
+        ),
+      );
 
   const converse = Effect.fnUntraced(function* (
     connection: Connection,
@@ -181,6 +192,8 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
       const authFailed: Exchange = { _tag: "AuthFailed" };
       return authFailed;
     }
+    // The listener proved the secret: the client reached this target and keeps its entry.
+    kept.set(targetKey(entry), entry);
     yield* connection.write({
       type: "proof",
       hmac: computeHmac(secret, { ...fields, role: "client" }),
@@ -247,7 +260,6 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     }
     switch (outcome._tag) {
       case "Result": {
-        kept.set(key, entry);
         const { result } = outcome;
         if (result.status === "ok") return result.body;
         if (result.status === "not-live") {
@@ -256,7 +268,6 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         return yield* failed("unknown-kind", `the target has no handler for the kind ${kind}`);
       }
       case "Ended":
-        kept.set(key, entry);
         return yield* failed("not-live", "the listener reported that the registration ended");
       case "AuthFailed":
         return yield* failed(
@@ -310,7 +321,6 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         const removed = yield* Effect.result(
           Effect.andThen(registry.remove(fileName), registry.removeSocket(entry.endpoint)),
         );
-        kept.delete(key);
         if (Result.isSuccess(removed)) pruned.push(fileName);
         else
           yield* Effect.logWarning(
@@ -318,7 +328,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
           );
         continue;
       }
-      // A listing replaces the kept entry; a kept entry that it omits stays.
+      // A listing replaces the kept entry; a kept entry that it omits, pruned ones too, stays.
       kept.set(key, entry);
       peers.push({
         instanceId: entry.instanceId,

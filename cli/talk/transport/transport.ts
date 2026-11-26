@@ -52,12 +52,13 @@ export class TalkTransport extends Context.Service<
   TalkTransport,
   {
     readonly folder: string;
-    /** The instance id of this process; each registration of the process has it. */
-    readonly instanceId: string;
-    /** Registers a session; the first registration opens the listener of the process. */
+    /**
+     * Registers a session under a new random instance id; the first registration opens the
+     * listener of the process.
+     */
     readonly register: (input: RegistrationInput) => Effect.Effect<Registration, TalkRegisterError>;
-    /** Ends a registration; its id and secret stay known until the process ends. */
-    readonly withdraw: (sessionId: string) => Effect.Effect<void>;
+    /** Ends a registration; its ids and secret stay known until the process ends. */
+    readonly withdraw: (registration: Target) => Effect.Effect<void>;
     /** Sets the handler of a request kind for every registration of the process. */
     readonly handle: (kind: string, handler: RequestHandler) => Effect.Effect<void>;
     /** Lists the registrations in the folder, prunes dead ones, and keeps the listed entries. */
@@ -94,7 +95,6 @@ const makeTransport = Effect.fnUntraced(function* (options: TalkTransportOptions
   });
   return TalkTransport.of({
     folder: registry.folder,
-    instanceId: listener.instanceId,
     register: listener.register,
     withdraw: listener.withdraw,
     handle: listener.handle,

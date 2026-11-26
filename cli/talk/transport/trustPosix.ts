@@ -36,6 +36,14 @@ const GROUP_OR_OTHER_WRITE = 0o022;
 const PERMISSION_BITS = 0o7777;
 const FOLDER_MODE = 0o700;
 const SECRET_FILE_MODE = 0o600;
+
+/** The largest secret file (registry entry) that talk writes or reads: 64 KiB. */
+export const MAX_SECRET_FILE_BYTES = 64 * 1024;
+
+/** The reason for a file above `MAX_SECRET_FILE_BYTES`. */
+export const sizeFault = (bytes: number): string =>
+  `the file has ${bytes} bytes, above the limit of ${MAX_SECRET_FILE_BYTES} bytes`;
+
 const ROOT_UID = 0;
 const ROOT_FOLDER = "/";
 
@@ -509,6 +517,9 @@ export const publishSecretFile = Effect.fn("publishSecretFile")(function* (write
       reason: "the temporary name is not in the folder of the final name",
     });
   }
+  if (bytes.byteLength > MAX_SECRET_FILE_BYTES) {
+    return yield* new TalkFileError({ path, reason: sizeFault(bytes.byteLength) });
+  }
   yield* checkRegistryFolder(folder);
   const flags = constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
   const fd = yield* fileCall(temporaryPath, "open", () =>
@@ -556,9 +567,8 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
     Effect.succeed(opened.value),
     (fd) =>
       Effect.gen(function* () {
-        const held = yield* fileCall(path, "fstat", () =>
-          entryStat(fstatSync(fd, { bigint: true })),
-        );
+        const stats = yield* fileCall(path, "fstat", () => fstatSync(fd, { bigint: true }));
+        const held = entryStat(stats);
         if (!isSameFile(held, expected)) {
           return yield* new TalkTrustError({
             path,
@@ -567,6 +577,10 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
         }
         const fault = secretFileFault(held, system.user);
         if (fault !== undefined) return yield* new TalkTrustError({ path, reason: fault });
+        // The size check comes before the read, so a large file is never read whole.
+        if (stats.size > BigInt(MAX_SECRET_FILE_BYTES)) {
+          return yield* new TalkTrustError({ path, reason: sizeFault(Number(stats.size)) });
+        }
         const bytes: Uint8Array = yield* fileCall(path, "read", () => readFileSync(fd));
         return Option.some(bytes);
       }),
@@ -604,10 +618,11 @@ export const keptSecretFileState = Effect.fn("keptSecretFileState")(function* (
 ) {
   const system = yield* TalkPosixSystem;
   const replaced: KeptFileState = "replaced";
-  const held = yield* fileCall(file.path, "fstat", () =>
-    entryStat(fstatSync(file.fd, { bigint: true })),
-  );
+  const stats = yield* fileCall(file.path, "fstat", () => fstatSync(file.fd, { bigint: true }));
+  const held = entryStat(stats);
   if (secretFileFault(held, system.user) !== undefined) return replaced;
+  // Another size means other bytes; the compare then reads nothing.
+  if (stats.size !== BigInt(bytes.byteLength)) return replaced;
   const named = system.view.lstat(file.path);
   if (named._tag === "Failed") {
     return yield* new TalkFileError({ path: file.path, reason: `lstat failed: ${named.reason}` });

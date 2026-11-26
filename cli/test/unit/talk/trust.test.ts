@@ -24,8 +24,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type FolderChoice,
   TALK_DIR_OVERRIDE,
+  TOOL_TIMEOUT_MS,
+  TalkToolError,
   registryFolderFor,
   resolveRegistryFolder,
+  runTool,
   windowsPowerShellPath,
 } from "../../../talk/transport/folder";
 import {
@@ -874,5 +877,21 @@ describe.skipIf(!WINDOWS)("Windows DPAPI (real)", () => {
     expect(Result.isFailure(opened[0]!)).toBe(true);
     const foreign = await live(unsealEntries([blob!], expectIds({ ...ids, instanceId: "cccc" })));
     expect(Result.isFailure(foreign[0]!) && foreign[0].failure).toBe("foreign ids");
+  });
+});
+
+describe("runTool deadline", () => {
+  it("names a 30 s default deadline", () => {
+    expect(TOOL_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it("kills a command that runs past its deadline and fails with a named reason", async () => {
+    const started = Date.now();
+    const error = await Effect.runPromise(
+      Effect.flip(runTool(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], "", 300)),
+    );
+    expect(error).toBeInstanceOf(TalkToolError);
+    expect(error.reason).toMatch(/did not end within 300 ms/);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });
