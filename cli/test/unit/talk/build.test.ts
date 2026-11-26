@@ -474,6 +474,14 @@ function blank(text: string): string {
   return " ".repeat(text.length);
 }
 
+// JavaScript white space and line terminators end a name.
+const separators: ReadonlyArray<readonly [string, string]> = [
+  ["U+00A0", "\u00a0"],
+  ["U+FEFF", "\ufeff"],
+  ["U+3000", "\u3000"],
+  ["U+2028", "\u2028"],
+];
+
 describe("talk build lexer", () => {
   it.each([
     ["string literals", `a("x'y", 'p"q', "e\\"s")`, `a("   ", '   ', "    ")`],
@@ -531,6 +539,10 @@ describe("talk build lexer", () => {
     ]);
   });
 
+  it.each(separators)("ends a name at %s", (_label, separator) => {
+    expect([...lexCode(`import${separator}(name)`).importCalls]).toEqual([[0, 12]]);
+  });
+
   it("finds require, __require, and import.meta.require calls but no other calls", () => {
     const code =
       'require("a");__require("b");import.meta.require("c");' +
@@ -557,6 +569,12 @@ describe("talk build loader calls", () => {
 
   it("reports an import whose ( is not closed", () => {
     expect(loaderCallProblems("import(a")).toHaveLength(1);
+  });
+
+  it.each(separators)("reports an import with %s before its (", (_label, separator) => {
+    expect(loaderCallProblems(`import${separator}(name)`)).toEqual([
+      `dynamic import without one string literal at offset 0: ${JSON.stringify(`import${separator}(name)`)}`,
+    ]);
   });
 
   it("reports require calls of a host module", () => {

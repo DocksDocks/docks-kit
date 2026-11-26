@@ -51,7 +51,8 @@ const COMMENT_END = "*/";
 // The host-import rules check the emitted code, so they also see an import
 // that a dependency adds. Bun reports the static forms. lexCode() finds the
 // loader calls by whole tokens, so text in a string, a comment, or a regular
-// expression, and a longer or member name, does not match them.
+// expression, and a member name, does not match them. `import` must be the
+// whole name. A bare name that ends in `require`, such as `__require`, is a loader.
 const HOST_PREFIX = "@oh-my-pi/";
 const DYNAMIC_IMPORT_KIND = "dynamic-import";
 // In lexCode() text, a string literal is two quotes with only spaces between them.
@@ -160,16 +161,29 @@ export function loaderCallProblems(code: string): ReadonlyArray<string> {
 }
 
 const SPACE_CHAR = /\s/;
-const WORD_CHAR = /[\w$\u0080-\uffff]/;
+// One identifier character. JavaScript white space and line terminators are not.
+const IDENTIFIER_CHAR = /[\p{ID_Continue}$\u200c\u200d]/uy;
 // Bun writes a non-ASCII identifier character as an escape such as `\u{3b1}`.
 const UNICODE_ESCAPE = /\\u(?:\{[0-9a-fA-F]+\}|[0-9a-fA-F]{4})/y;
 
 /** The length of the identifier part at `at`: one character, a `\uXXXX` or
  * `\u{...}` escape, or 0 when no identifier part starts there. */
 function identifierPartLength(code: string, at: number): number {
-  if (WORD_CHAR.test(code[at] ?? "")) return 1;
-  UNICODE_ESCAPE.lastIndex = at;
-  return UNICODE_ESCAPE.test(code) ? UNICODE_ESCAPE.lastIndex - at : 0;
+  // Only a backslash can start an escape.
+  const pattern = code[at] === "\\" ? UNICODE_ESCAPE : IDENTIFIER_CHAR;
+  pattern.lastIndex = at;
+  return pattern.test(code) ? pattern.lastIndex - at : 0;
+}
+
+/** The offset after the identifier parts that start at `at`. */
+function identifierEnd(code: string, at: number): number {
+  let end = at;
+  let part = identifierPartLength(code, end);
+  while (part > 0) {
+    end += part;
+    part = identifierPartLength(code, end);
+  }
+  return end;
 }
 
 /** After one of these words, a "/" starts a regular expression. */
@@ -227,7 +241,7 @@ const CONTROL_PAREN = -2;
  * `return`, or the `)` of `if (...)`, `for (...)`, `while (...)`, or
  * `with (...)`; otherwise it is a division. A word after "." or "?." and a
  * private name such as `#return` are member names, not keywords. A name with
- * escapes, such as `\u{3b1}import`, is one word. */
+ * escapes, such as `\u{3b1}import`, is one word, and white space ends a name. */
 export function lexCode(code: string): LexedCode {
   const parts: Array<string> = [];
   let copied = 0;
@@ -277,15 +291,13 @@ export function lexCode(code: string): LexedCode {
       continue;
     }
     // A private name `#name` is one member-name token, never a keyword or a loader.
-    const privateName = char === "#" && identifierPartLength(code, at + 1) > 0;
-    if (privateName || identifierPartLength(code, at) > 0) {
+    const nameAt = char === "#" ? at + 1 : at;
+    const part = identifierPartLength(code, nameAt);
+    if (part > 0) {
+      const privateName = nameAt !== at;
       const start = at;
-      at += privateName ? 1 : 0;
-      let part = identifierPartLength(code, at);
-      while (part > 0) {
-        at += part;
-        part = identifierPartLength(code, at);
-      }
+      // The first part is measured already.
+      at = identifierEnd(code, nameAt + part);
       const name = code.slice(start, at);
       if (propertyNext || privateName) {
         // A member name continues `import.meta.require`; any other ends the callee.
@@ -294,6 +306,8 @@ export function lexCode(code: string): LexedCode {
         else callee = "none";
         word = "";
       } else {
+        // `import` must be the whole name. A bare name that ends in `require`,
+        // such as `__require`, is a loader.
         if (name === "import") callee = "import";
         else if (name.endsWith("require")) callee = "require";
         else callee = "none";
@@ -353,8 +367,7 @@ export function lexCode(code: string): LexedCode {
         end += 1;
       }
       blank(at + 1, end);
-      at = end + 1;
-      while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
+      at = identifierEnd(code, end + 1);
       regexNext = false;
       continue;
     }
