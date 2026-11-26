@@ -370,14 +370,14 @@ omp has a built-in check for critical commands. For example, it flags:
 - an `rm` with an `r` or `f` option before an absolute path;
 - `sudo rm`, also when `sudo` is called by its path.
 
-omp 19.0.0 checks deny and prompt rules first, then its critical patterns, then
+omp 19.2.1 checks deny and prompt rules first, then its critical patterns, then
 allow rules. A critical command that no deny or prompt rule matches gets a bare
 safety override, which also replaces a matching allow. Under omp's default
 `tools.approvalMode: yolo`, omp ignores a bare override, so the command runs.
 This applies in subagents too. A prompt rule would ask a person in the main
 session, but a subagent rejects every prompt, so the kit ships none. Only a
 deny rule stops a critical command in every session (`BashTool.approval` in
-the v19.0.0 source).
+the v19.2.1 source).
 
 The kit therefore denies every `rm` shape that the check can flag:
 
@@ -506,7 +506,7 @@ stops the shell before `rm`. omp reports
 ## Sources
 
 - omp: `omp://tools/bash.md`, `omp://approval-mode.md`, and the
-  `@oh-my-pi/pi-coding-agent` 19.0.0 source `src/tools/bash.ts`
+  `@oh-my-pi/pi-coding-agent` 19.2.1 source `src/tools/bash.ts`
   (`CRITICAL_BASH_PATTERNS`, `BashTool.approval`). `omp://approval-mode.md`
   still describes the 18.17.0 order; the source is what runs.
 - GLib `gio trash`: https://github.com/GNOME/glib/blob/main/gio/gio-tool-trash.c

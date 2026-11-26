@@ -1049,7 +1049,8 @@ function parseList(value, option, allowed) {
 // The arms of --arms. A plan kind also takes the arm `V<name>` of each variant of `lists.variants`, and a code kind
 // the arms `S1<name>` and `S3<name>` of each self-review root of `lists.selfReviewRoots` (see armSpec). The bundled
 // arms (R1, V1) need the list of configurations of `agents --bundled` (`lists.bundled`), and that list takes only the
-// bundled arms, because its project holds only the bundled agents.
+// bundled arms, because its project holds only the bundled agents. Its bundled agents must be those of
+// BUNDLED_OMP_VERSION: score.mjs refuses a run of another omp release (see bundledOmp), so its prompts would be wasted.
 function parseArms(value, kind, lists) {
   if (!value) fail('case needs --arms, for example --arms B0,C3');
   const arms = parseList(value, '--arms');
@@ -1066,6 +1067,11 @@ function parseArms(value, kind, lists) {
     if (spec.side === BUNDLED && !lists.bundled) {
       fail(
         `arm ${arm} runs a bundled agent, and ${lists.file} holds no bundled configurations; run prepare.mjs agents --bundled with a --project of its own, and give case that --project`,
+      );
+    }
+    if (spec.side === BUNDLED && lists.bundled.ompVersion !== BUNDLED_OMP_VERSION) {
+      fail(
+        `arm ${arm} runs a bundled agent of omp ${String(lists.bundled.ompVersion)} (${lists.file}), but this checkout vendors the bundled agents of omp ${BUNDLED_OMP_VERSION}; run prepare.mjs agents --bundled in that project again`,
       );
     }
     if (spec.side !== BUNDLED && lists.bundled) {

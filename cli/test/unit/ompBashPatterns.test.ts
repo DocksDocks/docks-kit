@@ -3,7 +3,7 @@
  * approval path in `../lib/ompBashPatterns`: pattern selection, the critical
  * command check, and the kit's `tools.approvalMode: yolo`. Under yolo, a command
  * no rule matches runs, a critical command that no rule matches runs too, and
- * a prompt rule asks, also on a critical command (omp 19.0.0 order). omp
+ * a prompt rule asks, also on a critical command (omp 19.2.1 order). omp
  * rejects a prompt in a subagent, because a subagent has no interactive UI.
  */
 import { readFileSync } from "node:fs";
@@ -359,7 +359,7 @@ describe("omp bash.patterns policy under yolo", () => {
     expect(critical.filter((command) => ompApproval(KIT_RULES, command) !== "deny")).toEqual([]);
   });
 
-  it("models the 19.0.0 order: a prompt rule on a critical command forces a prompt", () => {
+  it("models the 19.2.1 order: a prompt rule on a critical command forces a prompt", () => {
     const promptOnly: Array<OmpBashRule> = [{ match: "rm *", approval: "prompt" }];
     expect(ompYoloOutcome(promptOnly, "rm -rf /home/docks/projects/cache")).toBe("prompt");
     expect(ompYoloOutcome(promptOnly, "rm -rf build")).toBe("prompt");
@@ -385,6 +385,31 @@ describe("omp bash.patterns policy under yolo", () => {
     expect(ompApproval([{ match: "git status", approval: "allow" }], "FOO=1 git status")).toBe(
       undefined,
     );
+  });
+
+  // omp 19.2.1 `bashApprovalRuleMatches`: an allow rule vouches for a command
+  // with leading assignments only when the rule itself starts with one, because
+  // the kit sets no `bash.allowedEnvVars` and no per-rule `env` list that omp
+  // could strip first. omp trims the rule text when it loads the rule.
+  it("keeps a broad allow rule from a command with leading assignments", () => {
+    expect(
+      ompApproval([{ match: "* git status", approval: "allow" }], "MODE=demo git status"),
+    ).toBe(undefined);
+    expect(
+      ompApproval([{ match: "MODE=* git status", approval: "allow" }], "MODE=demo git status"),
+    ).toBe("allow");
+    expect(
+      ompApproval([{ match: "  MODE=* git status", approval: "allow" }], "MODE=demo git status"),
+    ).toBe("allow");
+  });
+
+  // omp 19.2.1 `BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE`: a short-option group
+  // such as `-la` ends at a space, so a later word that ends in `c` or `e` does
+  // not read as `-c` or `-e`.
+  it("reads a short-option group as one word in the reinterpreted-argument check", () => {
+    const rules: Array<OmpBashRule> = [{ match: "grep *", approval: "allow" }];
+    expect(ompApproval(rules, "grep -la spec 'a;b'")).toBe("allow");
+    expect(ompApproval([{ match: "sh *", approval: "allow" }], "sh -c 'a;b'")).toBe(undefined);
   });
 
   // A subagent rejects every prompt, so the kit ships none. First match wins,

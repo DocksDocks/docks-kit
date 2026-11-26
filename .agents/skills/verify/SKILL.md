@@ -16,7 +16,7 @@ Hosts: the commands below are POSIX shell for Linux and macOS. On Windows, run `
 | Need | Check command | Expected result |
 |---|---|---|
 | Bun at the CI pin | `bun --version` | `1.4.5` |
-| omp at the toolchain floor | `omp --version` | `omp/19.0.0` |
+| omp at the toolchain floor | `omp --version` | `omp/19.2.1` |
 | Dependencies installed | `test -d node_modules && echo present` (PowerShell: `if (Test-Path node_modules) { 'present' }`) | `present` |
 | docks-kit on PATH (V6 scratch folder) | `docks-kit --version` | One version line |
 
@@ -29,7 +29,7 @@ Hosts: the commands below are POSIX shell for Linux and macOS. On Windows, run `
 | V3 | Dry-run goldens through the engine and the public CLI | `bun run golden:dryrun` | A line `golden-dryrun: OK (<n> case(s))` and exit 0 |
 | V4 | Removed sync target and flag | `./docks-kit sync omp --dry-run; echo "exit $?"; ./docks-kit sync --dry-run --prune; echo "exit $?"` | First the sync help on stdout, then `ERROR` and `Unexpected positional argument: "omp"` on stderr, and `exit 1`. Then `unknown flag --prune for 'sync'` and `exit 2`. Observed 2026-11-19 on Linux x64: exactly these lines |
 | V5 | Trigger rules on a large tool call, in the real omp | `bun .agents/skills/verify/scripts/ttsr-snippet.ts big-reset \| omp ttsr test --rule SoT/.omp/plugin/rules/git-safety.md --source tool --tool eval --file -`, then the same command with `big-quiet` | For `big-reset`, `Triggered (1)` and a `git-safety` line within a few seconds. For `big-quiet`, `No rules triggered. (evaluated 1)`. The `big-reset` snippet is a 21 KB eval cell with many `\"` escapes that ends with `sh("git reset --hard HEAD")`. The rules of 0.22.29 stayed quiet on it after 4.7 s: JavaScriptCore stopped at its match limit and reported no match, so the rule failed open |
-| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 20 `ok` lines of the V6 section below and `exit 0`. Observed 2026-11-23 on Linux x64 with omp 19.1.1: exactly these lines; the load mode took 2 s and the `hooks` mode 4 s |
+| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 20 `ok` lines of the V6 section below and `exit 0`. Observed 2026-11-26 on Linux x64 with omp 19.2.1: exactly these lines; the load mode took 1 s and the `hooks` mode 4 s |
 
 ## V6 — Kit plugin smoke in an isolated omp state
 

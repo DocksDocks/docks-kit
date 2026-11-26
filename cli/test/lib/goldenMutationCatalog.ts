@@ -24,7 +24,7 @@ export const MATRIX: Array<MutationMatrixCase> = [
     cmd: ["sync"],
     stubs: {
       omp: `if (args[0] === "--version") {
-  console.log("omp/19.0.0")
+  console.log("omp/19.2.1")
 } else if (args[0] === "plugin" && args[1] === "list") {
   console.log('{"npm":[],"marketplace":[]}')
 } else {

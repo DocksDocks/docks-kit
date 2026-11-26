@@ -454,8 +454,8 @@ export function unwrapBlock(text) {
 // agents reply in structured mode: `transcripts` folds their `yield` results into one object and writes the object as
 // the block (see structuredReply). omp compiles the agents into its binary, so BUNDLED_DIR holds the copies of their
 // source files of the omp release BUNDLED_OMP_VERSION (see BUNDLED_DIR/SOURCE.md), one file `<reviewer>.md` per agent.
-// After a raise of the omp pin, add the folder of the new release and change this version.
-export const BUNDLED_OMP_VERSION = '19.1.1';
+// After a raise of the omp pin, replace the folder with the one of the new release and change this version.
+export const BUNDLED_OMP_VERSION = '19.2.1';
 export const BUNDLED_DIR = path.join(BENCHMARK_DIR, 'bundled', `omp-${BUNDLED_OMP_VERSION}`);
 const BUNDLED_REVIEWERS = new Set(['reviewer', 'security-reviewer']);
 const isBundledReviewer = (reviewer) => BUNDLED_REVIEWERS.has(reviewer);
