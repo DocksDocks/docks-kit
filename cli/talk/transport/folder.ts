@@ -105,11 +105,14 @@ export interface ToolResult {
 /** The deadline of one system command; past it, the command is killed and fails. */
 export const TOOL_TIMEOUT_MS = 30_000;
 
-/** The text of a thrown value; a value that cannot form text gives a fixed note instead of a throw. */
+/**
+ * The text of a thrown value. The type check, the `message` read, and the text
+ * conversion can each throw (a throwing getter, a revoked proxy), so a value
+ * that cannot form text gives a fixed note instead of a throw.
+ */
 function thrownText(value: unknown): string {
-  if (value instanceof Error) return value.message;
   try {
-    return String(value);
+    return value instanceof Error ? String(value.message) : String(value);
   } catch {
     return "a value that has no text form";
   }

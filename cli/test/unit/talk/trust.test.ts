@@ -930,6 +930,25 @@ describe("runTool deadline", () => {
       () => Object.create(null) as unknown,
       /spawn observer failed: a value that has no text form/,
     ],
+    [
+      "an Error whose message getter throws",
+      () =>
+        Object.defineProperty(new Error("hidden"), "message", {
+          get: () => {
+            throw new Error("the getter broke");
+          },
+        }) as unknown,
+      /spawn observer failed: a value that has no text form/,
+    ],
+    [
+      "a revoked proxy",
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy as unknown;
+      },
+      /spawn observer failed: a value that has no text form/,
+    ],
   ] as const)(
     "ends the child and fails with a named reason when the spawn observer throws %s",
     async (_label, thrown, reason) => {
