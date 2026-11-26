@@ -22,11 +22,12 @@ function frozenPlan({ createPlan, updateIssue }: PlanCliContext): number {
 describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
   // The event history keeps step state frozen even if phase labels are reset. One case per step field keeps the
   // spawns of each case near one plan (see spawnTimeout.ts).
-  it.each([
+  const frozenFields: Array<[name: string, before: string, after: string]> = [
     ["Status", "| planned |", "| done |"],
     ["Id", "| fix_parser |", "| renamed |"],
     ["Depends", "| - |", "| 2 |"],
-  ] as Array<[string, string, string]>)(
+  ];
+  it.each(frozenFields)(
     "history freezes the step %s once work starts",
     (name, before, after) => {
       const context = planCliContext();
@@ -81,10 +82,9 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
   );
 
   it(
-    "status refuses transitions that erase started work",
+    "status lets drafting enter ongoing and refuses ongoing back to planned",
     () => {
-      const context = planCliContext();
-      const { run, issue, createPlan } = context;
+      const { run, issue, createPlan } = planCliContext();
       // Labels cannot erase started work, but drafting can enter implementation.
       const transitions = createPlan("status transitions");
       expectSuccess(run("status", String(transitions), "ongoing"), "drafting to ongoing");
@@ -93,8 +93,16 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan status", () => {
         run("status", String(transitions), "planned"),
         "illegal plan status transition: ongoing -> planned",
       );
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "status refuses drafting to planned once the history shows started work",
+    () => {
+      const context = planCliContext();
       refuse(
-        run("status", String(frozenPlan(context)), "planned"),
+        context.run("status", String(frozenPlan(context)), "planned"),
         "illegal plan status transition: drafting -> planned",
       );
     },

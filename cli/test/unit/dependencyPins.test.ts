@@ -143,7 +143,9 @@ function installedPackage(name: string, parent: string | undefined): Installed |
  * links would otherwise read as nested copies. A scoped name can begin with a
  * dot, so entries inside a scope folder are all kept. A symbolic link is
  * listed but never descended into, because a workspace link points back into
- * the tree and would make the walk cycle.
+ * the tree and would make the walk cycle. So the walk proves a hoisted
+ * install, the layout of CI and of a published install; in an isolated
+ * install it sees only the top-level links, not the copies in the store.
  */
 function installedPackages(): Array<string> {
   const labels: Array<string> = [];
@@ -344,6 +346,7 @@ describe("root dependency pins", () => {
     expect(unpinnedPrereleaseTransitives(withPin, alternationRange)).toEqual([]);
   });
 
+  // The nested-copy walk proves a hoisted install, as CI and a published install have (see installedPackages).
   it("installs every root dependency at its pinned version with no nested copy at any depth", () => {
     const parents = installedPackages();
     const shadows: Array<string> = [];
@@ -370,7 +373,8 @@ describe("root dependency pins", () => {
    * declarations are exact, so the range scan sees nothing float. The pin
    * checks above skip the package as well, because it is no root dependency.
    * Only the installed closure shows the split, so this walk compares the
-   * version of every installed copy at every depth.
+   * version of every installed copy at every depth of a hoisted install (see
+   * installedPackages).
    */
   it("installs no package at two distinct versions when either carries a prerelease tail", () => {
     const copies = new Map<string, Map<string, string>>();

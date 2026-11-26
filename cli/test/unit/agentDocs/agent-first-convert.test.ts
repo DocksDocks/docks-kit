@@ -194,8 +194,8 @@ describe.skipIf(!AGENT_DOCS_HOST_SUPPORTED)(
 
     // omp parses the frontmatter as YAML and skips an agent whose name or description is no string. A YAML 1.2
     // core-schema reader reads each value as a boolean, a number, a flow collection, an alias, a block sequence, a block
-    // mapping, or a reserved indicator, not as a string. One case per value keeps each case to one spawn (see
-    // spawnTimeout.ts).
+    // mapping, or a reserved indicator, not as a string. One case per value keeps each case to one fixture and one
+    // converter run (see spawnTimeout.ts).
     it.each(["true", "TRUE", "False", "123", "0x1f", "1e5", "[rev]", "{a: b}"])(
       "refuses a name that is no YAML string: %s",
       (value) => {

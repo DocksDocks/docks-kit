@@ -155,7 +155,7 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan budgets", () => {
   };
   const twoPaths = (status: string): string =>
     body(status).replace("| src/parser.mjs |", "| src/parser.mjs, src/lexer.mjs |");
-  it.each([
+  const advisedEdits: Array<[name: string, change: (text: string) => string]> = [
     [
       "an added row",
       (text: string): string =>
@@ -178,7 +178,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan budgets", () => {
       (text: string): string =>
         text.replace("| Records round-trip |", "| Records and dates round-trip |"),
     ],
-  ] as Array<[string, (text: string) => string]>)(
+  ];
+  it.each(advisedEdits)(
     "an edit of a started v5 plan advises a child plan for new rows, new paths, and changed Task or Done when: %s",
     (name, change) => {
       const context = planCliContext();
@@ -188,7 +189,9 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan budgets", () => {
     SPAWN_TIMEOUT_MS,
   );
 
-  it.each([
+  const quietEdits: Array<
+    [name: string, start: (status: string) => string, change: (text: string) => string]
+  > = [
     ["an evidence edit", body, (text: string): string => text.replace("Not run.", "Smoke passed.")],
     [
       "a removed Files path",
@@ -196,7 +199,8 @@ describe.skipIf(!PLAN_CLI_HOST_SUPPORTED)("plan budgets", () => {
       (text: string): string => text.replace("src/parser.mjs, src/lexer.mjs", "src/parser.mjs"),
     ],
     ["a no-op edit", body, (text: string): string => text],
-  ] as Array<[string, (status: string) => string, (text: string) => string]>)(
+  ];
+  it.each(quietEdits)(
     "an edit of a started v5 plan gives no scope advice for %s",
     (name, start, change) => {
       const context = planCliContext();

@@ -1,10 +1,11 @@
 /**
  * Per-case timeout ceilings for the unit suite.
  *
- * Several suites spawn the public CLI as a child, and every spawn pays a cold
- * Bun transpile of the whole CLI tree because the launcher falls through to
- * source. That cost is about one second warm on a developer machine, so the
- * ceilings exist for runner variance rather than for the work itself.
+ * Several suites spawn the public CLI as a child. They launch a prebuilt
+ * bundle of the CLI entry (`cliEntry.ts`), or the TypeScript entry when
+ * `DOCKS_KIT_TEST_CLI_ENTRY` names it; a launch takes well under a second warm
+ * on a developer machine, so the ceilings exist for runner variance rather
+ * than for the work itself.
  *
  * The Windows values are higher because `windows-2025` runner throughput
  * varies by a factor of two to six. Two attempts of the same parity run
@@ -25,10 +26,12 @@
  * that `vitest.config.ts` gives the review-benchmark project for the same
  * reason.
  *
- * A ceiling is the deadline of a case: a case that runs past it still fails,
- * and the larger ceilings only make that report come later. It does not stop
- * a child that never exits; a child process needs its own timeout for that.
- * `ompTriggerBackstop.test.ts` derives its deadlines from the spawn ceiling.
+ * A ceiling is the deadline of a case: a case that runs past it fails. Vitest
+ * checks the deadline of a synchronous case only after its body returns, so a
+ * larger ceiling can leave the time of that report unchanged or move it later.
+ * A ceiling does not stop a child that never exits; a child process needs its
+ * own timeout for that. `ompTriggerBackstop.test.ts` derives its deadlines
+ * from the spawn ceiling.
  *
  * A ceiling covers one fixture. A case that loops over a list of independent
  * fixtures adds the time of every fixture to one case, so under load such a
