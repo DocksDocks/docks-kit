@@ -2,10 +2,11 @@
  * Per-case timeout ceilings for the unit suite.
  *
  * Several suites spawn the public CLI as a child. They launch a prebuilt
- * bundle of the CLI entry (`cliEntry.ts`), or the TypeScript entry when
- * `DOCKS_KIT_TEST_CLI_ENTRY` names it; a launch takes well under a second warm
- * on a developer machine, so the ceilings exist for runner variance rather
- * than for the work itself.
+ * bundle of `cli/src/main.ts`, or `cli/src/main.ts` itself when
+ * `DOCKS_KIT_TEST_CLI_ENTRY` names it; the helper `cliEntry.ts` builds the
+ * bundle and picks the entry. A launch takes well under a second warm on a
+ * developer machine, so the ceilings exist for runner variance rather than for
+ * the work itself.
  *
  * The Windows values are higher because `windows-2025` runner throughput
  * varies by a factor of two to six. Two attempts of the same parity run
