@@ -410,11 +410,16 @@ export function lexCode(code: string): LexedCode {
 /** The package that holds a metafile input path, or undefined for source outside node_modules.
  * It is the package after the last `node_modules` component that has a package root
  * (`<name>` or `@scope/<name>`) and a file path below that root. */
-export function packageOfInput(input: string, cwd: string): ContributingPackage | undefined {
+export function packageOfInput(
+  input: string,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform,
+): ContributingPackage | undefined {
   const all = input.replaceAll("\\", "/").split("/");
   // On Windows, Bun can write an input on another drive with the drive inside
   // the path, such as `../../C:/Users/...`; the path then starts at that drive.
-  let driveAt = all.length - 1;
+  // On POSIX, `C:` is an ordinary folder name.
+  let driveAt = platform === "win32" ? all.length - 1 : -1;
   while (driveAt >= 0 && !WINDOWS_DRIVE.test(all[driveAt] ?? "")) driveAt -= 1;
   const parts = driveAt < 0 ? all : all.slice(driveAt);
   for (let at = parts.length - 1; at >= 0; at -= 1) {

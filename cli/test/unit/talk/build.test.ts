@@ -225,7 +225,12 @@ describe("talk build package of a metafile input", () => {
       "node_modules/outer/node_modules/inner",
     ],
     ["node_modules/outer/lib/node_modules", "outer", "node_modules/outer"],
-    // An input on another Windows drive keeps that drive inside the path.
+  ])("finds the package of %s", (input, name, dir) => {
+    expect(packageOfInput(input, cwd)).toEqual({ name, dir: resolve(cwd, dir) });
+  });
+
+  // An input on another Windows drive keeps that drive inside the path.
+  it.each([
     [
       "../../../C:/Users/u/Temp/p/node_modules/alpha-pkg/index.js",
       "alpha-pkg",
@@ -237,8 +242,15 @@ describe("talk build package of a metafile input", () => {
       "C:/Users/u/node_modules/outer/node_modules/inner",
     ],
     ["/C:/p/node_modules/outer/index.js", "outer", "C:/p/node_modules/outer"],
-  ])("finds the package of %s", (input, name, dir) => {
-    expect(packageOfInput(input, cwd)).toEqual({ name, dir: resolve(cwd, dir) });
+  ])("on Windows, starts %s again at its drive", (input, name, dir) => {
+    expect(packageOfInput(input, cwd, "win32")).toEqual({ name, dir: resolve(cwd, dir) });
+  });
+
+  it("on POSIX, keeps a folder named C: in the path", () => {
+    expect(packageOfInput("/C:/p/node_modules/outer/index.js", cwd, "linux")).toEqual({
+      name: "outer",
+      dir: resolve(cwd, "/C:/p/node_modules/outer"),
+    });
   });
 
   it.each(["cli/talk/index.ts", "node_modules/outer", "node_modules/@s/inner"])(
