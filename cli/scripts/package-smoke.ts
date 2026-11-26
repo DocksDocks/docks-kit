@@ -260,10 +260,10 @@ function assertNoNestedDuplicates(consumerDir: string, pins: ReadonlyArray<Pin>)
 function assertTarballContents(tarball: string): void {
   const list = spawnSync("tar", ["-tzf", tarball], { encoding: "utf8", env: CHILD_ENV });
   requireSuccess("tar -tzf", list);
-  // A tar that lists directories ends their entries with "/"; only files count.
-  const entries = list.stdout
-    .split("\n")
-    .filter((entry) => entry.length > 0 && !entry.endsWith("/"));
+  const members = list.stdout.split("\n").filter((entry) => entry.length > 0);
+  // A tar that lists directories ends their entries with "/"; only files count,
+  // but a cli/talk/ directory entry is also unwanted.
+  const entries = members.filter((entry) => !entry.endsWith("/"));
   if (!entries.includes(PACKED_BUNDLE)) {
     fail(
       `assertion "the tarball ships the bundle" failed: observed no ${PACKED_BUNDLE} among ${entries.length} entries. ` +
@@ -275,7 +275,7 @@ function assertTarballContents(tarball: string): void {
   );
   const strays = entries.filter((entry) => PACKED_STRAY_OUTPUT.test(entry));
   const maps = entries.filter((entry) => entry.endsWith(".map"));
-  const talk = entries.filter((entry) => entry.startsWith(PACKED_TALK_PREFIX));
+  const talk = members.filter((entry) => entry.startsWith(PACKED_TALK_PREFIX));
   const unwanted = [...new Set([...extraDist, ...strays, ...maps, ...talk])];
   if (unwanted.length > 0) {
     fail(

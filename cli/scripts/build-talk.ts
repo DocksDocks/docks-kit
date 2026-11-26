@@ -6,8 +6,18 @@
 // one string literal. The file starts with a generated-file header and a
 // banner with the complete license text of each source that it holds code of.
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const REPO_DIR = resolve(import.meta.dirname, "..", "..");
@@ -32,8 +42,9 @@ const FIRST_PACKAGE = "effect";
 /** The license file names of a package, in lookup order. */
 const LICENSE_FILES: ReadonlyArray<string> = ["LICENSE", "LICENSE.md", "LICENSE.txt"];
 
-/** The last `node_modules/<name>` or `node_modules/@scope/<name>` of a path. */
-const PACKAGE_IN_PATH = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//g;
+/** The path component that holds packages. */
+const NODE_MODULES = "node_modules";
+const SCOPE_PREFIX = "@";
 
 const COMMENT_END = "*/";
 
@@ -124,13 +135,24 @@ export function hostImportProblems(code: string): ReadonlyArray<string> {
   return problems;
 }
 
-/** The package that holds a metafile input path, or undefined for source outside node_modules. */
+/** The package that holds a metafile input path, or undefined for source outside node_modules.
+ * It is the package after the last `node_modules` component that has a package root
+ * (`<name>` or `@scope/<name>`) and a file path below that root. */
 export function packageOfInput(input: string, cwd: string): ContributingPackage | undefined {
-  const path = input.replaceAll("\\", "/");
-  const last = [...path.matchAll(PACKAGE_IN_PATH)].at(-1);
-  if (last?.[1] === undefined) return undefined;
-  const name = last[1];
-  return { name, dir: resolve(cwd, path.slice(0, last.index + last[0].length)) };
+  const parts = input.replaceAll("\\", "/").split("/");
+  for (let at = parts.length - 1; at >= 0; at -= 1) {
+    if (parts[at] !== NODE_MODULES) continue;
+    const first = parts[at + 1] ?? "";
+    const rootEnd = at + (first.startsWith(SCOPE_PREFIX) ? 3 : 2);
+    const nameParts = parts.slice(at + 1, rootEnd);
+    // A package root needs its full name and a file below it.
+    if (rootEnd >= parts.length || nameParts.some((part) => part.length === 0)) continue;
+    return {
+      name: nameParts.join("/"),
+      dir: resolve(cwd, parts.slice(0, rootEnd).join("/")),
+    };
+  }
+  return undefined;
 }
 
 /** The packages of the inputs that add bytes to the output: Effect first, then by name. */
@@ -223,8 +245,27 @@ export async function buildTalk({
   const bundle = `${GENERATED_HEADER}\n${banner}${code}`;
   mkdirSync(outDir, { recursive: true });
   const path = join(outDir, TALK_FILE);
-  writeFileSync(path, bundle);
+  writeReplacing(path, bundle);
   return { path, bytes: Buffer.byteLength(bundle) };
+}
+
+/** Write `content` to a new file in the folder of `path`, then rename it over
+ * `path`. The rename replaces a link at `path` and does not follow it. */
+function writeReplacing(path: string, content: string): void {
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  // "wx" fails when the name exists, so this run created the file that it removes.
+  const fd = openSync(temporary, "wx");
+  try {
+    try {
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 const USAGE = "usage: bun cli/scripts/build-talk.ts --out <dir> [--entry <file>]";

@@ -1,17 +1,19 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GENERATED_HEADER } from "../../../scripts/build-talk";
+import { GENERATED_HEADER, packageOfInput } from "../../../scripts/build-talk";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
 
@@ -36,15 +38,17 @@ function runBuild(args: ReadonlyArray<string>): SpawnSyncReturns<string> {
   return spawnSync(BUN_RUNTIME, [BUILD_SCRIPT, ...args], { cwd: REPO_DIR, encoding: "utf8" });
 }
 
-/** A temporary project: one entry file and packages under its node_modules. */
+/** A temporary project: one entry file and packages under its node_modules. A
+ * package key is its folder under node_modules, such as `outer/node_modules/inner`. */
 function tempProject(
   label: string,
   entry: string,
   packages: Readonly<Record<string, { readonly code: string; readonly license?: string }>>,
 ): string {
   const dir = tempDir(label);
-  for (const [name, { code, license }] of Object.entries(packages)) {
-    const packageDir = join(dir, "node_modules", name);
+  for (const [folder, { code, license }] of Object.entries(packages)) {
+    const packageDir = join(dir, "node_modules", folder);
+    const name = folder.split("/node_modules/").at(-1);
     mkdirSync(packageDir, { recursive: true });
     writeFileSync(
       join(packageDir, "package.json"),
@@ -123,9 +127,12 @@ describe("talk build license banner", () => {
         },
       },
     );
+    // On Windows, "junction" makes a directory junction, which needs no
+    // symbolic-link privilege. Other systems ignore the type.
     symlinkSync(
       join(REPO_DIR, "node_modules", "effect"),
       join(entry, "..", "node_modules", "effect"),
+      "junction",
     );
     const outDir = tempDir("order-out");
     const result = runBuild(["--entry", entry, "--out", outDir]);
@@ -151,6 +158,106 @@ describe("talk build license banner", () => {
     expect(result.stderr).toContain("MissingLicenseError");
     expect(result.stderr).toContain("no-license-pkg");
     expect(existsSync(join(outDir, "talk.js"))).toBe(false);
+  });
+
+  const nestedEntry = 'import { outer } from "outer";\nexport const out = outer();\n';
+  const outerCode =
+    'import { inner } from "inner";\nexport const outer = () => "outer-" + inner() + Math.random();\n';
+  const innerCode = 'export const inner = () => "inner-" + Math.random();\n';
+  const outerLicense = "Outer license text.\nCopyright outer.\n";
+
+  it("holds the license of a nested package that adds code", () => {
+    const innerLicense = "Inner license text.\nCopyright inner.\n";
+    const entry = tempProject("nested", nestedEntry, {
+      outer: { code: outerCode, license: outerLicense },
+      "outer/node_modules/inner": { code: innerCode, license: innerLicense },
+    });
+    const outDir = tempDir("nested-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const bundle = readFileSync(join(outDir, "talk.js"), "utf8");
+    expect(bundle).toContain(`== inner ==\n\n${innerLicense}`);
+    expect(bundle).toContain(`== outer ==\n\n${outerLicense}`);
+  });
+
+  it("fails and names a nested package without a license file", () => {
+    const entry = tempProject("nested-nolicense", nestedEntry, {
+      outer: { code: outerCode, license: outerLicense },
+      "outer/node_modules/inner": { code: innerCode },
+    });
+    const outDir = tempDir("nested-nolicense-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("MissingLicenseError: package inner ");
+    expect(existsSync(join(outDir, "talk.js"))).toBe(false);
+  });
+});
+
+describe("talk build package of a metafile input", () => {
+  const cwd = resolve("/project");
+
+  it.each([
+    ["node_modules/outer/index.js", "outer", "node_modules/outer"],
+    [
+      "node_modules/outer/node_modules/inner/index.js",
+      "inner",
+      "node_modules/outer/node_modules/inner",
+    ],
+    [
+      "node_modules/outer/node_modules/@s/inner/x.js",
+      "@s/inner",
+      "node_modules/outer/node_modules/@s/inner",
+    ],
+    [
+      "node_modules/@s/outer/node_modules/inner/lib/x.js",
+      "inner",
+      "node_modules/@s/outer/node_modules/inner",
+    ],
+    [
+      "node_modules\\outer\\node_modules\\inner\\index.js",
+      "inner",
+      "node_modules/outer/node_modules/inner",
+    ],
+    ["node_modules/outer/lib/node_modules", "outer", "node_modules/outer"],
+  ])("finds the package of %s", (input, name, dir) => {
+    expect(packageOfInput(input, cwd)).toEqual({ name, dir: resolve(cwd, dir) });
+  });
+
+  it.each(["cli/talk/index.ts", "node_modules/outer", "node_modules/@s/inner"])(
+    "finds no package for %s",
+    (input) => {
+      expect(packageOfInput(input, cwd)).toBeUndefined();
+    },
+  );
+});
+
+describe("talk build output file", () => {
+  // A symbolic link to a file needs a privilege on Windows.
+  it.skipIf(process.platform === "win32")(
+    "replaces a talk.js link and leaves the file it points to unchanged",
+    () => {
+      const outDir = tempDir("link-out");
+      const other = join(outDir, "other.txt");
+      writeFileSync(other, "other\n");
+      symlinkSync(other, join(outDir, "talk.js"));
+      const result = runBuild(["--entry", FIXTURE_ENTRY, "--out", outDir]);
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(readFileSync(other, "utf8")).toBe("other\n");
+      expect(lstatSync(join(outDir, "talk.js")).isFile()).toBe(true);
+      expect(readFileSync(join(outDir, "talk.js"), "utf8")).toContain(HOST_LITERAL);
+      expect(readdirSync(outDir).sort()).toEqual(["other.txt", "talk.js"]);
+    },
+  );
+
+  it("removes its temporary file when it cannot replace talk.js", () => {
+    const outDir = tempDir("blocked-out");
+    mkdirSync(join(outDir, "talk.js", "inside"), { recursive: true });
+    const result = runBuild(["--entry", FIXTURE_ENTRY, "--out", outDir]);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("talk.js");
+    expect(readdirSync(outDir)).toEqual(["talk.js"]);
   });
 });
 
