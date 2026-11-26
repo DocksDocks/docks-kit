@@ -13,7 +13,12 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { codeOnly, GENERATED_HEADER, packageOfInput } from "../../../scripts/build-talk";
+import {
+  GENERATED_HEADER,
+  lexCode,
+  loaderCallProblems,
+  packageOfInput,
+} from "../../../scripts/build-talk";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
 
@@ -336,6 +341,35 @@ describe("talk build host imports", () => {
     expect(bundle).toContain('labels?.require("@oh-my-pi/b")');
   });
 
+  it("accepts calls of private methods named #import and #require", () => {
+    const entry = tempProject(
+      "private-methods",
+      [
+        "export class Loader {",
+        "  #import(name) {",
+        '    return "load " + name + Math.random();',
+        "  }",
+        "  #require(x) {",
+        '    return "need " + x + Math.random();',
+        "  }",
+        "  run(n) {",
+        '    return [this.#import(n), this.#require("@oh-my-pi/a")];',
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      {},
+    );
+    const outDir = tempDir("private-methods-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const bundle = readFileSync(join(outDir, "talk.js"), "utf8");
+    // The calls reach the emitted code, so the check saw them.
+    expect(bundle).toContain("this.#import(n)");
+    expect(bundle).toContain('this.#require("@oh-my-pi/a")');
+  });
+
   const rejected: ReadonlyArray<readonly [string, string, string]> = [
     [
       "a static import",
@@ -377,6 +411,19 @@ describe("talk build host imports", () => {
       "export const f = (obj, name, divisor) => obj.return / import(name) / divisor;\n",
       "dynamic import without one string literal",
     ],
+    [
+      "a dynamic import between divisions after a private member named #return",
+      [
+        "export class Ratio {",
+        "  #return = 2;",
+        "  of(name, divisor) {",
+        "    return this.#return / import(name) / divisor;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      "dynamic import without one string literal",
+    ],
   ];
 
   it.each(rejected)("fails on %s with HostImportError", (label, source, problem) => {
@@ -395,7 +442,7 @@ function blank(text: string): string {
   return " ".repeat(text.length);
 }
 
-describe("talk build code-only text", () => {
+describe("talk build lexer", () => {
   it.each([
     ["string literals", `a("x'y", 'p"q', "e\\"s")`, `a("   ", '   ', "    ")`],
     ["a line comment", 'a // b("x")\nc', `a ${blank('// b("x")')}\nc`],
@@ -428,8 +475,41 @@ describe("talk build code-only text", () => {
     ["a division after a property named typeof", 'x?.typeof / b / "q"', 'x?.typeof / b / " "'],
     ["a division after the ) of a property named if", 'x.if(a) / b / "q"', 'x.if(a) / b / " "'],
     ["a regular expression after a spread of a keyword", "[...typeof /'/]", "[...typeof / /]"],
+    [
+      "a division after a private member named #return",
+      'this.#return / b / "q"',
+      'this.#return / b / " "',
+    ],
   ])("blanks the text of %s", (_label, code, expected) => {
-    expect(codeOnly(code)).toBe(expected);
+    expect(lexCode(code).text).toBe(expected);
+  });
+
+  it("pairs each ( with its )", () => {
+    expect([...lexCode('f(a(b), (c), ")(")').closeParens]).toEqual([
+      [3, 5],
+      [8, 10],
+      [1, 17],
+    ]);
+  });
+});
+
+describe("talk build loader calls", () => {
+  it("reports every nested dynamic import without one string literal", () => {
+    const problems = loaderCallProblems("import(import(import(n)))");
+    expect(problems).toHaveLength(3);
+    expect(problems.map((problem) => /offset (\d+)/.exec(problem)?.[1])).toEqual(["0", "7", "14"]);
+    for (const problem of problems) {
+      expect(problem).toMatch(/^dynamic import without one string literal at offset /);
+    }
+  });
+
+  it.each([
+    ["a literal dynamic import", 'import("@oh-my-pi/a")'],
+    ["a method named import", "class A{import(n){return n}}"],
+    ["private member calls", 'this.#import(n);this.#require("@oh-my-pi/a")'],
+    ["property calls", 'x.import(n);x?.require("@oh-my-pi/a")'],
+  ])("reports nothing for %s", (_label, code) => {
+    expect(loaderCallProblems(code)).toEqual([]);
   });
 });
 

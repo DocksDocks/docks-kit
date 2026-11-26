@@ -50,23 +50,24 @@ const COMMENT_END = "*/";
 
 // The host-import rules check the emitted code, so they also see an import
 // that a dependency adds. Bun reports the static forms. The other rules match
-// codeOnly(), so text in a string, a comment, or a regular expression does not
-// match them.
+// the text of lexCode(), so text in a string, a comment, or a regular
+// expression does not match them.
 const HOST_PREFIX = "@oh-my-pi/";
 const DYNAMIC_IMPORT_KIND = "dynamic-import";
-// Not a property such as `x.name` or `x?.name`. A spread `...name` is not a property.
-const NOT_PROPERTY = String.raw`(?<![\w$]|(?<!\.)\.\s*)`;
-// `import(`, but not a property call such as `x.import(`.
-const DYNAMIC_IMPORT = new RegExp(String.raw`${NOT_PROPERTY}import\s*\(`, "g");
-// In codeOnly() text, a string literal is two quotes with only spaces between them.
+// Not a member name such as `x.name`, `x?.name`, or `#name`. A spread `...name`
+// is not a member name.
+const NOT_MEMBER = String.raw`(?<![\w$#]|(?<!\.)\.\s*)`;
+// `import(`, but not a member call such as `x.import(` or `this.#import(`.
+const DYNAMIC_IMPORT = new RegExp(String.raw`${NOT_MEMBER}import\s*\(`, "g");
+// In lexCode() text, a string literal is two quotes with only spaces between them.
 const ONE_STRING_ARGUMENT = /\s*(?:" *"|' *')\s*\)/y;
 // After the ")" of `import(...)`, a "{" starts the body of a method definition.
 const METHOD_BODY = /\s*\{/y;
 // A call of `require`, `__require`, or `import.meta.require` whose argument starts
-// with a quote, but not a property call such as `x.require(`. Bun emits
+// with a quote, but not a member call such as `x.require(`. Bun emits
 // `__require` for a `require` call, and scanImports does not report it.
 const REQUIRE_CALL = new RegExp(
-  String.raw`${NOT_PROPERTY}(?:import\s*\.\s*meta\s*\.\s*)?[\w$]*require\s*\(\s*(?=["'\`])`,
+  String.raw`${NOT_MEMBER}(?:import\s*\.\s*meta\s*\.\s*)?[\w$]*require\s*\(\s*(?=["'\`])`,
   "g",
 );
 const SNIPPET_LENGTH = 60;
@@ -126,19 +127,6 @@ function snippet(code: string, at: number): string {
   return JSON.stringify(code.slice(at, at + SNIPPET_LENGTH));
 }
 
-/** The index of the ")" that closes the "(" at `open` in codeOnly() text, or -1. */
-function closingParen(masked: string, open: number): number {
-  let depth = 0;
-  for (let at = open; at < masked.length; at += 1) {
-    if (masked[at] === "(") depth += 1;
-    else if (masked[at] === ")") {
-      depth -= 1;
-      if (depth === 0) return at;
-    }
-  }
-  return -1;
-}
-
 /** The ways the emitted code breaks the host-import rules; empty when it holds.
  *
  * Limits: the rules use a lexer, not a parser. A "/" after the ")" of a call
@@ -153,21 +141,30 @@ export function hostImportProblems(code: string): ReadonlyArray<string> {
       problems.push(`${kind} of ${JSON.stringify(path)}`);
     }
   }
-  const masked = codeOnly(code);
-  for (const match of masked.matchAll(REQUIRE_CALL)) {
+  return [...problems, ...loaderCallProblems(code)];
+}
+
+/** The `require` calls of host modules and the dynamic imports without one
+ * string literal in `code`. Unlike hostImportProblems(), it does not need Bun. */
+export function loaderCallProblems(code: string): ReadonlyArray<string> {
+  const problems: Array<string> = [];
+  const { text, closeParens } = lexCode(code);
+  for (const match of text.matchAll(REQUIRE_CALL)) {
     // The match ends at the quote that starts the argument.
     if (code.startsWith(HOST_PREFIX, match.index + match[0].length + 1)) {
       problems.push(`require at offset ${match.index}: ${snippet(code, match.index)}`);
     }
   }
-  for (const match of masked.matchAll(DYNAMIC_IMPORT)) {
+  for (const match of text.matchAll(DYNAMIC_IMPORT)) {
     const open = match.index + match[0].length - 1;
     ONE_STRING_ARGUMENT.lastIndex = open + 1;
-    if (ONE_STRING_ARGUMENT.test(masked)) continue;
+    if (ONE_STRING_ARGUMENT.test(text)) continue;
     // A method named `import`, such as `import(name) { ... }`, is not an import.
-    const close = closingParen(masked, open);
-    METHOD_BODY.lastIndex = close + 1;
-    if (close !== -1 && METHOD_BODY.test(masked)) continue;
+    const close = closeParens.get(open);
+    if (close !== undefined) {
+      METHOD_BODY.lastIndex = close + 1;
+      if (METHOD_BODY.test(text)) continue;
+    }
     problems.push(
       `dynamic import without one string literal at offset ${match.index}: ${snippet(code, match.index)}`,
     );
@@ -202,14 +199,23 @@ const CONTROL_WORDS: Readonly<Record<string, true>> = {
   with: true,
 };
 
-/** `code` with the text of each string literal, template literal, comment, and
- * regular expression literal replaced by spaces. Quotes, backticks, the `${` and
- * `}` of a template, and the slashes and flags of a regular expression stay.
- * Each offset stays the same. A "/" starts a regular expression at the start,
- * after an operator, an opening bracket, `}`, a word such as `return`, or the
- * `)` of `if (...)`, `for (...)`, `while (...)`, or `with (...)`; otherwise it
- * is a division. A word after "." or "?." is a property name, not a keyword. */
-export function codeOnly(code: string): string {
+/** The result of lexCode(). */
+export interface LexedCode {
+  /** The code with the text of each string literal, template literal, comment,
+   * and regular expression literal replaced by spaces. */
+  readonly text: string;
+  /** The offset of the ")" that closes each "(" of the code, by the offset of the "(". */
+  readonly closeParens: ReadonlyMap<number, number>;
+}
+
+/** Lex `code` in one pass. In the returned text, quotes, backticks, the `${`
+ * and `}` of a template, and the slashes and flags of a regular expression
+ * stay, and each offset stays the same. A "/" starts a regular expression at
+ * the start, after an operator, an opening bracket, `}`, a word such as
+ * `return`, or the `)` of `if (...)`, `for (...)`, `while (...)`, or
+ * `with (...)`; otherwise it is a division. A word after "." or "?." and a
+ * private name such as `#return` are member names, not keywords. */
+export function lexCode(code: string): LexedCode {
   const parts: Array<string> = [];
   let copied = 0;
   const blank = (from: number, to: number): void => {
@@ -218,10 +224,11 @@ export function codeOnly(code: string): string {
     parts.push(code.slice(copied, from), " ".repeat(end - from));
     copied = end;
   };
+  const closeParens = new Map<number, number>();
   // The brace depth at each open template `${`, innermost last.
   const templateBraces: Array<number> = [];
-  // For each open "(": whether a control word comes just before it.
-  const parenAfterControl: Array<boolean> = [];
+  // Each open "(": its offset, and whether a control word comes just before it.
+  const openParens: Array<{ readonly open: number; readonly afterControl: boolean }> = [];
   let braces = 0;
   let regexNext = true;
   let word = "";
@@ -253,12 +260,15 @@ export function codeOnly(code: string): string {
       at += 1;
       continue;
     }
-    if (WORD_CHAR.test(char)) {
+    // A private name `#name` is one member-name token. Its word keeps the "#",
+    // so it never matches a keyword.
+    const privateName = char === "#" && WORD_CHAR.test(next ?? "");
+    if (privateName || WORD_CHAR.test(char)) {
       const start = at;
+      at += 1;
       while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
-      const property = propertyNext;
+      word = propertyNext ? "" : code.slice(start, at);
       propertyNext = false;
-      word = property ? "" : code.slice(start, at);
       regexNext = WORDS_BEFORE_EXPRESSION[word] === true;
       continue;
     }
@@ -325,15 +335,18 @@ export function codeOnly(code: string): string {
       regexNext = false;
       continue;
     }
-    if (char === "(") parenAfterControl.push(CONTROL_WORDS[before] === true);
+    if (char === "(") openParens.push({ open: at, afterControl: CONTROL_WORDS[before] === true });
     if (char === "{") braces += 1;
     if (char === "}") braces -= 1;
-    if (char === ")") regexNext = parenAfterControl.pop() ?? false;
-    else regexNext = char !== "]";
+    if (char === ")") {
+      const paren = openParens.pop();
+      if (paren !== undefined) closeParens.set(paren.open, at);
+      regexNext = paren?.afterControl ?? false;
+    } else regexNext = char !== "]";
     at += 1;
   }
   parts.push(code.slice(copied));
-  return parts.join("");
+  return { text: parts.join(""), closeParens };
 }
 
 /** The package that holds a metafile input path, or undefined for source outside node_modules.

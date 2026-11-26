@@ -27,7 +27,11 @@ static `import`, an `export ... from`, a `require` (also Bun's `__require` and
 `import.meta.require`), or a dynamic `import` of an expression. The check
 finds static forms with `Bun.Transpiler.scanImports` and reads the other forms
 in code only, so import-like text in strings, templates, comments, and
-regular expressions does not fail the build. The build writes `talk.js`
+regular expressions does not fail the build. The check is a lexer, not a
+parser: it does not see a loader that the code reaches through another name,
+such as `const load = require` or `import.meta["require"]`, and it can read
+an unusual construct of the emitted code wrongly. The tests cover each rule
+of the lexer. The build writes `talk.js`
 through an exclusive temporary file and a rename, so it replaces a link at the
 name `talk.js` and never writes through it; a link in the path of the output
 folder is followed, so give a folder that you own. The package smoke
