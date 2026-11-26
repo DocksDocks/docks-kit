@@ -717,7 +717,9 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     const big = join(folder, "big.entry");
     const grown = join(folder, "grown.entry");
     writeFileSync(big, Buffer.alloc(MAX_SECRET_FILE_BYTES + 100, 1), { mode: 0o600 });
-    writeFileSync(grown, Buffer.alloc(50, 1), { mode: 0o600 });
+    // Distinct bytes before and after the 11 bytes of the first buffer, so a lost prefix shows.
+    const grownBytes = Buffer.concat([Buffer.alloc(11, 0x61), Buffer.alloc(39, 0x62)]);
+    writeFileSync(grown, grownBytes, { mode: 0o600 });
     chmodSync(big, 0o600);
     chmodSync(grown, 0o600);
     interface Read {
@@ -773,7 +775,7 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     const read = await Effect.runPromise(
       readSecretFile(grown).pipe(Effect.provide(observed(10n, grownReads))),
     );
-    expect(Option.getOrThrow(read).byteLength).toBe(50);
+    expect(Buffer.from(Option.getOrThrow(read))).toEqual(grownBytes);
     expect(total(grownReads)).toBe(50);
     expect(restarts(grownReads)).toBe(0);
   });

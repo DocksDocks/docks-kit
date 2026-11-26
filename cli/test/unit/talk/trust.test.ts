@@ -919,34 +919,48 @@ describe("runTool deadline", () => {
     }
   });
 
-  it("ends the child and fails with a named reason when the spawn observer throws", async () => {
-    let child: ChildProcess | undefined;
-    const closed = Promise.withResolvers<NodeJS.Signals | null>();
-    try {
-      const error = await Effect.runPromise(
-        Effect.flip(
-          runTool(
-            process.execPath,
-            ["-e", "setTimeout(() => {}, 30000)"],
-            "",
-            TOOL_TIMEOUT_MS,
-            (spawned) => {
-              child = spawned;
-              spawned.on("close", (_code, signal) => closed.resolve(signal));
-              throw new Error("the observer broke");
-            },
+  it.each([
+    [
+      "an Error",
+      () => new Error("the observer broke"),
+      /spawn observer failed: the observer broke/,
+    ],
+    [
+      "an object without a prototype",
+      () => Object.create(null) as unknown,
+      /spawn observer failed: a value that has no text form/,
+    ],
+  ] as const)(
+    "ends the child and fails with a named reason when the spawn observer throws %s",
+    async (_label, thrown, reason) => {
+      let child: ChildProcess | undefined;
+      const closed = Promise.withResolvers<NodeJS.Signals | null>();
+      try {
+        const error = await Effect.runPromise(
+          Effect.flip(
+            runTool(
+              process.execPath,
+              ["-e", "setTimeout(() => {}, 30000)"],
+              "",
+              TOOL_TIMEOUT_MS,
+              (spawned) => {
+                child = spawned;
+                spawned.on("close", (_code, signal) => closed.resolve(signal));
+                throw thrown();
+              },
+            ),
           ),
-        ),
-      );
-      expect(error).toBeInstanceOf(TalkToolError);
-      expect(error.reason).toMatch(/spawn observer failed: the observer broke/);
-      const timer = setTimeout(() => closed.resolve(null), 5_000);
-      const signal = await closed.promise;
-      clearTimeout(timer);
-      expect(signal).toBe("SIGKILL");
-    } finally {
-      if (child !== undefined && child.exitCode === null && child.signalCode === null)
-        child.kill("SIGKILL");
-    }
-  });
+        );
+        expect(error).toBeInstanceOf(TalkToolError);
+        expect(error.reason).toMatch(reason);
+        const timer = setTimeout(() => closed.resolve(null), 5_000);
+        const signal = await closed.promise;
+        clearTimeout(timer);
+        expect(signal).toBe("SIGKILL");
+      } finally {
+        if (child !== undefined && child.exitCode === null && child.signalCode === null)
+          child.kill("SIGKILL");
+      }
+    },
+  );
 });

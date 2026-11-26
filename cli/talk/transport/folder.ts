@@ -105,6 +105,16 @@ export interface ToolResult {
 /** The deadline of one system command; past it, the command is killed and fails. */
 export const TOOL_TIMEOUT_MS = 30_000;
 
+/** The text of a thrown value; a value that cannot form text gives a fixed note instead of a throw. */
+function thrownText(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  try {
+    return String(value);
+  } catch {
+    return "a value that has no text form";
+  }
+}
+
 /**
  * Runs `command` with `args` and no shell, writes `input` to its standard
  * input, and waits for it to end. Interruption and the deadline
@@ -158,7 +168,7 @@ export const runTool = Effect.fn("runTool")(function* (
         Effect.fail(
           new TalkToolError({
             command,
-            reason: `the spawn observer failed: ${error instanceof Error ? error.message : String(error)}`,
+            reason: `the spawn observer failed: ${thrownText(error)}`,
           }),
         ),
       );
