@@ -866,7 +866,12 @@ describe.skipIf(!WINDOWS)("Windows DPAPI (real)", () => {
     expect(blobs).toHaveLength(2);
     expect(Buffer.from(blobs[0]!).includes("aaaa")).toBe(false);
     const opened = await live(unsealEntries(blobs, expectIds(ids)));
-    expect(opened.map((result) => Result.isSuccess(result) && result.success)).toEqual([ids, ids]);
+    // The id check returns the decoded entry, so each result is the whole entry.
+    const decoded: unknown = JSON.parse(entry);
+    expect(opened.map((result) => Result.isSuccess(result) && result.success)).toEqual([
+      decoded,
+      decoded,
+    ]);
   });
 
   it("rejects a tampered blob and foreign ids", async () => {

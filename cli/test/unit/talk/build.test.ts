@@ -225,6 +225,18 @@ describe("talk build package of a metafile input", () => {
       "node_modules/outer/node_modules/inner",
     ],
     ["node_modules/outer/lib/node_modules", "outer", "node_modules/outer"],
+    // An input on another Windows drive keeps that drive inside the path.
+    [
+      "../../../C:/Users/u/Temp/p/node_modules/alpha-pkg/index.js",
+      "alpha-pkg",
+      "C:/Users/u/Temp/p/node_modules/alpha-pkg",
+    ],
+    [
+      "..\\..\\C:\\Users\\u\\node_modules\\outer\\node_modules\\inner\\x.js",
+      "inner",
+      "C:/Users/u/node_modules/outer/node_modules/inner",
+    ],
+    ["/C:/p/node_modules/outer/index.js", "outer", "C:/p/node_modules/outer"],
   ])("finds the package of %s", (input, name, dir) => {
     expect(packageOfInput(input, cwd)).toEqual({ name, dir: resolve(cwd, dir) });
   });

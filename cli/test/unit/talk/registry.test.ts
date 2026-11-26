@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -632,7 +633,11 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
       chmodSync(folder, 0o755);
       const folderError = await failIn(layer, lookup(published.fileName));
       expect(folderError).toBeInstanceOf(TalkTrustError);
-      expect(folderError).toMatchObject({ path: folder, reason: expect.stringMatching(/0755/) });
+      // The folder check names the real path; macOS keeps its temporary folder behind `/var`.
+      expect(folderError).toMatchObject({
+        path: realpathSync(folder),
+        reason: expect.stringMatching(/0755/),
+      });
     } finally {
       await runIn(
         layer,

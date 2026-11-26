@@ -45,6 +45,8 @@ const LICENSE_FILES: ReadonlyArray<string> = ["LICENSE", "LICENSE.md", "LICENSE.
 /** The path component that holds packages. */
 const NODE_MODULES = "node_modules";
 const SCOPE_PREFIX = "@";
+/** A Windows drive component, such as `C:`. */
+const WINDOWS_DRIVE = /^[A-Za-z]:$/;
 
 const COMMENT_END = "*/";
 
@@ -409,7 +411,12 @@ export function lexCode(code: string): LexedCode {
  * It is the package after the last `node_modules` component that has a package root
  * (`<name>` or `@scope/<name>`) and a file path below that root. */
 export function packageOfInput(input: string, cwd: string): ContributingPackage | undefined {
-  const parts = input.replaceAll("\\", "/").split("/");
+  const all = input.replaceAll("\\", "/").split("/");
+  // On Windows, Bun can write an input on another drive with the drive inside
+  // the path, such as `../../C:/Users/...`; the path then starts at that drive.
+  let driveAt = all.length - 1;
+  while (driveAt >= 0 && !WINDOWS_DRIVE.test(all[driveAt] ?? "")) driveAt -= 1;
+  const parts = driveAt < 0 ? all : all.slice(driveAt);
   for (let at = parts.length - 1; at >= 0; at -= 1) {
     if (parts[at] !== NODE_MODULES) continue;
     const first = parts[at + 1] ?? "";
