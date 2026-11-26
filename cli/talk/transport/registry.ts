@@ -26,6 +26,7 @@ import {
   SOCKET_NAME,
   endpointKindFor,
   randomNameHex,
+  socketProcessId,
 } from "./endpoint";
 import { InstanceId, PROTOCOL_VERSION, SessionId } from "./handshake";
 import { TalkDpapi, type TalkSealError, sealEntries, unsealEntries } from "./sealWindows";
@@ -212,6 +213,13 @@ const EMPTY_LISTING: Listing = { entries: [], rejected: [] };
 const utf8 = new TextEncoder();
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
+/** A file of the talk socket pattern in the registry folder. */
+export interface SocketFile {
+  readonly path: string;
+  /** The owner process id that the name carries. */
+  readonly processId: number;
+}
+
 const notEntryName = (folder: string, fileName: string): TalkFileError =>
   new TalkFileError({ path: join(folder, fileName), reason: "not a talk entry name" });
 
@@ -281,6 +289,8 @@ export class TalkRegistry extends Context.Service<
     readonly remove: (fileName: string) => Effect.Effect<void, RegistryError>;
     /** Removes a socket file that has a talk socket name directly in the folder; any other path stays. */
     readonly removeSocket: (endpoint: Endpoint) => Effect.Effect<void, RegistryError>;
+    /** POSIX: every file of the talk socket pattern in the folder. Windows: none. */
+    readonly sockets: Effect.Effect<ReadonlyArray<SocketFile>, RegistryError>;
   }
 >()("docks-kit/talk/TalkRegistry") {
   /** POSIX: 0600 entry files under the E5 trust rules. */
@@ -406,6 +416,18 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
     yield* ignoreMissing(fileCall(endpoint.path, "unlink", () => unlinkSync(endpoint.path)));
   });
 
+  const sockets = Effect.gen(function* () {
+    if (!(yield* folderPresent)) return [];
+    return yield* fileCall(folder, "readdir", () =>
+      readdirSync(folder)
+        .sort()
+        .flatMap((name): Array<SocketFile> => {
+          const processId = socketProcessId(name);
+          return processId === undefined ? [] : [{ path: join(folder, name), processId }];
+        }),
+    );
+  });
+
   return TalkRegistry.of({
     folder,
     endpointKind: "unix",
@@ -419,6 +441,7 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
     list,
     remove,
     removeSocket,
+    sockets,
   });
 });
 
@@ -599,5 +622,6 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string, seams: 
     list,
     remove,
     removeSocket: () => Effect.void,
+    sockets: Effect.succeed([]),
   });
 });

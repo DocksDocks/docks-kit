@@ -43,11 +43,11 @@ entry, a folder entry included.
 
 Each live main session has one entry in the registry folder of the user:
 
-| System | Folder |
-|---|---|
-| Linux | `/tmp/docks-kit-talk-<uid>` |
-| macOS | `docks-kit-talk` in the folder that `/usr/bin/getconf DARWIN_USER_TEMP_DIR` prints |
-| Windows | `%LOCALAPPDATA%\docks-kit\talk` |
+| System  | Folder                                                                             |
+| ------- | ---------------------------------------------------------------------------------- |
+| Linux   | `/tmp/docks-kit-talk-<uid>`                                                        |
+| macOS   | `docks-kit-talk` in the folder that `/usr/bin/getconf DARWIN_USER_TEMP_DIR` prints |
+| Windows | `%LOCALAPPDATA%\docks-kit\talk`                                                    |
 
 Only tests and verify flows set `DOCKS_KIT_TALK_DIR`, to a short folder that
 they make in the system temporary root. It is no user setting.
@@ -71,7 +71,9 @@ in the registry folder:
   hex characters per registration, so a session that registers again after a
   withdrawal is a new target. The session key is the first 16 hex characters
   of the SHA-256 of the session id.
-- Sockets: `<16 hex>.sock`.
+- Sockets: `<pid>-<16 hex>.sock`. The `<pid>` part is the process id of the
+  owner, without leading zeros, and the 16 hex characters are random for
+  each bind.
 - Temporary files: `.<16 hex>.tmp`.
 
 An entry whose ids do not give its file name, or whose socket path is not a
@@ -122,18 +124,19 @@ read nor forge the secret, the endpoint, or the process id.
 ## Endpoints
 
 On Linux and macOS, each omp process listens on one Unix socket with a fresh
-random name for each bind. Bun binds without a mode, so the umask and, on
-Linux, a default ACL of the folder decide the bits of the socket. A client
-needs write permission on the socket to connect. After each bind, the
-listener checks that the path is a socket of the user with the owner write
-bit. `talk` never changes the mode of a socket. When the check fails, the
-listener closes the new socket without publishing it, and registration
-fails with an error that points to the umask and the default ACL of the
-folder. Thus a umask or a default ACL that removes owner write prevents
-registration.
+name for each bind: its own process id and a random part (see Names). Bun
+binds without a mode, so the umask and, on Linux, a default ACL of the folder
+decide the bits of the socket. A client needs write permission on the socket
+to connect. After each bind, the listener checks that the path is a socket
+of the user with the owner write bit. `talk` never changes the mode of a
+socket. When the check fails, the listener closes the new socket without
+publishing it, and registration fails with an error that points to the umask
+and the default ACL of the folder. Thus a umask or a default ACL that removes
+owner write prevents registration.
 
 On Windows, the listener uses TCP on `127.0.0.1` with a port that the system
-picks.
+picks. The listener keeps its port across a repair, so a kept endpoint stays
+valid.
 
 ## Protocol
 
@@ -154,6 +157,26 @@ picks.
   request times out after 5 s by default, and a probe after 500 ms. When the
   listener cannot send a response, for example a result above 1 MiB, it
   closes the connection.
+- Admission: the transport option `admit` is a hook that the listener asks in
+  the tick that it admits a request for a registration, `ping` included. When
+  the hook gives false or throws, the request gets `not-live` and the listener
+  withdraws the registration. Without the option, the listener admits every
+  request.
+
+### Registrations
+
+One listener can hold several live registrations of one session id. Each
+registration has its own instance id, secret, and entry. Requests and
+withdrawals go to a registration by its pair: the instance id and the
+session id.
+
+`update(target, { name, cwd })` publishes a live registration again with a
+new name and folder. The instance id, the session id, the secret, the start
+time, and the endpoint stay the same, so an entry that a client kept still
+reaches the registration. A registration that is not live gives
+`TalkUpdateError`. When the publication fails, the call gives
+`TalkUpdateError`, the entry stays stale, and the next repair pass publishes
+it with the new name and folder.
 
 ### Withdrawal
 
@@ -168,23 +191,62 @@ until the process ends.
 
 ### Client outcomes
 
-A client keeps the entry of each target that it listed or reached (after the
-listener proof checked out), so a missing entry file alone does not stop a
-send. When the endpoint is missing or refuses the connection, the client
-reads the entry file of the target once more and retries on a new endpoint.
+A client keeps the entry of each target that it listed, retained, or reached
+(after the listener proof checked out), so a missing entry file alone does
+not stop a send.
 
-| Outcome | When |
-|---|---|
-| `not-live` | An authenticated `not-live` or `ended`, or a missing or refusing endpoint while no process holds the process id of the target |
-| `not-found` | No entry and no kept entry names the target |
-| `auth-failed` | The proof of the listener does not match |
-| `timeout` | No answer in time |
-| `unreachable` | Other connection failures, for example a missing endpoint while a process holds the process id of the target |
-| `unknown-kind` | The live target has no handler for the request kind |
+- `retain(pair)` reads the entry of the pair now and keeps it like a listed
+  entry. When no entry names the pair, it fails with `not-found`; a failed
+  lookup gives `unreachable` with the reason.
+- `known(instanceId)` gives the pair (the instance id and the session id,
+  never the secret) of a kept entry with exactly this instance id, or
+  nothing for an instance id that the client never kept.
+
+#### Routes
+
+A request tries these routes for the pair:
+
+1. The #249 path: the kept endpoint first. When that socket is missing
+   (`ENOENT`) or refuses the connection (`ECONNREFUSED`), the client reads the
+   entry file of the pair once more and dials its endpoint when it changed.
+2. On POSIX, once the first connect of the #249 path settled: each other
+   socket in the folder whose name carries the process id of the kept entry.
+   Each one dials as soon as a dial slot is free. These routes need no live
+   entry, so a listener that withdrew its last registration and then bound a
+   new socket still gives its proof of the end.
+
+Every handshake runs under the whole deadline of the caller; no route stops
+because other routes exist. The first connection that completes the mutual
+proof over the secret and the session id of the pair is the only one that
+sends the request body; the other connections close. The client never
+retries after it sent the body. Only the listener that served the pair can
+complete that proof, so a `not-live` or `ended` answer through any route is
+authenticated. When the deadline expires first, the request gives `timeout`.
+When every route ends without that proof, the request gives the result of
+the #249 path. A socket that the client found by its process id alone never
+replaces that result: a bad proof of the kept endpoint or of its fresh entry
+still gives `auth-failed` when a process-id socket refuses the connection.
+
+#### Dial slots
+
+Every connection that the client opens to one target process id takes one of
+8 slots (`DIAL_SLOTS`) from its connect to its close, whichever caller opens
+it (a request, a probe, or the connect test of a listing) and whichever socket
+it dials. A dial without a free slot waits for one within the deadline of its
+caller. So this process never offers a listener more than 8 of the 32
+connections that the listener admits before `ready`.
+
+| Outcome        | When                                                                                                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `not-live`     | An authenticated `not-live` or `ended` through any route, or a missing or refusing endpoint on the #249 path while no process holds the process id of the target |
+| `not-found`    | No entry and no kept entry names the target                                                                                                                      |
+| `auth-failed`  | The proof of the listener on the #249 path does not match, and no route completed the proof                                                                      |
+| `timeout`      | No answer before the deadline                                                                                                                                    |
+| `unreachable`  | Other connection failures, for example a missing endpoint while a process holds the process id of the target                                                     |
+| `unknown-kind` | The live target has no handler for the request kind                                                                                                              |
 
 A process counts as not alive only when `process.kill(pid, 0)` fails with
-`ESRCH`; a process id in use counts as alive, whatever process holds it. A
-second live registration with the same session id in one process fails.
+`ESRCH`; a process id in use counts as alive, whatever process holds it.
 
 ### Pruning
 
@@ -193,6 +255,13 @@ endpoint is missing or refuses the connection, and its process id is not
 alive. A timeout, `EACCES`, `EMFILE`, or a failed handshake never prunes. A
 client keeps its own entry of a pruned target; its next send still applies
 the endpoint and process id checks above.
+
+On POSIX, a listing then removes a file of the socket pattern only when no
+decoded entry names it, the process id in its name is not alive, and its
+connect attempt is refused. So a socket of a live process stays, also one
+that a starting process bound and does not listen on yet. omp can exit on a
+signal without an exit hook, so this rule removes the socket that such a
+process left.
 
 ### Repair
 
@@ -210,26 +279,28 @@ failure with the path and the reason.
   longer than the system's age minus up to 6 hours (10 days on systemd).
   When the process continues, the next repair pass publishes it again.
 - Without an authenticated answer, a client cannot tell a reused process id
-  from the target, so it reports `unreachable`, not `not-live`.
+  from the target, so it reports `unreachable`, not `not-live`. A reused
+  process id also makes a process-id route dial the sockets of another
+  process; those dials fail the proof and change no result.
 - A registry that the user shares between computers or PID namespaces lets
   one peer prune the live entry of another. The repair of the target
   publishes it again.
 
 ## Source files
 
-| File | Holds |
-|---|---|
-| `cli/talk/index.ts` | The bundle entry; it exports the transport API |
-| `cli/talk/licenses/pi-intercom.txt` | The license of the ported pi-intercom source, first in the banner |
-| `cli/talk/transport/frame.ts` | The frame codec and the 1 MiB cap |
-| `cli/talk/transport/handshake.ts` | The handshake and request messages, nonces, and HMAC proofs |
-| `cli/talk/transport/folder.ts` | The registry folder of each system, the test override, and the command runner |
-| `cli/talk/transport/trustPosix.ts` | The POSIX trust rules, folder creation, and secret file publication and reads |
-| `cli/talk/transport/sealWindows.ts` | The DPAPI seal and unseal batches of Windows |
-| `cli/talk/transport/registry.ts` | The entry Schema, the owned names, publication, listing, removal, and the repair check |
-| `cli/talk/transport/endpoint.ts` | Socket names, the `sun_path` limit, the post-bind check, and the Windows port |
-| `cli/talk/transport/request.ts` | Request results, outcomes, and handler types |
-| `cli/talk/transport/connection.ts` | One framed socket |
-| `cli/talk/transport/listener.ts` | The process listener: handshake, limits, withdrawal, repair, rebind, and refresh |
-| `cli/talk/transport/client.ts` | Kept entries, the re-read, outcomes, and pruning |
-| `cli/talk/transport/transport.ts` | The `TalkTransport` service, its layer, and the defaults |
+| File                                | Holds                                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `cli/talk/index.ts`                 | The bundle entry; it exports the transport API                                                                  |
+| `cli/talk/licenses/pi-intercom.txt` | The license of the ported pi-intercom source, first in the banner                                               |
+| `cli/talk/transport/frame.ts`       | The frame codec and the 1 MiB cap                                                                               |
+| `cli/talk/transport/handshake.ts`   | The handshake and request messages, nonces, and HMAC proofs                                                     |
+| `cli/talk/transport/folder.ts`      | The registry folder of each system, the test override, and the command runner                                   |
+| `cli/talk/transport/trustPosix.ts`  | The POSIX trust rules, folder creation, and secret file publication and reads                                   |
+| `cli/talk/transport/sealWindows.ts` | The DPAPI seal and unseal batches of Windows                                                                    |
+| `cli/talk/transport/registry.ts`    | The entry Schema, the owned names, publication, listing of entries and sockets, removal, and the repair check   |
+| `cli/talk/transport/endpoint.ts`    | Socket names with the owner process id, the `sun_path` limit, the post-bind check, and the Windows port         |
+| `cli/talk/transport/request.ts`     | Request results, outcomes, and handler types                                                                    |
+| `cli/talk/transport/connection.ts`  | One framed socket                                                                                               |
+| `cli/talk/transport/listener.ts`    | The process listener: handshake, limits, admission, update, withdrawal, repair, rebind, and refresh             |
+| `cli/talk/transport/client.ts`      | Kept entries, `retain` and `known`, the routes and the dial slots, outcomes, and pruning of entries and sockets |
+| `cli/talk/transport/transport.ts`   | The `TalkTransport` service, its layer, and the defaults                                                        |

@@ -3,6 +3,7 @@
 // extension factory.
 export {
   type Client,
+  DIAL_SLOTS,
   type Peer,
   type PeerListing,
   TalkListError,
@@ -11,11 +12,14 @@ export {
 export { type Endpoint, TalkEndpointError } from "./transport/endpoint";
 export { TALK_DIR_OVERRIDE, TalkFolderError, resolveRegistryFolder } from "./transport/folder";
 export {
+  type AdmissionCheck,
   type ListenerStatus,
   type Registration,
   type RegistrationInput,
   type RegistrationStatus,
+  type RegistrationUpdate,
   TalkRegisterError,
+  TalkUpdateError,
 } from "./transport/listener";
 export { type RejectedEntry, entryFileName, sessionKey } from "./transport/registry";
 export {

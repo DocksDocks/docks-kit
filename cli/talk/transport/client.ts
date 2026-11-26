@@ -1,12 +1,15 @@
 /**
- * The client of the talk transport (#249 E8 Client outcomes and Pruning): the
- * kept entries, the listing with pruning, and requests with their outcomes.
- * Each request uses one connection: connect, the mutual proof, the request,
- * and the response.
+ * The client of the talk transport (#249 E8 Client outcomes and Pruning,
+ * #250 Step 2): the kept entries, the listing with pruning, the dial slots,
+ * and requests with their routes and outcomes. Each connection runs connect,
+ * the mutual proof, the request, and the response. A request tries the #249
+ * path (the kept endpoint, then the endpoint of a fresh entry) and, on POSIX,
+ * each other socket whose name carries the process id of the target. The
+ * first route that completes the mutual proof alone sends the request body.
  */
 import { type Socket, createConnection } from "node:net";
 
-import { Effect, Option, Predicate, Result, Schema } from "effect";
+import { Deferred, Effect, Option, Predicate, Result, Schema, Semaphore } from "effect";
 
 import { type Connection, makeConnection } from "./connection";
 import type { Endpoint } from "./endpoint";
@@ -34,6 +37,9 @@ import {
   TalkRequestFailed,
   decodeResponseResult,
 } from "./request";
+
+/** #250 E8: the most connections that this process opens to one target process id at a time. */
+export const DIAL_SLOTS = 8;
 
 export interface ClientOptions {
   /** The default timeout of a request. */
@@ -70,13 +76,28 @@ class TalkConnectFailed extends Schema.TaggedError<
   reason: Schema.String,
 }) {}
 
-/** What one connection to an endpoint gave. */
+/** What a request got from its routes. */
 type Exchange =
   | { readonly _tag: "Result"; readonly result: ResponseResult }
   | { readonly _tag: "Ended" }
   | { readonly _tag: "AuthFailed" }
   | { readonly _tag: "Absent"; readonly reason: string }
-  | { readonly _tag: "Unreachable"; readonly reason: string };
+  | { readonly _tag: "Unreachable"; readonly reason: string }
+  /** The #249 path could not read the fresh entry. */
+  | { readonly _tag: "LookupFailed"; readonly failure: TalkRequestFailed };
+
+/** What one connection gave: an exchange, or `Lost` when another route completed the proof first. */
+type Attempt = Exchange | { readonly _tag: "Lost" };
+
+/** The end of one route; `won` when it took the claim of the request. */
+interface RouteEnd {
+  readonly won: boolean;
+  readonly attempt: Attempt;
+}
+
+const LOST: Attempt = { _tag: "Lost" };
+const AUTH_FAILED: Attempt = { _tag: "AuthFailed" };
+const ENDED: Attempt = { _tag: "Ended" };
 
 const targetKey = (target: Target): string => `${target.instanceId}\u0000${target.sessionId}`;
 
@@ -144,6 +165,14 @@ export interface Client {
   ) => Effect.Effect<Schema.Json, TalkRequestFailed>;
   /** A `ping` with the probe timeout. */
   readonly probe: (target: Target) => Effect.Effect<void, TalkRequestFailed>;
+  /**
+   * Reads the entry of the pair now and keeps it like a listed entry, so a
+   * later request reaches the pair without its entry file; `not-found` when no
+   * entry names the pair.
+   */
+  readonly retain: (target: Target) => Effect.Effect<void, TalkRequestFailed>;
+  /** The pair of a kept entry with exactly this instance id; never its secret. */
+  readonly known: (instanceId: string) => Effect.Effect<Option.Option<Target>>;
 }
 
 /** The registry folder could not be listed. */
@@ -156,9 +185,44 @@ export class TalkListError extends Schema.TaggedError<
 
 export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
   const registry = yield* TalkRegistry;
-  // The entry of each target that this client listed or reached (E8 Client outcomes).
+  // The entry of each target that this client listed, retained, or reached (E8 Client outcomes).
   const kept = new Map<string, RegistryEntry>();
+  // The pair of each kept instance id, for `known`.
+  const keptPairs = new Map<string, Target>();
+  // The dial slots of each target process id and the count of dials that use them.
+  const slotPools = new Map<number, { readonly slots: Semaphore.Semaphore; users: number }>();
   let nextRequestId = 0;
+
+  const keep = (entry: RegistryEntry): void => {
+    kept.set(targetKey(entry), entry);
+    keptPairs.set(entry.instanceId, { instanceId: entry.instanceId, sessionId: entry.sessionId });
+  };
+
+  /**
+   * #250 E8: every connection to one target process id holds one of its
+   * slots from the connect to the close, whichever caller opens it. A dial
+   * without a free slot waits within the deadline of its caller.
+   */
+  const withDialSlot = <A, E>(processId: number, effect: Effect.Effect<A, E>) =>
+    Effect.suspend(() => {
+      let pool = slotPools.get(processId);
+      if (pool === undefined) {
+        pool = { slots: Semaphore.makeUnsafe(DIAL_SLOTS), users: 0 };
+        slotPools.set(processId, pool);
+      }
+      const used = pool;
+      used.users += 1;
+      return used.slots
+        .withPermits(1)(effect)
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              used.users -= 1;
+              if (used.users === 0) slotPools.delete(processId);
+            }),
+          ),
+        );
+    });
 
   // A lookup that fails (trust check, I/O, DPAPI) is no absence: it gives `unreachable` with the reason.
   const readEntry = (fileName: string) =>
@@ -173,8 +237,10 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
   const converse = Effect.fnUntraced(function* (
     connection: Connection,
     entry: RegistryEntry,
+    endpoint: Endpoint,
     kind: string,
     body: Schema.Json,
+    take: () => boolean,
   ) {
     const clientNonce = yield* makeNonce;
     const { instanceId, sessionId } = entry;
@@ -188,85 +254,179 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     const challenge = yield* Effect.flatMap(connection.read, decodeChallenge);
     const secret = Buffer.from(entry.secret, "hex");
     const fields = { clientNonce, listenerNonce: challenge.nonce, instanceId, sessionId };
-    if (!verifyHmac(secret, { ...fields, role: "listener" }, challenge.hmac)) {
-      const authFailed: Exchange = { _tag: "AuthFailed" };
-      return authFailed;
-    }
-    // The listener proved the secret: the client reached this target and keeps its entry, unless
-    // a newer observation (a listing or a re-read) replaced the entry that this attempt used.
-    const key = targetKey(entry);
-    const current = kept.get(key);
-    if (
-      current === undefined ||
-      current === entry ||
-      (sameEndpoint(current.endpoint, entry.endpoint) && current.startTime === entry.startTime)
-    ) {
-      kept.set(key, entry);
+    if (!verifyHmac(secret, { ...fields, role: "listener" }, challenge.hmac)) return AUTH_FAILED;
+    // The listener proved the secret at this endpoint: the client keeps the entry with it, unless
+    // a newer observation (a listing, a re-read, or another route) replaced the entry that this
+    // attempt used.
+    const current = kept.get(targetKey(entry));
+    if (current === undefined || current === entry) {
+      keep(sameEndpoint(entry.endpoint, endpoint) ? entry : { ...entry, endpoint });
     }
     yield* connection.write({
       type: "proof",
       hmac: computeHmac(secret, { ...fields, role: "client" }),
     });
     const end = yield* Effect.flatMap(connection.read, decodeHandshakeEnd);
-    if (end.type === "ended") {
-      const ended: Exchange = { _tag: "Ended" };
-      return ended;
-    }
+    // The mutual proof is complete; only the first route to get here sends the body.
+    if (!take()) return LOST;
+    if (end.type === "ended") return ENDED;
     const id = nextRequestId;
     nextRequestId += 1;
     yield* connection.write({ type: "request", id, kind, body });
     for (;;) {
       const response = yield* Effect.flatMap(connection.read, decodeResponse);
       if (response.id !== id) continue;
-      const exchange: Exchange = {
+      const answered: Attempt = {
         _tag: "Result",
         result: yield* decodeResponseResult(response.result),
       };
-      return exchange;
+      return answered;
     }
   });
 
-  const exchange = Effect.fnUntraced(function* (
+  /** One connection to `endpoint` for the pair of `entry`; `dialed` runs once the connect settled. */
+  const attempt = (
     entry: RegistryEntry,
+    endpoint: Endpoint,
     kind: string,
     body: Schema.Json,
-  ) {
-    const socket = yield* Effect.result(connectSocket(entry.endpoint));
-    if (Result.isFailure(socket)) {
-      const { absent, reason } = socket.failure;
-      const failure: Exchange = absent
-        ? { _tag: "Absent", reason }
-        : { _tag: "Unreachable", reason };
-      return failure;
-    }
-    return yield* Effect.acquireUseRelease(
-      makeConnection(socket.success),
-      (connection) => converse(connection, entry, kind, body),
-      (connection) => connection.close,
-    ).pipe(
-      Effect.catch((error) =>
-        Effect.succeed<Exchange>({ _tag: "Unreachable", reason: describeFailure(error) }),
-      ),
+    take: () => boolean,
+    dialed: Effect.Effect<void> = Effect.void,
+  ): Effect.Effect<Attempt> =>
+    withDialSlot(
+      entry.processId,
+      Effect.gen(function* () {
+        const socket = yield* Effect.result(connectSocket(endpoint));
+        yield* dialed;
+        if (Result.isFailure(socket)) {
+          const { absent, reason } = socket.failure;
+          const failure: Attempt = absent
+            ? { _tag: "Absent", reason }
+            : { _tag: "Unreachable", reason };
+          return failure;
+        }
+        return yield* Effect.acquireUseRelease(
+          makeConnection(socket.success),
+          (connection) => converse(connection, entry, endpoint, kind, body, take),
+          (connection) => connection.close,
+        ).pipe(
+          Effect.catch((error) =>
+            Effect.succeed<Attempt>({ _tag: "Unreachable", reason: describeFailure(error) }),
+          ),
+        );
+      }),
     );
-  });
 
+  /** POSIX: the other sockets in the folder whose name carries the process id of the entry. */
+  const sameProcessSockets = (entry: RegistryEntry) => {
+    const cached = entry.endpoint;
+    if (cached.kind !== "unix") return Effect.succeed<ReadonlyArray<Endpoint>>([]);
+    return registry.sockets.pipe(
+      Effect.map((sockets) =>
+        sockets
+          .filter((socket) => socket.processId === entry.processId && socket.path !== cached.path)
+          .map((socket): Endpoint => ({ kind: "unix", path: socket.path })),
+      ),
+      Effect.orElseSucceed((): ReadonlyArray<Endpoint> => []),
+    );
+  };
+
+  /**
+   * #250 Step 2: the routes of one request. The #249 path dials first: the
+   * kept endpoint and, when that is missing or refuses, the endpoint of a
+   * fresh entry of the pair. Once its first connect settled, each other
+   * socket of the process dials as a slot frees. No route stops because
+   * another one exists; the first route that completes the mutual proof alone
+   * sends the body, and the others close. Without such a route, the result of
+   * the #249 path stands.
+   */
   const deliver = Effect.fnUntraced(function* (target: Target, kind: string, body: Schema.Json) {
     const key = targetKey(target);
     const fileName = entryFileName(target.instanceId, target.sessionId);
-    let entry = kept.get(key) ?? Option.getOrUndefined(yield* readEntry(fileName));
-    if (entry === undefined) {
+    const first = kept.get(key) ?? Option.getOrUndefined(yield* readEntry(fileName));
+    if (first === undefined) {
       return yield* failed("not-found", "no entry and no kept entry names the target");
     }
-    let outcome = yield* exchange(entry, kind, body);
-    if (outcome._tag === "Absent") {
-      // The listener may have bound a new endpoint: read the entry once more and retry there.
-      const reread = yield* readEntry(fileName);
-      if (Option.isSome(reread) && !sameEndpoint(reread.value.endpoint, entry.endpoint)) {
-        entry = reread.value;
-        kept.set(key, entry);
-        outcome = yield* exchange(entry, kind, body);
-      }
-    }
+    const others = yield* sameProcessSockets(first);
+    let claimed = false;
+    // The entry of the last attempt of the #249 path.
+    let last = first;
+
+    const route = (run: (take: () => boolean) => Effect.Effect<Attempt>) =>
+      Effect.suspend(() => {
+        let won = false;
+        const take = (): boolean => {
+          if (claimed) return false;
+          claimed = true;
+          won = true;
+          return true;
+        };
+        return Effect.map(run(take), (end): RouteEnd => ({ won, attempt: end }));
+      });
+
+    const path249 = (dialed: Effect.Effect<void>) =>
+      route((take) =>
+        Effect.gen(function* () {
+          const outcome = yield* attempt(first, first.endpoint, kind, body, take, dialed);
+          if (outcome._tag !== "Absent") return outcome;
+          // The listener may have bound a new endpoint: read the entry once more and dial there.
+          const reread = yield* Effect.result(readEntry(fileName));
+          if (Result.isFailure(reread)) {
+            const lookupFailed: Attempt = { _tag: "LookupFailed", failure: reread.failure };
+            return lookupFailed;
+          }
+          const fresh = Option.getOrUndefined(reread.success);
+          if (fresh === undefined || sameEndpoint(fresh.endpoint, first.endpoint)) return outcome;
+          last = fresh;
+          keep(fresh);
+          return yield* attempt(fresh, fresh.endpoint, kind, body, take);
+        }),
+      );
+
+    const outcome = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const settled = yield* Deferred.make<Exchange>();
+        const dialed = yield* Deferred.make<void>();
+        let open = 1 + others.length;
+        let fallback: Exchange = { _tag: "Unreachable", reason: "no route answered" };
+        const settle = (end: RouteEnd, of249: boolean) =>
+          Effect.suspend(() => {
+            const result = end.attempt;
+            if (result._tag === "Lost") {
+              open -= 1;
+              return Effect.void;
+            }
+            if (end.won) return Deferred.succeed(settled, result);
+            // A socket found by process id alone never replaces the result of the #249 path.
+            if (of249) fallback = result;
+            open -= 1;
+            return open === 0 ? Deferred.succeed(settled, fallback) : Effect.void;
+          });
+        yield* Effect.forkScoped(
+          Effect.flatMap(path249(Deferred.succeed(dialed, undefined)), (end) => settle(end, true)),
+        );
+        if (others.length > 0) {
+          yield* Effect.forkScoped(
+            Effect.andThen(
+              Deferred.await(dialed),
+              Effect.forEach(
+                others,
+                (endpoint) =>
+                  Effect.forkScoped(
+                    Effect.flatMap(
+                      route((take) => attempt(first, endpoint, kind, body, take)),
+                      (end) => settle(end, false),
+                    ),
+                  ),
+                { discard: true },
+              ),
+            ),
+          );
+        }
+        return yield* Deferred.await(settled);
+      }),
+    );
+
     switch (outcome._tag) {
       case "Result": {
         const { result } = outcome;
@@ -284,11 +444,13 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
           "the listener proof does not match the secret of the entry",
         );
       case "Absent":
-        return yield* processAlive(entry.processId)
-          ? failed("unreachable", `${outcome.reason}; process id ${entry.processId} is in use`)
-          : failed("not-live", `${outcome.reason}; no process holds process id ${entry.processId}`);
+        return yield* processAlive(last.processId)
+          ? failed("unreachable", `${outcome.reason}; process id ${last.processId} is in use`)
+          : failed("not-live", `${outcome.reason}; no process holds process id ${last.processId}`);
       case "Unreachable":
         return yield* failed("unreachable", outcome.reason);
+      case "LookupFailed":
+        return yield* outcome.failure;
     }
   });
 
@@ -306,27 +468,45 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     );
   });
 
-  // E8 Pruning: only a decoded entry whose endpoint is missing or refuses the connection while its process id is dead.
-  const definitelyDead = Effect.fnUntraced(function* (entry: RegistryEntry) {
-    if (processAlive(entry.processId)) return false;
-    const reach = yield* connectSocket(entry.endpoint).pipe(
-      Effect.timeoutOption(options.probeTimeoutMs),
-      Effect.result,
-    );
-    if (Result.isSuccess(reach)) {
-      if (Option.isSome(reach.success)) reach.success.value.destroy();
-      return false;
+  // E8 Pruning: an endpoint that is missing or refuses the connection while its process id is dead.
+  const gone = Effect.fnUntraced(function* (processId: number, endpoint: Endpoint) {
+    if (processAlive(processId)) return false;
+    const reach = yield* withDialSlot(
+      processId,
+      Effect.tap(connectSocket(endpoint), (socket) => Effect.sync(() => socket.destroy())),
+    ).pipe(Effect.timeoutOption(options.probeTimeoutMs), Effect.result);
+    if (Result.isSuccess(reach)) return false;
+    return reach.failure.absent && !processAlive(processId);
+  });
+
+  // #250 Step 2: a socket file that no entry names, whose owner process is gone, and that refuses.
+  const pruneOrphanSockets = Effect.fnUntraced(function* (named: ReadonlySet<string>) {
+    const sockets = yield* Effect.result(registry.sockets);
+    if (Result.isFailure(sockets)) {
+      return yield* Effect.logWarning(
+        `talk: the socket sweep failed: ${describeFailure(sockets.failure)}`,
+      );
     }
-    return reach.failure.absent && !processAlive(entry.processId);
+    for (const socket of sockets.success) {
+      const endpoint: Endpoint = { kind: "unix", path: socket.path };
+      if (named.has(socket.path) || !(yield* gone(socket.processId, endpoint))) continue;
+      const removed = yield* Effect.result(registry.removeSocket(endpoint));
+      if (Result.isFailure(removed)) {
+        yield* Effect.logWarning(
+          `talk: removing ${socket.path} failed: ${describeFailure(removed.failure)}`,
+        );
+      }
+    }
   });
 
   const list = Effect.gen(function* () {
     const listing = yield* registry.list;
     const peers: Array<Peer> = [];
     const pruned: Array<string> = [];
+    const named = new Set<string>();
     for (const { fileName, entry } of listing.entries) {
-      const key = targetKey(entry);
-      if (yield* definitelyDead(entry)) {
+      if (entry.endpoint.kind === "unix") named.add(entry.endpoint.path);
+      if (yield* gone(entry.processId, entry.endpoint)) {
         const removed = yield* Effect.result(
           Effect.andThen(registry.remove(fileName), registry.removeSocket(entry.endpoint)),
         );
@@ -338,7 +518,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         continue;
       }
       // A listing replaces the kept entry; a kept entry that it omits, pruned ones too, stays.
-      kept.set(key, entry);
+      keep(entry);
       peers.push({
         instanceId: entry.instanceId,
         sessionId: entry.sessionId,
@@ -349,14 +529,25 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         endpoint: entry.endpoint,
       });
     }
+    if (registry.endpointKind === "unix") yield* pruneOrphanSockets(named);
     const result: PeerListing = { peers, rejected: listing.rejected, pruned };
     return result;
   }).pipe(Effect.mapError((error) => new TalkListError({ reason: describeFailure(error) })));
+
+  const retain = Effect.fn("TalkClient.retain")(function* (target: Target) {
+    const entry = yield* readEntry(entryFileName(target.instanceId, target.sessionId));
+    if (Option.isNone(entry)) {
+      return yield* failed("not-found", "no entry names the target");
+    }
+    keep(entry.value);
+  });
 
   const client: Client = {
     list,
     request,
     probe: (target) => Effect.asVoid(request(target, PING_KIND, null, options.probeTimeoutMs)),
+    retain,
+    known: (instanceId) => Effect.sync(() => Option.fromNullishOr(keptPairs.get(instanceId))),
   };
   return client;
 });
