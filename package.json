@@ -41,8 +41,8 @@
     "test": "bun run --parallel test:unit test:integration",
     "lint": "oxlint",
     "lint:effect": "effect-tsgo diagnostics --project cli/tsconfig.json --strict --format text",
-    "format": "bun fmt --no-script cli/src cli/test cli/scripts vitest.config.ts",
-    "format:check": "bun fmt --no-script --check cli/src cli/test cli/scripts vitest.config.ts",
+    "format": "bun fmt --no-script cli/src cli/test cli/scripts cli/talk vitest.config.ts",
+    "format:check": "bun fmt --no-script --check cli/src cli/test cli/scripts cli/talk vitest.config.ts",
     "check": "bun run --parallel lint lint:effect format:check typecheck check:generated test"
   },
   "dependencies": {
