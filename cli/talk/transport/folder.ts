@@ -3,7 +3,7 @@
  * transport starts. The folder is the private runtime folder that each system
  * gives one user on one machine.
  */
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { posix, win32 } from "node:path";
 import { Effect, Result, Schema } from "effect";
 
@@ -108,13 +108,15 @@ export const TOOL_TIMEOUT_MS = 30_000;
 /**
  * Runs `command` with `args` and no shell, writes `input` to its standard
  * input, and waits for it to end. Interruption and the deadline
- * (`TOOL_TIMEOUT_MS` by default) kill the command.
+ * (`TOOL_TIMEOUT_MS` by default) kill the command. `onSpawn` is a test seam
+ * that gets the child process.
  */
 export const runTool = Effect.fn("runTool")(function* (
   command: string,
   args: ReadonlyArray<string>,
   input = "",
   timeoutMs: number = TOOL_TIMEOUT_MS,
+  onSpawn: (child: ChildProcess) => void = () => undefined,
 ) {
   return yield* Effect.callback<ToolResult, TalkToolError>((resume) => {
     let settled = false;
@@ -124,6 +126,7 @@ export const runTool = Effect.fn("runTool")(function* (
       resume(effect);
     };
     const child = spawn(command, [...args], { stdio: "pipe", windowsHide: true });
+    onSpawn(child);
     const stdout: Array<Buffer> = [];
     const stderr: Array<Buffer> = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));

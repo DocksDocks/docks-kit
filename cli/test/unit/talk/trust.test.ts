@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { type ChildProcess, spawnSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
@@ -886,38 +886,36 @@ describe("runTool deadline", () => {
   });
 
   it("kills a command that runs past its deadline and fails with a named reason", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "talk-tool-"));
-    const pidFile = join(dir, "pid");
-    const alive = (pid: number): boolean => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    let pid = 0;
+    let child: ChildProcess | undefined;
+    const closed = Promise.withResolvers<NodeJS.Signals | null>();
     try {
-      const script = `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 30000)`;
       const deadlineMs = 2_000;
       const started = Date.now();
       const error = await Effect.runPromise(
-        Effect.flip(runTool(process.execPath, ["-e", script], "", deadlineMs)),
+        Effect.flip(
+          runTool(
+            process.execPath,
+            ["-e", "setTimeout(() => {}, 30000)"],
+            "",
+            deadlineMs,
+            (spawned) => {
+              child = spawned;
+              spawned.on("close", (_code, signal) => closed.resolve(signal));
+            },
+          ),
+        ),
       );
       expect(error).toBeInstanceOf(TalkToolError);
       expect(error.reason).toMatch(/did not end within 2000 ms/);
       expect(Date.now() - started).toBeLessThan(10_000);
-      pid = Number(readFileSync(pidFile, "utf8"));
-      expect(pid).toBeGreaterThan(0);
-      // The deadline killed the child: no process holds its id soon after.
-      const deadline = Date.now() + 5_000;
-      while (alive(pid) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      expect(alive(pid)).toBe(false);
+      // The deadline killed the child: its own handle reports the close and the kill signal.
+      const timer = setTimeout(() => closed.resolve(null), 5_000);
+      const signal = await closed.promise;
+      clearTimeout(timer);
+      expect(signal).toBe("SIGKILL");
     } finally {
-      if (pid > 0 && alive(pid)) process.kill(pid, "SIGKILL");
-      rmSync(dir, { recursive: true, force: true });
+      if (child !== undefined && child.exitCode === null && child.signalCode === null)
+        child.kill("SIGKILL");
     }
   });
 });

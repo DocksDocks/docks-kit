@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import {
+  type BigIntStats,
+  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -13,6 +15,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -59,6 +62,7 @@ import {
   TalkPosixSystem,
   TalkTrustError,
   readSecretBytes,
+  readSecretFile,
 } from "../../../talk/transport/trustPosix";
 
 // Registry entries, their names, and the endpoint choice (#249 E5 Names, E7).
@@ -663,6 +667,89 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     );
     expect(Option.isNone(read)).toBe(true);
   });
+
+  /** The live POSIX system with one call changed. */
+  const posixWith = (
+    change: (live: TalkPosixSystem["Service"]) => TalkPosixSystem["Service"],
+  ): Layer.Layer<TalkPosixSystem> =>
+    Layer.effect(
+      TalkPosixSystem,
+      Effect.gen(function* () {
+        return change(yield* TalkPosixSystem);
+      }),
+    ).pipe(Layer.provide(TalkPosixSystem.layer), Layer.orDie);
+
+  it("reports a link that replaced the entry file after the lstat as a lookup error, not absence", async () => {
+    const target = join(base, "target.entry");
+    writeFileSync(target, encodeEntry(entryFor(folder)), { mode: 0o600 });
+    chmodSync(target, 0o600);
+    const fileName = entryFileName(INSTANCE, SESSION);
+    const path = join(folder, fileName);
+    symlinkSync(target, path);
+    // The `lstat` saw a regular file; at the `O_NOFOLLOW` open the name is a link.
+    const changed = TalkRegistry.layerPosix(folder).pipe(
+      Layer.provide(
+        posixWith((live) => ({
+          ...live,
+          view: {
+            ...live.view,
+            lstat: (name) => live.view.lstat(name === path ? target : name),
+          },
+        })),
+      ),
+    );
+    const error = await failIn(
+      changed,
+      TalkRegistry.use((registry) => registry.read(fileName)),
+    );
+    expect(error).toBeInstanceOf(TalkTrustError);
+    expect(error).toMatchObject({ path, reason: expect.stringMatching(/symbolic link replaced/) });
+    const listing = await runIn(
+      changed,
+      TalkRegistry.use((registry) => registry.list),
+    );
+    expect(listing.rejected).toEqual([
+      { fileName, reason: expect.stringMatching(/symbolic link replaced/) },
+    ]);
+  });
+
+  it("bounds a production read of a file that grows after the fstat size check", async () => {
+    const big = join(folder, "big.entry");
+    const grown = join(folder, "grown.entry");
+    writeFileSync(big, Buffer.alloc(MAX_SECRET_FILE_BYTES + 100, 1), { mode: 0o600 });
+    writeFileSync(grown, Buffer.alloc(50, 1), { mode: 0o600 });
+    chmodSync(big, 0o600);
+    chmodSync(grown, 0o600);
+    // `fstat` shows 10 bytes; the file has more by the time of the read.
+    const smallFstat = posixWith((live) => ({
+      ...live,
+      fstat: (fd) => {
+        const real = live.fstat(fd);
+        return Object.assign(Object.create(Object.getPrototypeOf(real)), real, {
+          size: 10n,
+        }) as BigIntStats;
+      },
+    }));
+    const error = await Effect.runPromise(
+      Effect.flip(readSecretFile(big)).pipe(Effect.provide(smallFstat)),
+    );
+    expect(error).toBeInstanceOf(TalkFileTooLarge);
+    expect(error).toMatchObject({ path: big });
+    const read = await Effect.runPromise(readSecretFile(grown).pipe(Effect.provide(smallFstat)));
+    expect(Option.getOrThrow(read).byteLength).toBe(50);
+  });
+
+  it("sizes the read buffer from the fstat size plus one sentinel byte", async () => {
+    const path = join(folder, "small.entry");
+    writeFileSync(path, "abc", { mode: 0o600 });
+    chmodSync(path, 0o600);
+    const read = await Effect.runPromise(
+      readSecretFile(path).pipe(Effect.provide(TalkPosixSystem.layer)),
+    );
+    const bytes = Option.getOrThrow(read);
+    expect(Buffer.from(bytes)).toEqual(Buffer.from("abc"));
+    expect(bytes.buffer.byteLength).toBe(4);
+  });
 });
 
 /** A stand-in for DPAPI on every system: it reverses the bytes behind a marker byte. */
@@ -858,11 +945,11 @@ describe("bounded entry reads (any system)", () => {
     const smallFd = openSync(small, "r");
     const largeFd = openSync(large, "r");
     try {
-      expect(Buffer.from(await Effect.runPromise(readSecretBytes(small, smallFd)))).toEqual(
+      expect(Buffer.from(await Effect.runPromise(readSecretBytes(small, smallFd, 3)))).toEqual(
         Buffer.from("abc"),
       );
-      // The `fstat` check is not part of this read: a file that grew after it still fails here.
-      const error = await Effect.runPromise(Effect.flip(readSecretBytes(large, largeFd)));
+      // `fstat` showed 3 bytes, and the file has more than the limit: the read stops at the limit.
+      const error = await Effect.runPromise(Effect.flip(readSecretBytes(large, largeFd, 3)));
       expect(error).toBeInstanceOf(TalkFileTooLarge);
       expect(error).toMatchObject({ path: large });
     } finally {
@@ -910,6 +997,26 @@ describe("Windows registry branch lookup failures (any system)", () => {
       TalkRegistry.use((registry) => registry.read(fileName)),
     );
     expect(error).toBeInstanceOf(TalkSealError);
+  });
+
+  it("reports a length change between the lstat and the read as a lookup error, not absence", async () => {
+    const layer = TalkRegistry.layerWindows(base, {
+      beforeRead: (path) => appendFileSync(path, "x"),
+    }).pipe(Layer.provide(fakeDpapi));
+    const fileName = entryFileName(INSTANCE, SESSION);
+    const path = join(base, fileName);
+    writeFileSync(path, Buffer.from([1, 2, 3]));
+    const error = await failIn(
+      layer,
+      TalkRegistry.use((registry) => registry.read(fileName)),
+    );
+    expect(error).toBeInstanceOf(TalkFileError);
+    expect(error).toMatchObject({ path, reason: "the file changed during the read" });
+    const listing = await runIn(
+      layer,
+      TalkRegistry.use((registry) => registry.list),
+    );
+    expect(listing.rejected).toEqual([{ fileName, reason: "the file changed during the read" }]);
   });
 });
 

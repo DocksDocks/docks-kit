@@ -352,6 +352,8 @@ export class TalkPosixSystem extends Context.Service<
     readonly aclListing: (path: string) => Effect.Effect<string, TalkTrustError>;
     /** `rmdir`, which removes only an empty folder; a failure leaves the folder. */
     readonly removeEmptyFolder: (path: string) => Effect.Effect<void>;
+    /** `fstat` of a descriptor that a client read opened. */
+    readonly fstat: (fd: number) => BigIntStats;
   }
 >()("docks-kit/talk/TalkPosixSystem") {
   static readonly layer = Layer.effect(
@@ -420,6 +422,7 @@ export class TalkPosixSystem extends Context.Service<
         clearAcl,
         aclListing,
         removeEmptyFolder,
+        fstat: (fd) => fstatSync(fd, { bigint: true }),
       });
     }),
   );
@@ -563,11 +566,23 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
     catch: (error) => fileError(path, "open", error),
   }).pipe(
     Effect.asSome,
-    Effect.catchTag("TalkFileError", (failure) =>
-      // ENOENT or ELOOP: the name went away or became a link after the `lstat`.
-      failure.code === "ENOENT" || failure.code === "ELOOP"
-        ? Effect.succeed(Option.none<number>())
-        : Effect.fail(failure),
+    Effect.catchTag(
+      "TalkFileError",
+      (failure): Effect.Effect<Option.Option<number>, TalkFileError | TalkTrustError> => {
+        // ENOENT: the name went away after the `lstat`, so no entry is there.
+        if (failure.code === "ENOENT") return Effect.succeed(Option.none<number>());
+        // ELOOP: a symbolic link replaced the regular file after the `lstat`. That is a detected
+        // change at the name, not an absent entry.
+        if (failure.code === "ELOOP") {
+          return Effect.fail(
+            new TalkTrustError({
+              path,
+              reason: "a symbolic link replaced the file during the read",
+            }),
+          );
+        }
+        return Effect.fail(failure);
+      },
     ),
   );
   if (Option.isNone(opened)) return Option.none<Uint8Array>();
@@ -575,7 +590,7 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
     Effect.succeed(opened.value),
     (fd) =>
       Effect.gen(function* () {
-        const stats = yield* fileCall(path, "fstat", () => fstatSync(fd, { bigint: true }));
+        const stats = yield* fileCall(path, "fstat", () => system.fstat(fd));
         const held = entryStat(stats);
         if (!isSameFile(held, expected)) {
           return yield* new TalkTrustError({
@@ -590,7 +605,7 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
         if (stats.size > BigInt(MAX_SECRET_FILE_BYTES)) {
           return yield* new TalkFileTooLarge({ path, reason: sizeFault(Number(stats.size)) });
         }
-        return Option.some(yield* readSecretBytes(path, fd));
+        return Option.some(yield* readSecretBytes(path, fd, Number(stats.size)));
       }),
     (fd) => Effect.sync(() => closeSync(fd)),
   );
@@ -614,11 +629,17 @@ export function readFromStart(fd: number, limit: number): Uint8Array {
 }
 
 /**
- * Reads a secret file through its descriptor: at most `MAX_SECRET_FILE_BYTES`
- * plus one byte, and a file with more bytes fails with `TalkFileTooLarge`.
+ * Reads a secret file through its descriptor. The first buffer holds the size
+ * that `fstat` showed plus one sentinel byte; when the sentinel byte fills, the
+ * file grew, and the read goes on up to `MAX_SECRET_FILE_BYTES` plus one byte.
+ * A file with more bytes than the limit fails with `TalkFileTooLarge`.
  */
-export const readSecretBytes = (path: string, fd: number) =>
-  fileCall(path, "read", () => readFromStart(fd, MAX_SECRET_FILE_BYTES + 1)).pipe(
+export const readSecretBytes = (path: string, fd: number, observedBytes: number) =>
+  fileCall(path, "read", () => {
+    const first = Math.min(observedBytes, MAX_SECRET_FILE_BYTES) + 1;
+    const bytes = readFromStart(fd, first);
+    return bytes.byteLength < first ? bytes : readFromStart(fd, MAX_SECRET_FILE_BYTES + 1);
+  }).pipe(
     Effect.filterOrFail(
       (bytes) => bytes.byteLength <= MAX_SECRET_FILE_BYTES,
       () =>

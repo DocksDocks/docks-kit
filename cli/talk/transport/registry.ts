@@ -426,11 +426,14 @@ const makePosixRegistry = Effect.fnUntraced(function* (folder: string) {
 export interface WindowsSeams {
   /** Writes the sealed blob to the temporary file; default `writeFileSync`. */
   readonly writeFile?: (fd: number, bytes: Uint8Array) => void;
+  /** Runs between the `lstat` and the read of an entry; default nothing. */
+  readonly beforeRead?: (path: string) => void;
 }
 
 const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string, seams: WindowsSeams) {
   const writeFile =
     seams.writeFile ?? ((fd: number, bytes: Uint8Array) => writeFileSync(fd, bytes));
+  const beforeRead = seams.beforeRead ?? (() => undefined);
   const dpapi = yield* TalkDpapi;
   const withDpapi = <A, E>(effect: Effect.Effect<A, E, TalkDpapi>): Effect.Effect<A, E> =>
     Effect.provideService(effect, TalkDpapi, dpapi);
@@ -460,13 +463,12 @@ const makeWindowsRegistry = Effect.fnUntraced(function* (folder: string, seams: 
       if (stats.size > MAX_SECRET_FILE_BYTES) {
         return yield* new TalkEntryRejected({ fileName, reason: sizeFault(stats.size) });
       }
+      beforeRead(path);
       const bytes = yield* readObserved(path, stats.size);
       if (bytes === undefined) return Option.none<Uint8Array>();
+      // A length change after the `lstat` is a detected change at the name, not absence.
       if (bytes === "changed") {
-        return yield* new TalkEntryRejected({
-          fileName,
-          reason: "the file changed during the read",
-        });
+        return yield* new TalkFileError({ path, reason: "the file changed during the read" });
       }
       return Option.some(bytes);
     });

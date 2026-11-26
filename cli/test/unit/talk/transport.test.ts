@@ -608,7 +608,9 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       mkdirSync(folder, { mode: 0o700 });
       chmodSync(folder, 0o700);
       const entryPath = join(folder, entryFileName(instanceId, sessionId));
-      const writeEntryAt = (path: string, startTime: number): void => {
+      // A rebind keeps the start time of a registration and changes only its endpoint.
+      const startTime = 1_700_000_000_000;
+      const writeEntryAt = (path: string): void => {
         const entry: RegistryEntry = {
           version: PROTOCOL_VERSION,
           instanceId,
@@ -680,14 +682,14 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       const secondPath = join(folder, `${hex(8)}.sock`);
       const first = await startFake(firstPath, "first", gate.promise);
       await startFake(secondPath, "second", Promise.resolve());
-      writeEntryAt(firstPath, 1);
+      writeEntryAt(firstPath);
       const results = await Effect.runPromise(
         Effect.gen(function* () {
           const client = yield* makeClient({ requestTimeoutMs: 5_000, probeTimeoutMs: 500 });
           const early = yield* Effect.forkChild(client.request(target, "echo", null));
           yield* promised(() => waitFor(() => first.hellos() === 1, SETTLE_MS, "the first hello"));
-          // A listing observes a newer entry before the first attempt proves the secret.
-          writeEntryAt(secondPath, 2);
+          // A listing observes the rebound endpoint before the first attempt proves the secret.
+          writeEntryAt(secondPath);
           yield* client.list;
           gate.resolve();
           const earlyResult = yield* Fiber.join(early);
