@@ -720,23 +720,62 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     writeFileSync(grown, Buffer.alloc(50, 1), { mode: 0o600 });
     chmodSync(big, 0o600);
     chmodSync(grown, 0o600);
-    // `fstat` shows 10 bytes; the file has more by the time of the read.
-    const smallFstat = posixWith((live) => ({
-      ...live,
-      fstat: (fd) => {
-        const real = live.fstat(fd);
-        return Object.assign(Object.create(Object.getPrototypeOf(real)), real, {
-          size: 10n,
-        }) as BigIntStats;
-      },
-    }));
+    interface Read {
+      readonly position: number;
+      readonly count: number;
+    }
+    // `fstat` shows `size` bytes; the file has more by the time of the read. Each read through
+    // the descriptor is recorded.
+    const observed = (size: bigint, reads: Array<Read>) =>
+      posixWith((live) => ({
+        ...live,
+        fstat: (fd) => {
+          const real = live.fstat(fd);
+          return Object.assign(Object.create(Object.getPrototypeOf(real)), real, {
+            size,
+          }) as BigIntStats;
+        },
+        read: (fd, buffer, offset, length, position) => {
+          const count = live.read(fd, buffer, offset, length, position);
+          reads.push({ position, count });
+          return count;
+        },
+      }));
+    const total = (reads: ReadonlyArray<Read>): number =>
+      reads.reduce((sum, read) => sum + read.count, 0);
+    const restarts = (reads: ReadonlyArray<Read>): number =>
+      reads.slice(1).filter((read) => read.position === 0).length;
+    const hardLimit = MAX_SECRET_FILE_BYTES + 1;
+
+    // Growth past the limit: the read goes on after the first buffer and stops at the hard limit.
+    const bigReads: Array<Read> = [];
     const error = await Effect.runPromise(
-      Effect.flip(readSecretFile(big)).pipe(Effect.provide(smallFstat)),
+      Effect.flip(readSecretFile(big)).pipe(Effect.provide(observed(10n, bigReads))),
     );
     expect(error).toBeInstanceOf(TalkFileTooLarge);
     expect(error).toMatchObject({ path: big });
-    const read = await Effect.runPromise(readSecretFile(grown).pipe(Effect.provide(smallFstat)));
+    expect(total(bigReads)).toBe(hardLimit);
+    expect(restarts(bigReads)).toBe(0);
+
+    // A first buffer at the hard limit that fills is rejected with no further read.
+    const fullReads: Array<Read> = [];
+    const full = await Effect.runPromise(
+      Effect.flip(readSecretFile(big)).pipe(
+        Effect.provide(observed(BigInt(MAX_SECRET_FILE_BYTES), fullReads)),
+      ),
+    );
+    expect(full).toBeInstanceOf(TalkFileTooLarge);
+    expect(total(fullReads)).toBe(hardLimit);
+    expect(restarts(fullReads)).toBe(0);
+
+    // Growth within the limit: every byte is read once.
+    const grownReads: Array<Read> = [];
+    const read = await Effect.runPromise(
+      readSecretFile(grown).pipe(Effect.provide(observed(10n, grownReads))),
+    );
     expect(Option.getOrThrow(read).byteLength).toBe(50);
+    expect(total(grownReads)).toBe(50);
+    expect(restarts(grownReads)).toBe(0);
   });
 
   it("sizes the read buffer from the fstat size plus one sentinel byte", async () => {

@@ -126,7 +126,6 @@ export const runTool = Effect.fn("runTool")(function* (
       resume(effect);
     };
     const child = spawn(command, [...args], { stdio: "pipe", windowsHide: true });
-    onSpawn(child);
     const stdout: Array<Buffer> = [];
     const stderr: Array<Buffer> = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -146,10 +145,25 @@ export const runTool = Effect.fn("runTool")(function* (
       ),
     );
     child.stdin.end(input);
-    return Effect.sync(() => {
+    const kill = (): void => {
       settled = true;
       child.kill("SIGKILL");
-    });
+    };
+    // The observer runs once the handlers are in place; when it throws, the child ends too.
+    try {
+      onSpawn(child);
+    } catch (error) {
+      child.kill("SIGKILL");
+      settle(
+        Effect.fail(
+          new TalkToolError({
+            command,
+            reason: `the spawn observer failed: ${error instanceof Error ? error.message : String(error)}`,
+          }),
+        ),
+      );
+    }
+    return Effect.sync(kill);
   }).pipe(
     Effect.timeoutOrElse({
       duration: timeoutMs,

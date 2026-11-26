@@ -354,6 +354,8 @@ export class TalkPosixSystem extends Context.Service<
     readonly removeEmptyFolder: (path: string) => Effect.Effect<void>;
     /** `fstat` of a descriptor that a client read opened. */
     readonly fstat: (fd: number) => BigIntStats;
+    /** `pread` on a descriptor that a client read opened: gives the byte count it read. */
+    readonly read: DescriptorRead;
   }
 >()("docks-kit/talk/TalkPosixSystem") {
   static readonly layer = Layer.effect(
@@ -423,6 +425,7 @@ export class TalkPosixSystem extends Context.Service<
         aclListing,
         removeEmptyFolder,
         fstat: (fd) => fstatSync(fd, { bigint: true }),
+        read: readSync,
       });
     }),
   );
@@ -605,7 +608,7 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
         if (stats.size > BigInt(MAX_SECRET_FILE_BYTES)) {
           return yield* new TalkFileTooLarge({ path, reason: sizeFault(Number(stats.size)) });
         }
-        return Option.some(yield* readSecretBytes(path, fd, Number(stats.size)));
+        return Option.some(yield* readSecretBytes(path, fd, Number(stats.size), system.read));
       }),
     (fd) => Effect.sync(() => closeSync(fd)),
   );
@@ -616,29 +619,57 @@ export const readSecretFile = Effect.fn("readSecretFile")(function* (path: strin
 /** The state of a published secret file: still the file that the publisher wrote, or replaced. */
 export type KeptFileState = "intact" | "replaced";
 
+/** `readSync` with a position: reads into `buffer` from `offset` and gives the byte count. */
+export type DescriptorRead = (
+  fd: number,
+  buffer: Uint8Array,
+  offset: number,
+  length: number,
+  position: number,
+) => number;
+
+// Fills `buffer` from index `filled` with the bytes at the same file positions, until it is full
+// or the file ends. Gives the filled length.
+function fillFrom(fd: number, buffer: Uint8Array, filled: number, read: DescriptorRead): number {
+  let end = filled;
+  while (end < buffer.byteLength) {
+    const count = read(fd, buffer, end, buffer.byteLength - end, end);
+    if (count === 0) break;
+    end += count;
+  }
+  return end;
+}
+
 /** Reads up to `limit` bytes from offset 0 of the descriptor. */
 export function readFromStart(fd: number, limit: number): Uint8Array {
   const buffer = new Uint8Array(limit);
-  let filled = 0;
-  while (filled < limit) {
-    const count = readSync(fd, buffer, filled, limit - filled, filled);
-    if (count === 0) break;
-    filled += count;
-  }
-  return buffer.subarray(0, filled);
+  return buffer.subarray(0, fillFrom(fd, buffer, 0, readSync));
 }
 
 /**
  * Reads a secret file through its descriptor. The first buffer holds the size
- * that `fstat` showed plus one sentinel byte; when the sentinel byte fills, the
- * file grew, and the read goes on up to `MAX_SECRET_FILE_BYTES` plus one byte.
- * A file with more bytes than the limit fails with `TalkFileTooLarge`.
+ * that `fstat` showed plus one sentinel byte. When the sentinel byte fills,
+ * the file grew: a first buffer at the hard limit is rejected at once, and any
+ * other read goes on after the bytes it has, never from offset 0 again, up to
+ * `MAX_SECRET_FILE_BYTES` plus one byte in total. A file with more bytes than
+ * the limit fails with `TalkFileTooLarge`.
  */
-export const readSecretBytes = (path: string, fd: number, observedBytes: number) =>
+export const readSecretBytes = (
+  path: string,
+  fd: number,
+  observedBytes: number,
+  read: DescriptorRead = readSync,
+) =>
   fileCall(path, "read", () => {
-    const first = Math.min(observedBytes, MAX_SECRET_FILE_BYTES) + 1;
-    const bytes = readFromStart(fd, first);
-    return bytes.byteLength < first ? bytes : readFromStart(fd, MAX_SECRET_FILE_BYTES + 1);
+    const hardLimit = MAX_SECRET_FILE_BYTES + 1;
+    const first = new Uint8Array(Math.min(observedBytes, MAX_SECRET_FILE_BYTES) + 1);
+    const firstFilled = fillFrom(fd, first, 0, read);
+    if (firstFilled < first.byteLength || first.byteLength >= hardLimit) {
+      return first.subarray(0, firstFilled);
+    }
+    const grown = new Uint8Array(hardLimit);
+    grown.set(first);
+    return grown.subarray(0, fillFrom(fd, grown, firstFilled, read));
   }).pipe(
     Effect.filterOrFail(
       (bytes) => bytes.byteLength <= MAX_SECRET_FILE_BYTES,
