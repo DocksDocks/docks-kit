@@ -426,6 +426,11 @@ test('case refuses a bundled arm without the configurations of agents --bundled,
   assert.throws(() => prepare.prepareCase({ case: casePath, arms: 'V1', runs: '1', out: path.join(root, 'b'), project }, repo), {
     message: `arm V1 runs a bundled agent, and ${configsFile} holds no bundled configurations; run prepare.mjs agents --bundled with a --project of its own, and give case that --project`,
   });
+  // A project whose bundled agents another omp release rendered: the scorer of this checkout would refuse its runs.
+  put(project, '.omp/agents/review-bench-configs.json', { configs: [CONFIGS.low], bundled: { ompVersion: NEWER_OMP } });
+  assert.throws(() => prepare.prepareCase({ case: casePath, arms: 'R1', runs: '1', out: path.join(root, 'c'), project }, repo), {
+    message: `arm R1 runs a bundled agent of omp ${NEWER_OMP} (${configsFile}), but this checkout vendors the bundled agents of omp ${BUNDLED_OMP_VERSION}; run prepare.mjs agents --bundled in that project again`,
+  });
 });
 
 test('case refuses a bundled case whose seed edits a file that the snapshot and the diffs leave out', () => {

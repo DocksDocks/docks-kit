@@ -15,7 +15,10 @@
   allow rule does not vouch for a command with a leading `NAME=value` unless
   the rule starts with one.
 - The review benchmark renders the bundled omp agents from the v19.2.1
-  copies, which are byte-identical to v19.1.1.
+  copies, which are byte-identical to v19.1.1, and its omp transcript
+  fixtures are captured again on omp 19.2.1. `prepare.mjs case` now refuses
+  a bundled arm whose project holds bundled agents of another omp release,
+  before it writes prompts that the scorer would refuse.
 - pi-intercom 0.19.0 does not load on omp 19.2.x: omp no longer provides the
   `@earendil-works/pi-tui` package that it imports. The `talk` extension of
   DocksDocks/docks-kit#248 replaces it in a later release.

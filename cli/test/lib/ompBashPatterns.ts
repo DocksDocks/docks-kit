@@ -183,7 +183,9 @@ function restrictionRule(
  * `command`, or undefined when no rule matches and the approval mode decides
  * (the kit ships `yolo`). An allow rule never vouches for a command that starts
  * with an assignment unless the rule starts with one too: omp would strip only
- * the variables of `bash.allowedEnvVars`, and the kit sets none.
+ * the variables of `bash.allowedEnvVars` and of the rule's own `env` list, and
+ * kit rules set neither. omp trims the rule text when it loads a rule
+ * (`normalizeBashApprovalPattern`), so both checks read the trimmed text.
  */
 export function ompApproval(
   rules: ReadonlyArray<OmpBashRule>,
@@ -195,9 +197,10 @@ export function ompApproval(
   if (hasShellControl(command)) return restrictionRule(rules, whole, segments)?.approval;
   const leadingAssignment = SHELL_ASSIGNMENT.test(command.trimStart());
   const rule = rules.find(({ match, approval }) => {
-    const regex = patternRegExp(match);
+    const pattern = match.trim().replace(/\s+/gu, " ");
+    const regex = patternRegExp(pattern);
     if (approval === "allow")
-      return (!leadingAssignment || SHELL_ASSIGNMENT.test(match)) && regex.test(whole);
+      return (!leadingAssignment || SHELL_ASSIGNMENT.test(pattern)) && regex.test(whole);
     return regex.test(whole) || segments.some((segment) => regex.test(segment));
   });
   return rule?.approval;

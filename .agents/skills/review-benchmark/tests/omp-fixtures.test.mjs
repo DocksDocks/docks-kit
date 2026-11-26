@@ -3,17 +3,17 @@
 // release that moves a record or a field that score.mjs reads fails here, and a raised omp `verified` pin fails until
 // the fixtures are captured again with that release:
 // - ProbeC1LowR1Full.jsonl and ProbeC1LowR1Manager1.jsonl: the reviewer and the manager of a probe run (`prepare.mjs
-//   probe`) with agents of `prepare.mjs agents` (frontmatter model and effort, tier overrides), omp 19.1.1;
-// - CodeReview213R9.jsonl: a code-reviewer task agent with reads of skill:// URIs, of local paths with a column cut,
-//   and a middle cut of a long read, omp 19.1.1;
-// - PinRaise/PinRaise.NestedFixtureScout.jsonl: a nested dispatch with a failed tool call and `model_usage` side
-//   calls, omp 19.1.1;
+//   probe`) with agents of `prepare.mjs agents` (frontmatter model and effort, tier overrides), omp 19.2.1;
+// - CodeReview253Fixture.jsonl: a code-reviewer task agent with reads of skill:// URIs, of local paths with a column
+//   cut, and a middle cut of a long read, omp 19.2.1;
+// - PinRaise192/PinRaise192.NestedFixtureScout.jsonl: a nested dispatch with a failed tool call and `model_usage`
+//   side calls, omp 19.2.1;
 // - FailProbeFlex.jsonl: the probe reviewer of the configuration low-flex (`review-bench-candidate-code-low-flex`,
 //   model gpt-6.1-terra, effort low, tier override flex) whose pinned requests failed (`stopReason: "error"`, no
 //   served tier): the codex API refused the tier, omp wrote a retry-fallback model_change to gpt-6.2-sol, whose
-//   request failed too, and then a second one to claude-opus-5-5, which served the reply, omp 19.1.1;
-// - main-session.jsonl: the first 60 records of a main session with several user messages and `model_usage` side
-//   calls, omp 19.1.1.
+//   request failed too, and then a second one to claude-opus-5-5, which served the reply, omp 19.2.1;
+// - main-session.jsonl: a whole main session of `omp -p` with two prompts and `model_usage` side calls (a task label
+//   and two `find` calls), the session that dispatched FailProbeFlex.jsonl, omp 19.2.1.
 // The synthetic test 'a failed request without a served tier stays out of the model and tier checks and keeps its
 // time' adds the case that the failed-request fixture does not show: a message that stopped on an error with a
 // served tier.
@@ -52,8 +52,8 @@ const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtur
 // The fake home folder of scripts/redact.mjs, and the checkout and the plugin root of the captures under it.
 const HOME = '/fixture-home';
 const CHECKOUT = `${HOME}/projects/docks-kit`;
-// The plugin root of the probe agents: `prepare.mjs agents` ran in a second checkout of the repository.
-const PROBE_PLUGIN = `${HOME}/checkouts/pins/SoT/.omp/plugin`;
+// The plugin root of the probe agents: `prepare.mjs agents` ran in the checkout that dispatched the probe.
+const PROBE_PLUGIN = `${CHECKOUT}/SoT/.omp/plugin`;
 const TERRA = 'openai-codex/gpt-6.1-terra';
 const SOL = 'openai-codex/gpt-6.1-sol';
 const SOL62 = 'openai-codex/gpt-6.2-sol';
@@ -96,9 +96,9 @@ const lastReply = (text) =>
 
 test('the fixture folder holds the six redacted omp transcripts and no private path', () => {
   assert.deepEqual(fixtureFiles(), [
-    'CodeReview213R9.jsonl',
+    'CodeReview253Fixture.jsonl',
     'FailProbeFlex.jsonl',
-    'PinRaise/PinRaise.NestedFixtureScout.jsonl',
+    'PinRaise192/PinRaise192.NestedFixtureScout.jsonl',
     'ProbeC1LowR1Full.jsonl',
     'ProbeC1LowR1Manager1.jsonl',
     'main-session.jsonl',
@@ -140,14 +140,14 @@ test('the shape check names a renamed thinking level field and a retyped usage f
     () => checkTranscriptShape(transcriptEntries(renamed, 'renamed.jsonl'), 'renamed.jsonl'),
     /^Error: renamed\.jsonl does not have the transcript shape of scripts\/omp\.mjs: thinking_level_change\.thinkingLevel is missing\./,
   );
-  const retyped = text.replace('"usage":{"input":7209,"output":45,', '"usage":{"input":7209,"output":"45",');
+  const retyped = text.replace('"usage":{"input":6803,"output":100,', '"usage":{"input":6803,"output":"100",');
   assert.notEqual(retyped, text);
   assert.throws(
     () => checkTranscriptShape(transcriptEntries(retyped, 'retyped.jsonl'), 'retyped.jsonl'),
     /: assistant\.message\.usage\.output is of type string, not number\./,
   );
   // Records of two omp versions in one transcript stop the check too.
-  const mixed = text.replace('"runtime":{"version":"19.1.1"}', '"runtime":{"version":"19.1.2"}');
+  const mixed = text.replace('"runtime":{"version":"19.2.1"}', '"runtime":{"version":"19.2.2"}');
   assert.throws(
     () => checkTranscriptShape(transcriptEntries(mixed, 'mixed.jsonl'), 'mixed.jsonl'),
     /its records name more than one omp version/,
@@ -177,14 +177,14 @@ test('the probe reviewer fixture gives the pinned model, effort, and tier, the t
   const text = fixtureText(file);
   const entries = transcriptEntries(text, file);
   const timing = parseTranscript(entries, file, TERRA);
-  assert.deepEqual(timing, { seconds: 3.7, tokens: 17956 });
+  assert.deepEqual(timing, { seconds: 6.6, tokens: 17212 });
   assert.equal(timing.tokens, totalTokens(text, TERRA));
   const pinned = { model: TERRA, effort: 'low', servedTier: 'default' };
   assert.deepEqual(transcriptFacts(entries), {
     requestedTier: 'default',
     messages: [pinned, pinned],
     sideCalls: [],
-    ompVersion: '19.1.1',
+    ompVersion: '19.2.1',
     toolCalls: [{ name: 'read', path: `${PROBE_PLUGIN}/skills/code-reviewer/SKILL.md` }],
   });
   assert.deepEqual(transcriptSession(entries), {
@@ -194,10 +194,9 @@ test('the probe reviewer fixture gives the pinned model, effort, and tier, the t
     skillRoots: [],
   });
   // omp 19 gives a task agent without an output schema no yield tool: the reply is the text of its last message.
-  // This reviewer answered the probe task with a blocked review block, not `ready`; the probe checks only the model,
-  // the effort, and the tier.
-  const reply =
-    '### Code review round unspecified\n\nCode-review: blocked\n\nMissing review inputs: round mode, issue number, plan export, diff paths, and base-instructions folder.\n\n## Standards\n\nNone.\n\n## Spec\n\nNone.';
+  // This reviewer read the skill of its plugin root once and replied `ready`; the probe checks only the model, the
+  // effort, and the tier.
+  const reply = 'ready';
   assert.deepEqual(lastReply(text), [reply]);
   assert.ok(!text.includes('"name":"yield"'));
   assert.deepEqual(fixerReplies(entries), {});
@@ -215,13 +214,13 @@ test('the probe manager fixture gives the manager setting and its reply text', (
   const file = 'ProbeC1LowR1Manager1.jsonl';
   const text = fixtureText(file);
   const entries = transcriptEntries(text, file);
-  assert.deepEqual(parseTranscript(entries, file, SOL), { seconds: 5.1, tokens: 5342 });
+  assert.deepEqual(parseTranscript(entries, file, SOL), { seconds: 4.2, tokens: 5794 });
   assert.equal(parseTranscript(entries, file, SOL).tokens, totalTokens(text, SOL));
   assert.deepEqual(transcriptFacts(entries), {
     requestedTier: 'priority',
     messages: [{ model: SOL, effort: 'high', servedTier: 'priority' }],
     sideCalls: [],
-    ompVersion: '19.1.1',
+    ompVersion: '19.2.1',
   });
   assert.deepEqual(lastReply(text), ['ready']);
   assert.deepEqual(transcriptSession(entries), { cwd: CHECKOUT, pluginRoots: [], agentFiles: [], skillRoots: [] });
@@ -245,7 +244,7 @@ test('the failed-request fixture keeps both failed requests out of the model and
       { model: OPUS, effort: 'high', servedTier: null },
     ],
     sideCalls: [],
-    ompVersion: '19.1.1',
+    ompVersion: '19.2.1',
   });
   assert.deepEqual(
     records(text)
@@ -267,10 +266,10 @@ test('the failed-request fixture keeps both failed requests out of the model and
 });
 
 test('the code-reviewer fixture records its reads, the column cut, and a middle cut with head and tail ranges', () => {
-  const file = 'CodeReview213R9.jsonl';
+  const file = 'CodeReview253Fixture.jsonl';
   const text = fixtureText(file);
   const entries = transcriptEntries(text, file);
-  assert.deepEqual(parseTranscript(entries, file, SOL62), { seconds: 55.9, tokens: 354375 });
+  assert.deepEqual(parseTranscript(entries, file, SOL62), { seconds: 151.3, tokens: 1818193 });
   assert.equal(parseTranscript(entries, file, SOL62).tokens, totalTokens(text, SOL62));
   const facts = transcriptFacts(entries);
   assert.equal(facts.requestedTier, 'priority');
@@ -278,10 +277,10 @@ test('the code-reviewer fixture records its reads, the column cut, and a middle 
     [...new Set(facts.messages.map((message) => JSON.stringify(message)))],
     [JSON.stringify({ model: SOL62, effort: 'high', servedTier: 'priority' })],
   );
-  assert.equal(facts.toolCalls.length, 40);
+  assert.equal(facts.toolCalls.length, 96);
   const paths = facts.toolCalls.map((call) => call.path);
   for (const uri of ['skill://code-reviewer/SKILL.md', 'skill://unslop']) assert.ok(paths.includes(uri), uri);
-  assert.ok(paths.includes(`${CHECKOUT}/.git/docks-review/code-review-213-round-9-delta.diff`));
+  assert.ok(paths.includes(`${CHECKOUT}/.git/docks-review/code-review-253-fixture.diff`));
   const details = records(text)
     .filter((entry) => entry.type === 'message' && entry.message.role === 'toolResult')
     .map((entry) => entry.message.details);
@@ -293,19 +292,19 @@ test('the code-reviewer fixture records its reads, the column cut, and a middle 
   assert.deepEqual(
     [middle.meta.truncation.headRange, middle.meta.truncation.tailRange],
     [
-      { start: 1, end: 355 },
-      { start: 988, end: 1352 },
+      { start: 1, end: 348 },
+      { start: 1158, end: 1522 },
     ],
   );
   const numbers = middle.displayContent.lineNumbers;
-  assert.deepEqual([numbers.length, numbers[0], numbers.at(-1)], [1351, 1, 1351]);
+  assert.deepEqual([numbers.length, numbers[0], numbers.at(-1)], [1521, 1, 1521]);
   // A read of a file by an end cut gives its shown range.
   assert.ok(details.some((detail) => Number.isInteger(detail?.meta?.truncation?.shownRange?.start)));
 });
 
 test('the nested dispatch fixture is picked by its child name and keeps its side calls out of the tokens', () => {
   const files = fixtureFiles().map((file) => path.join(FIXTURES, file));
-  const nested = path.join(FIXTURES, 'PinRaise', 'PinRaise.NestedFixtureScout.jsonl');
+  const nested = path.join(FIXTURES, 'PinRaise192', 'PinRaise192.NestedFixtureScout.jsonl');
   assert.equal(
     pickTranscript(files, 'NestedFixtureScout', () => true),
     nested,
@@ -313,7 +312,7 @@ test('the nested dispatch fixture is picked by its child name and keeps its side
   const text = fs.readFileSync(nested, 'utf8');
   const file = path.basename(nested);
   const entries = transcriptEntries(text, file);
-  assert.deepEqual(parseTranscript(entries, file, LUNA), { seconds: 14.7, tokens: 25868 });
+  assert.deepEqual(parseTranscript(entries, file, LUNA), { seconds: 6.7, tokens: 24116 });
   assert.equal(parseTranscript(entries, file, LUNA).tokens, totalTokens(text, LUNA));
   const facts = transcriptFacts(entries);
   assert.equal(facts.requestedTier, 'priority');
@@ -321,7 +320,7 @@ test('the nested dispatch fixture is picked by its child name and keeps its side
     [...new Set(facts.messages.map((message) => JSON.stringify(message)))],
     [JSON.stringify({ model: LUNA, effort: 'medium', servedTier: 'priority' })],
   );
-  assert.equal(facts.ompVersion, '19.1.1');
+  assert.equal(facts.ompVersion, '19.2.1');
   assert.ok(facts.sideCalls.every((call) => call.model === 'openrouter/typesafe/jev-1.14'));
   assert.deepEqual(
     facts.sideCalls.map((call) => call.purpose),
@@ -330,12 +329,12 @@ test('the nested dispatch fixture is picked by its child name and keeps its side
   // The side calls do not count: the tokens above are the sum of the assistant messages only.
   assert.equal(
     facts.sideCalls.reduce((sum, call) => sum + call.tokens, 0),
-    14819,
+    22098,
   );
   // A call that omp did not run has an error result: the read of a file that does not exist.
   assert.deepEqual(
     facts.toolCalls.filter((call) => call.error).map((call) => call.path),
-    [`${HOME}/checkouts/pins/cli/src/engine-native/no-such-file.ts`],
+    [`${CHECKOUT}/cli/src/engine-native/no-such-file.ts`],
   );
   assert.equal(transcriptSession(entries).cwd, CHECKOUT);
 });
@@ -344,7 +343,7 @@ test('the main-session fixture marks more than one task as revived and lists its
   const file = 'main-session.jsonl';
   const text = fixtureText(file);
   const entries = transcriptEntries(text, file);
-  assert.deepEqual(parseTranscript(entries, file, OPUS), { seconds: 411.5, tokens: 652565 });
+  assert.deepEqual(parseTranscript(entries, file, OPUS), { seconds: 10.8, tokens: 95747 });
   assert.equal(parseTranscript(entries, file, OPUS).tokens, totalTokens(text, OPUS));
   const facts = transcriptFacts(entries);
   assert.equal(facts.revived, true);
@@ -352,15 +351,14 @@ test('the main-session fixture marks more than one task as revived and lists its
   assert.deepEqual(
     facts.sideCalls.map((call) => [call.model, call.purpose]),
     [
-      [LUNA, 'skill-description'],
-      [OPUS, 'title-fork'],
-      ['openrouter/typesafe/jev-1.14', 'auto-graph'],
-      [OPUS, 'composer-prediction'],
+      [LUNA, 'task-label'],
+      ['openrouter/typesafe/jev-1.14', 'find'],
+      ['openrouter/typesafe/jev-1.14', 'find'],
     ],
   );
   assert.deepEqual(
     facts.sideCalls.map((call) => call.tokens),
-    [199, 26141, 2401, 38946],
+    [302, 1400, 2498],
   );
 });
 
@@ -378,9 +376,9 @@ test('transcripts reads the probe fixtures into the probe workspace with the con
     return { status: 0, stdout: `omp/${VERIFIED_OMP}\n`, stderr: '' };
   };
   prepare.prepareProbe({ out: ws, project }, REPO_ROOT, { run });
-  // The captures ran in the probe workspace <home>/.cache/docks-kit/scratch/pinraise-EjcLjA/bench-probe/probe: the
-  // fixtures name it under the fake home folder, so the test moves it to this workspace.
-  const captured = `${HOME}/.cache/docks-kit/scratch/pinraise-EjcLjA/bench-probe/probe`;
+  // The captures ran in the probe workspace <checkout>/.git/docks-review/bench-253-probe/probe: the fixtures name it
+  // under the fake home folder, so the test moves it to this workspace.
+  const captured = `${CHECKOUT}/.git/docks-review/bench-253-probe/probe`;
   for (const name of ['ProbeC1LowR1Full', 'ProbeC1LowR1Manager1']) {
     put(sessions, `${name}.jsonl`, fixtureText(`${name}.jsonl`).replaceAll(captured, ws));
   }
@@ -389,7 +387,7 @@ test('transcripts reads the probe fixtures into the probe workspace with the con
   assert.deepEqual(transcriptsCommand(ws, sessions).sort(), ['ProbeC1LowR1Full', 'ProbeC1LowR1Manager1']);
   const meta = readJson(path.join(runDir, 'meta.json'));
   const reviewer = meta.reviewers.full;
-  assert.deepEqual([reviewer.seconds, reviewer.tokens, reviewer.ompVersion], [3.7, 17956, '19.1.1']);
+  assert.deepEqual([reviewer.seconds, reviewer.tokens, reviewer.ompVersion], [6.6, 17212, '19.2.1']);
   // The transcript shows the configuration of the probe at every message.
   assert.equal(reviewer.requestedTier, config.tier);
   for (const message of reviewer.messages) {
@@ -399,6 +397,6 @@ test('transcripts reads the probe fixtures into the probe workspace with the con
   // The reviewer read the skill of its own plugin root only.
   assert.deepEqual(reviewer.readScope, { outside: [] });
   const managerEntry = meta.manager.agents['manager-1'];
-  assert.deepEqual([managerEntry.requestedTier, managerEntry.ompVersion], [manager.tier, '19.1.1']);
+  assert.deepEqual([managerEntry.requestedTier, managerEntry.ompVersion], [manager.tier, '19.2.1']);
   assert.deepEqual(managerEntry.messages, [{ model: manager.model, effort: manager.effort, servedTier: manager.tier }]);
 });

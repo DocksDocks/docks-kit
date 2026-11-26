@@ -389,13 +389,17 @@ describe("omp bash.patterns policy under yolo", () => {
 
   // omp 19.2.1 `bashApprovalRuleMatches`: an allow rule vouches for a command
   // with leading assignments only when the rule itself starts with one, because
-  // the kit sets no `bash.allowedEnvVars` that omp could strip first.
+  // the kit sets no `bash.allowedEnvVars` and no per-rule `env` list that omp
+  // could strip first. omp trims the rule text when it loads the rule.
   it("keeps a broad allow rule from a command with leading assignments", () => {
     expect(
       ompApproval([{ match: "* git status", approval: "allow" }], "MODE=demo git status"),
     ).toBe(undefined);
     expect(
       ompApproval([{ match: "MODE=* git status", approval: "allow" }], "MODE=demo git status"),
+    ).toBe("allow");
+    expect(
+      ompApproval([{ match: "  MODE=* git status", approval: "allow" }], "MODE=demo git status"),
     ).toBe("allow");
   });
 
