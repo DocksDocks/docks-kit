@@ -28,9 +28,11 @@ static `import`, an `export ... from`, a `require` (also Bun's `__require` and
 finds static forms with `Bun.Transpiler.scanImports` and reads the other forms
 in code only, so import-like text in strings, templates, comments, and
 regular expressions does not fail the build. The build writes `talk.js`
-through an exclusive temporary file and a rename, so it never follows an
-existing link. The package smoke (`cli/scripts/package-smoke.ts`) fails when
-the tarball holds a `cli/talk/` entry, a folder entry included.
+through an exclusive temporary file and a rename, so it replaces a link at the
+name `talk.js` and never writes through it; a link in the path of the output
+folder is followed, so give a folder that you own. The package smoke
+(`cli/scripts/package-smoke.ts`) fails when the tarball holds a `cli/talk/`
+entry, a folder entry included.
 
 ## Registry folder
 

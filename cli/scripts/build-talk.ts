@@ -54,14 +54,21 @@ const COMMENT_END = "*/";
 // match them.
 const HOST_PREFIX = "@oh-my-pi/";
 const DYNAMIC_IMPORT_KIND = "dynamic-import";
-// `import(`, but not a property call such as `x.import(`. A spread `...import(` is an import.
-const DYNAMIC_IMPORT = /(?<![\w$]|(?<!\.)\.\s*)import\s*\(/g;
+// Not a property such as `x.name` or `x?.name`. A spread `...name` is not a property.
+const NOT_PROPERTY = String.raw`(?<![\w$]|(?<!\.)\.\s*)`;
+// `import(`, but not a property call such as `x.import(`.
+const DYNAMIC_IMPORT = new RegExp(String.raw`${NOT_PROPERTY}import\s*\(`, "g");
 // In codeOnly() text, a string literal is two quotes with only spaces between them.
 const ONE_STRING_ARGUMENT = /\s*(?:" *"|' *')\s*\)/y;
+// After the ")" of `import(...)`, a "{" starts the body of a method definition.
+const METHOD_BODY = /\s*\{/y;
 // A call of `require`, `__require`, or `import.meta.require` whose argument starts
-// with a quote. Bun emits `__require` for a `require` call, and scanImports does
-// not report it.
-const REQUIRE_CALL = /(?<![\w$])[\w$]*require\s*\(\s*(?=["'`])/g;
+// with a quote, but not a property call such as `x.require(`. Bun emits
+// `__require` for a `require` call, and scanImports does not report it.
+const REQUIRE_CALL = new RegExp(
+  String.raw`${NOT_PROPERTY}(?:import\s*\.\s*meta\s*\.\s*)?[\w$]*require\s*\(\s*(?=["'\`])`,
+  "g",
+);
 const SNIPPET_LENGTH = 60;
 
 /** A package that adds code to the bundle has no license file. */
@@ -119,7 +126,26 @@ function snippet(code: string, at: number): string {
   return JSON.stringify(code.slice(at, at + SNIPPET_LENGTH));
 }
 
-/** The ways the emitted code breaks the host-import rules; empty when it holds. */
+/** The index of the ")" that closes the "(" at `open` in codeOnly() text, or -1. */
+function closingParen(masked: string, open: number): number {
+  let depth = 0;
+  for (let at = open; at < masked.length; at += 1) {
+    if (masked[at] === "(") depth += 1;
+    else if (masked[at] === ")") {
+      depth -= 1;
+      if (depth === 0) return at;
+    }
+  }
+  return -1;
+}
+
+/** The ways the emitted code breaks the host-import rules; empty when it holds.
+ *
+ * Limits: the rules use a lexer, not a parser. A "/" after the ")" of a call
+ * counts as a division and a "/" after "}" as a regular expression. A call
+ * `import(x)` followed by a new line and a block counts as a method definition.
+ * A loader that the code reaches through another name, such as
+ * `const load = require` or `import.meta["require"]`, is not seen. */
 export function hostImportProblems(code: string): ReadonlyArray<string> {
   const problems: Array<string> = [];
   for (const { kind, path } of new Bun.Transpiler({ loader: "js" }).scanImports(code)) {
@@ -135,12 +161,16 @@ export function hostImportProblems(code: string): ReadonlyArray<string> {
     }
   }
   for (const match of masked.matchAll(DYNAMIC_IMPORT)) {
-    ONE_STRING_ARGUMENT.lastIndex = match.index + match[0].length;
-    if (!ONE_STRING_ARGUMENT.test(masked)) {
-      problems.push(
-        `dynamic import without one string literal at offset ${match.index}: ${snippet(code, match.index)}`,
-      );
-    }
+    const open = match.index + match[0].length - 1;
+    ONE_STRING_ARGUMENT.lastIndex = open + 1;
+    if (ONE_STRING_ARGUMENT.test(masked)) continue;
+    // A method named `import`, such as `import(name) { ... }`, is not an import.
+    const close = closingParen(masked, open);
+    METHOD_BODY.lastIndex = close + 1;
+    if (close !== -1 && METHOD_BODY.test(masked)) continue;
+    problems.push(
+      `dynamic import without one string literal at offset ${match.index}: ${snippet(code, match.index)}`,
+    );
   }
   return problems;
 }
@@ -178,7 +208,7 @@ const CONTROL_WORDS: Readonly<Record<string, true>> = {
  * Each offset stays the same. A "/" starts a regular expression at the start,
  * after an operator, an opening bracket, `}`, a word such as `return`, or the
  * `)` of `if (...)`, `for (...)`, `while (...)`, or `with (...)`; otherwise it
- * is a division. */
+ * is a division. A word after "." or "?." is a property name, not a keyword. */
 export function codeOnly(code: string): string {
   const parts: Array<string> = [];
   let copied = 0;
@@ -195,6 +225,8 @@ export function codeOnly(code: string): string {
   let braces = 0;
   let regexNext = true;
   let word = "";
+  // Whether the token before is the "." of a property access.
+  let propertyNext = false;
   let at = 0;
 
   // Skip template text from `at` to the closing backtick or the next `${`.
@@ -224,7 +256,9 @@ export function codeOnly(code: string): string {
     if (WORD_CHAR.test(char)) {
       const start = at;
       while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
-      word = code.slice(start, at);
+      const property = propertyNext;
+      propertyNext = false;
+      word = property ? "" : code.slice(start, at);
       regexNext = WORDS_BEFORE_EXPRESSION[word] === true;
       continue;
     }
@@ -245,6 +279,7 @@ export function codeOnly(code: string): string {
     }
     const before = word;
     word = "";
+    propertyNext = char === "." && next !== "." && code[at - 1] !== ".";
     if (char === '"' || char === "'") {
       let end = at + 1;
       while (end < code.length && code[end] !== char) end += code[end] === "\\" ? 2 : 1;

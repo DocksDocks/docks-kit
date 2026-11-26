@@ -303,6 +303,39 @@ describe("talk build host imports", () => {
     expect(bundle).toContain(pattern);
   });
 
+  it("accepts methods named import or require and property calls named require", () => {
+    const entry = tempProject(
+      "methods",
+      [
+        "export class Loader {",
+        "  import(name) {",
+        '    return "load " + name + Math.random();',
+        "  }",
+        "}",
+        "export const tools = {",
+        "  require(x) {",
+        '    return "tool " + x + Math.random();',
+        "  },",
+        "};",
+        'const labels = { require: (name) => "label " + name + Math.random() };',
+        'export const label = labels.require("@oh-my-pi/a");',
+        'export const optional = labels?.require("@oh-my-pi/b");',
+        "",
+      ].join("\n"),
+      {},
+    );
+    const outDir = tempDir("methods-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const bundle = readFileSync(join(outDir, "talk.js"), "utf8");
+    // The methods and calls reach the emitted code, so the check saw them.
+    expect(bundle).toContain("import(name){");
+    expect(bundle).toContain("require(x){");
+    expect(bundle).toContain('labels.require("@oh-my-pi/a")');
+    expect(bundle).toContain('labels?.require("@oh-my-pi/b")');
+  });
+
   const rejected: ReadonlyArray<readonly [string, string, string]> = [
     [
       "a static import",
@@ -337,6 +370,11 @@ describe("talk build host imports", () => {
     [
       "a dynamic import of a concatenation",
       'export const load = (name) => import("@oh-my-pi/" + name);\n',
+      "dynamic import without one string literal",
+    ],
+    [
+      "a dynamic import between divisions after a property named return",
+      "export const f = (obj, name, divisor) => obj.return / import(name) / divisor;\n",
       "dynamic import without one string literal",
     ],
   ];
@@ -386,6 +424,10 @@ describe("talk build code-only text", () => {
     ["a division after the ) of a call", 'f(s) / 2 / "q"', 'f(s) / 2 / " "'],
     ["a division after ]", 'a[0] / 2 / "q"', 'a[0] / 2 / " "'],
     ["a division after ++", 'a++ / 2 / "q"', 'a++ / 2 / " "'],
+    ["a division after a property named return", 'obj.return / b / "q"', 'obj.return / b / " "'],
+    ["a division after a property named typeof", 'x?.typeof / b / "q"', 'x?.typeof / b / " "'],
+    ["a division after the ) of a property named if", 'x.if(a) / b / "q"', 'x.if(a) / b / " "'],
+    ["a regular expression after a spread of a keyword", "[...typeof /'/]", "[...typeof / /]"],
   ])("blanks the text of %s", (_label, code, expected) => {
     expect(codeOnly(code)).toBe(expected);
   });
