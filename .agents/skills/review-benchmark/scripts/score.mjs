@@ -290,9 +290,28 @@ function readJson(file, hint = '') {
     fail(`${file} is not valid JSON: ${error.message}`);
   }
 }
-function readText(file, hint = '') {
-  if (!fs.existsSync(file)) fail(`${file} is missing${hint}`);
-  return fs.readFileSync(file, 'utf8');
+// The existence check of a failed read: `probe.exists` of the shared probe of a transcript when the caller gives one
+// (see cachedProbe; the path resolves against the working directory of this process, as the read resolved it), else
+// `fs.existsSync`.
+const existenceCheck = (probe) =>
+  probe === undefined ? (file) => fs.existsSync(file) : (file) => probe.exists(path.resolve(file));
+// The result of `read(file)`, or null when no file is there. The read runs first, and only a failed read asks
+// `exists` whether the file exists (see existenceCheck); another error, for example of a folder, goes on.
+function presentRead(file, read, exists) {
+  try {
+    return read(file);
+  } catch (error) {
+    if (!exists(file)) return null;
+    throw error;
+  }
+}
+// The text of `file`, or null when no file is there (see presentRead).
+const presentText = (file, probe) => presentRead(file, (item) => fs.readFileSync(item, 'utf8'), existenceCheck(probe));
+// The text of `file`, or a failure with the hint `hint` when no file is there (see presentText).
+function readText(file, hint = '', probe = undefined) {
+  const text = presentText(file, probe);
+  if (text === null) fail(`${file} is missing${hint}`);
+  return text;
 }
 function writeJson(file, data) {
   fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
@@ -304,12 +323,11 @@ function directories(dir) {
     .map((entry) => entry.name)
     .sort(compare);
 }
-function baseNames(dir, extension) {
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((name) => name.endsWith(extension))
-    .map((name) => name.slice(0, -extension.length));
+// The names of the files of `dir` that end with `extension`, without it; none when `dir` does not exist (see
+// presentRead).
+function baseNames(dir, extension, probe = undefined) {
+  const names = presentRead(dir, (item) => fs.readdirSync(item), existenceCheck(probe)) ?? [];
+  return names.filter((name) => name.endsWith(extension)).map((name) => name.slice(0, -extension.length));
 }
 
 // Opaque ids keep arm names out of the judge input. They derive from the stable ids, so a rerun keeps them.
@@ -3179,7 +3197,8 @@ function runtimeVersion(entry) {
 // whose tool result is an error result (`isError: true`) gets `error: true`: the tool showed no file for it. A search
 // call (omp.mjs SEARCH_TOOLS) whose tool result lists what it showed (`details.files`: a local path, relative to
 // `details.cwd` or absolute, or an internal URI such as `local://3.log`) also gets `resultFiles` (see
-// searchResultFiles). They show what the search read, also after a file of its path is gone (see readScope).
+// searchResultFiles). They show what the search read, also after a file of its path is gone (see readScope). A `read`
+// call whose tool result records paths of a list that omp could not read gets them as `unread` (see unreadTargets).
 // `ompVersion` is the omp version of the last record that names one (no field without such a record). A transcript
 // with more than one user message gets `revived: true`: a revived agent appends its next task to the transcript of
 // the first one, so its time and tokens do not show one review (see invalidReasons). `entries` are the records of the
@@ -3215,6 +3234,10 @@ export function transcriptFacts(entries) {
       if (call && SEARCH_TOOLS.has(call.name)) {
         const files = searchResultFiles(entry.message.details);
         if (files.length) call.resultFiles = files;
+      }
+      if (call?.name === READ_TOOL) {
+        const unread = unreadTargets(entry.message.details);
+        if (unread.length) call.unread = unread;
       }
       if (call && entry.message.isError === true) call.error = true;
     }
@@ -3494,8 +3517,8 @@ function isUnder(folder, target) {
 // and the run folder or each round folder up to `round`. The tree copies are those of the rounds up to `round`. A
 // reviewer with an agent file of its own is the self-review agent. A `bundled` reviewer (see isBundledReviewer) has
 // only the inputs that its prompt names (BUNDLED_INPUT_FOLDERS and BUNDLED_INPUT_FILES of the case folder), no
-// instruction file, and no skill read.
-function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSkills, changedFiles, bundled }) {
+// instruction file, and no skill read. `probe` is the file probe of the transcript (see cachedProbe).
+function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSkills, changedFiles, bundled, probe }) {
   const armDir = path.dirname(runDir);
   const caseDir = path.dirname(armDir);
   const [caseId, arm, run] = [caseDir, armDir, runDir].map((dir) => path.basename(dir));
@@ -3527,21 +3550,24 @@ function scopeRules(runDir, round, { pluginRoots, agentFiles, skillRoots, heldSk
     linkWalks: new Map(),
     walkBudget: { left: MAX_WALK_ENTRIES },
     realRoots: undefined,
+    probe,
   };
 }
 
 // The names of the skill folders under `<root>/skills/` of each root of `roots`: each folder directly in `skills/`,
 // and each folder in a category folder (a folder without SKILL.md). These are the skills that a measured plugin copy
-// holds, so a read of their installed copy is outside the read scope (see readScope).
-export function pluginSkills(roots) {
+// holds, so a read of their installed copy is outside the read scope (see readScope). transcriptsCommand gives the file
+// probe of the transcript as `probe` (see cachedProbe), so the existence checks here share its cache.
+export function pluginSkills(roots, probe = undefined) {
+  const exists = existenceCheck(probe);
   const held = new Set();
   for (const root of roots) {
     const skills = path.join(root, 'skills');
-    if (!fs.existsSync(skills)) continue;
+    if (!exists(skills)) continue;
     for (const entry of fs.readdirSync(skills, { withFileTypes: true }).filter((item) => item.isDirectory())) {
       held.add(entry.name);
       const folder = path.join(skills, entry.name);
-      if (fs.existsSync(path.join(folder, 'SKILL.md'))) continue;
+      if (exists(path.join(folder, 'SKILL.md'))) continue;
       for (const inner of fs.readdirSync(folder, { withFileTypes: true })) if (inner.isDirectory()) held.add(inner.name);
     }
   }
@@ -3838,12 +3864,22 @@ function searchLeavesScope(root, rules, installedRoot) {
 // `..`. The allow rules read the path as the reviewer wrote it (see rulesAllow), and the file system decides where the
 // read lands: a read that they allow is still outside when the path that its links reach does not land inside the
 // allowed inputs (see landsInScope), and an allowed glob, or an allowed folder of a search tool (`searches`, see
-// omp.mjs SEARCH_TOOLS), is outside when its search can read outside them (see searchLeavesScope). The checks read the
-// path after normalizeLocal.
+// omp.mjs SEARCH_TOOLS), is outside when its search can read outside them (see searchLeavesScope). A path with a glob
+// character that exists as a whole, or whose check cannot decide (see the `probe` of `rules`), can be a literal file
+// such as `settings.json?q=.mode`, so it must also be allowed as a literal path. The checks read the path after
+// normalizeLocal.
 function localPathAllowed(written, cwd, rules, searches = false) {
   if (!path.isAbsolute(written) && typeof cwd !== 'string') return false;
   const target = normalizeLocal(written);
   const { base, rest } = globParts(target);
+  if (rest.length > 0 && rules.probe(target) !== 'missing' && !partsAllowed(target, target, [], cwd, rules, searches)) {
+    return false;
+  }
+  return partsAllowed(target, base, rest, cwd, rules, searches);
+}
+
+// The checks of localPathAllowed for the path `target` with the folder `base` before its glob segments `rest`.
+function partsAllowed(target, base, rest, cwd, rules, searches) {
   const searched = path.resolve(cwd ?? path.sep, base);
   if (insideBenchmark(searched)) return false;
   if (!rulesAllow(target, base, rest, searched, cwd, rules)) return false;
@@ -3976,19 +4012,15 @@ function splitSelector(rawPath, fold = true) {
   return { path: basePath, sel: `${list}${rawSuffix}` };
 }
 
-// Whether omp finds a local path: `exists`, `missing`, or `unknown` for another error of the check, as
-// probeLiteralPathExists of omp 19.0.0 checks it with `lstat` (a link counts, also a dangling one). A relative path
-// without a working directory is `missing`: the check cannot find it.
+// The file checks of the working directory `cwd`, each file checked once. `probe(target)` tells whether omp finds a
+// local path: `exists`, `missing`, or `unknown` for another error of the check, as probeLiteralPathExists of omp
+// 19.0.0 checks it with `lstat` (a link counts, also a dangling one). A relative path without a working directory is
+// `missing`: the check cannot find it. `probe.exists(target)` tells, as `fs.existsSync` does, whether the path exists
+// after its links: it takes the `lstat` of `probe(target)` first (a path that is missing, or that is no link, needs no
+// other check), and asks `fs.existsSync` once only for a link or an `unknown` check. transcriptsCommand gives one
+// probe to the changed-files read, the skill inventory, the list inference, the read scope, and the diff coverage of a
+// transcript, so they check each file once (the files do not change while the command runs).
 const MISSING_CODES = ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'];
-function literalProbe(target, cwd) {
-  return cachedProbe(cwd)(target);
-}
-
-// literalProbe for the working directory `cwd` that checks each file once. `probe.exists(target)` tells, as
-// `fs.existsSync` does, whether the path exists after its links: after an `lstat` of the path it reuses that result
-// (a path that is missing, or that is no link, needs no other check), else it asks `fs.existsSync` once.
-// transcriptsCommand gives one probe to the list inference and the read scope of a transcript, so the choice of
-// targets, the lists, and the scope check each file once (the files do not change while the command runs).
 function cachedProbe(cwd) {
   const seen = new Map();
   const followed = new Map();
@@ -4011,9 +4043,10 @@ function cachedProbe(cwd) {
   };
   probe.exists = (target) => {
     const key = keyOf(target);
+    probe(target);
     const found = seen.get(key);
-    if (found?.probe === 'missing') return false;
-    if (found?.probe === 'exists' && !found.link) return true;
+    if (found.probe === 'missing') return false;
+    if (found.probe === 'exists' && !found.link) return true;
     if (!followed.has(key)) {
       const file = ompFile(target, cwd);
       followed.set(key, typeof file === 'string' && fs.existsSync(file));
@@ -4028,8 +4061,8 @@ function cachedProbe(cwd) {
 // without a selector of omp is its own path; else a target whose literal path exists (or cannot be checked on POSIX)
 // keeps its whole text, such as a file named `plan.md:1-20`; else the path before a colon inside a list when that path
 // exists; else the path of the selector split. Only a target with a selector of omp checks the file system, through
-// `probe` (see literalProbe and cachedProbe).
-function ompSplitTarget(target, cwd, probe = (item) => literalProbe(item, cwd)) {
+// `probe` (see cachedProbe).
+function ompSplitTarget(target, cwd, probe) {
   const strict = splitSelector(target);
   if (strict.sel === undefined) return strict;
   if (probe(target) !== 'missing') return { path: target };
@@ -4046,6 +4079,18 @@ function ompTargetPath(target, cwd, name, probe) {
   if (WEB_SCHEMES.has(scheme)) return target;
   if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
   return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd, probe).path;
+}
+
+// The backing files of the local text `text` of a call of the tool `name`: each prefix of the text that ends before a
+// `:`, and for a `read` call also each prefix that ends before a `?`. omp opens such a file before it reads the
+// selector after it: an archive member (`bundle.zip:notes.md`, read-archive.ts of omp 19.1.1), a SQLite table or
+// query (`state.sqlite:items`, `state.sqlite?limit=1`, sqlite-reader.ts), a page of a PDF, the imports of a binary, or
+// a time of a video (read.ts). The read scope checks each one that exists like the other interpretations of the text
+// (see readScope), so it needs no format rules of omp. A URI has none.
+function backingFiles(text, name) {
+  if (uriScheme(text) !== undefined) return [];
+  const ends = name === READ_TOOL ? /[:?]/g : /:/g;
+  return distinct([...text.matchAll(ends)].filter(({ index }) => index > 0).map(({ index }) => text.slice(0, index)));
 }
 
 // The paths that the local text `text` of a call of the tool `name` can name when it holds a selector-like tail: the
@@ -4080,14 +4125,15 @@ function existingInterpretations(text, name, probe, always = false) {
 // folder under a workspace `bench-gpt;7`. Only a `;` splits such a path, so only a path with a `;` needs this check of
 // the file system; the path of every other tool is one target without it. An exclusion part (see isExclusion) reads
 // nothing, so it gives no target. A list of exclusions only searches the working directory (see readScope).
-function pathTargets(name, value, cwd, probe = cachedProbe(cwd)) {
+function pathTargets(name, value, cwd, probe) {
   const trimmed = value.trim();
   if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
   if (trimmed.includes(';') && probe.exists(ompSplitTarget(trimmed, cwd, probe).path)) return [trimmed];
-  return value
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part && !isExclusion(name, part, cwd, probe));
+  // omp splits the list at each `;` outside `{}` and not after a backslash (see splitPathList), so a brace glob such
+  // as `src/{one;two}.mjs` stays one target.
+  return (splitPathList(trimmed, URI_DELIMITER) ?? [trimmed]).filter(
+    (part) => part && !isExclusion(name, part, cwd, probe),
+  );
 }
 
 // A path list part of an EXCLUSION_TOOLS call that starts with EXCLUSION_PREFIX is an exclusion glob only when no path
@@ -4096,7 +4142,7 @@ function pathTargets(name, value, cwd, probe = cachedProbe(cwd)) {
 // an existing `!notes.md:backup` is one too, and `!review.diff:notes` is an exclusion when no file has that name,
 // also when `!review.diff` exists (`:notes` is no selector of omp). Without a working directory, a relative part cannot
 // be checked, so it stays a target.
-function isExclusion(name, part, cwd, probe = cachedProbe(cwd)) {
+function isExclusion(name, part, cwd, probe) {
   if (!EXCLUSION_TOOLS.has(name) || !part.startsWith(EXCLUSION_PREFIX) || typeof ompFile(part, cwd) !== 'string') {
     return false;
   }
@@ -4135,19 +4181,20 @@ function ompFile(target, cwd) {
   return typeof cwd === 'string' ? path.resolve(cwd, target) : null;
 }
 
-// A local path whose file, or for a glob the folder before its first glob segment, does not exist. A URI, and a
-// relative path without a working directory, is no missing path: the check cannot find its file.
-function pathMissing(target, cwd) {
+// A local path whose file, or for a glob the folder before its first glob segment, is confirmed missing by `probe`
+// (see cachedProbe; a dangling link exists). A URI, and a relative path without a working directory, is no missing
+// path: the check cannot find its file.
+function pathMissing(target, cwd, probe) {
   if (uriScheme(target) !== undefined) return false;
-  const file = ompFile(globParts(target).base, cwd);
-  return typeof file === 'string' && !fs.existsSync(file);
+  const { base } = globParts(target);
+  return typeof ompFile(base, cwd) === 'string' && probe(base) === 'missing';
 }
 
 // The paths that omp reads for the target `target` of a tool call (trimmed, with its read selectors) when it reads
 // the target as a list of paths (see LIST_SPLITS), each with its read selector, or null when omp reads the target as
 // one path. A target whose whole path exists, as written or without its read selector, is one path, also when it
 // holds a delimiter: for example a file whose name holds a space or a `;`, or a workspace folder with a space.
-function delimitedParts(target, cwd, name, probe = cachedProbe(cwd)) {
+function delimitedParts(target, cwd, name, probe) {
   if (splitPathList(target, ANY_DELIMITER) === null) return null;
   if (uriScheme(target) !== undefined) {
     const parts = splitPathList(target, URI_DELIMITER);
@@ -4192,6 +4239,14 @@ function recordedParts(details) {
   return targets.filter((part) => !unread(part));
 }
 
+// The paths of a list that omp could not read for a `read` call, from the details of its tool result: the recorded
+// paths (see recordedTargets) that a note `Could not read <path>: <reason>` names (see recordedParts). omp opens the
+// backing file of such a path before it finds that the member is missing (see backingFiles).
+function unreadTargets(details) {
+  const parts = recordedParts(details);
+  return parts === null ? [] : recordedTargets(details).filter((part) => !parts.includes(part));
+}
+
 // The tool calls of the assistant messages of a transcript, in order, and the tool result message of each call, by the
 // id of the call (its `toolCallId`). readLists and diffCoverage read them. `entries` are the records of the transcript
 // (see transcriptEntries).
@@ -4218,7 +4273,7 @@ function toolCallResults(entries) {
 // delimitedParts); readLists checks them when it runs, after the session. Without a record, readLists cannot see which
 // paths omp could not read, so each path of the split counts. When two calls give paths for the same target, the map
 // keeps the paths of both.
-function readLists({ calls, results }, cwd, probe = cachedProbe(cwd)) {
+function readLists({ calls, results }, cwd, probe) {
   const lists = new Map();
   for (const call of calls) {
     const value = call.arguments?.path;
@@ -4331,8 +4386,9 @@ function resultLines(details, selector, lines) {
 // match of the text, which fails for repeated lines. None of the 150 reviews of plan #119 read a diff that way; the
 // rule undercounts such a read, and the read coverage decides nothing. A call without a tool result, a result with an
 // error, a read of another file, and a call of another tool, for example a grep of the file, show no line of it.
-// `calls` and `results` come from toolCallResults, and `cwd` is the working directory of the session.
-function shownLines({ calls, results }, file, lines, cwd) {
+// `calls` and `results` come from toolCallResults, `cwd` is the working directory of the session, and `probe` is its
+// file probe (see cachedProbe).
+function shownLines({ calls, results }, file, lines, cwd, probe) {
   const shown = new Set();
   for (const call of calls) {
     const value = call.arguments?.path;
@@ -4340,7 +4396,7 @@ function shownLines({ calls, results }, file, lines, cwd) {
     const result = results.get(call.id);
     if (result === undefined || result.isError === true) continue;
     const target = value.trim();
-    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd, READ_TOOL)) !== null) continue;
+    if ((recordedTargets(result.details) ?? delimitedParts(target, cwd, READ_TOOL, probe)) !== null) continue;
     const selector = selectorOfRead(target, file, cwd);
     if (selector !== null) for (const line of resultLines(result.details, selector, lines)) shown.add(line);
   }
@@ -4387,17 +4443,21 @@ function sharedSectionLines(focusLines, fullLines) {
 // the same folder, which the lens can read there. So a line of a focus diff also counts when the reads of that full
 // diff showed the same line of the same file section (see sharedSectionLines). A line that several reads showed
 // counts once. The result is null when the file does not exist or has no line. `tools` comes from toolCallResults,
-// and `cwd` is the working directory of the session.
-function diffCoverage(tools, file, cwd) {
-  if (!fs.existsSync(file)) return null;
-  const lines = textLines(fs.readFileSync(file, 'utf8'));
+// `cwd` is the working directory of the session, and `probe` is its file probe (see cachedProbe).
+function diffCoverage(tools, file, cwd, probe) {
+  const text = presentText(file, probe);
+  if (text === null) return null;
+  const lines = textLines(text);
   if (lines.length === 0) return null;
-  const shown = shownLines(tools, file, lines, cwd);
-  const full = path.join(path.dirname(file), 'full.diff');
-  if (path.basename(file).startsWith('focus-') && fs.existsSync(full)) {
-    const fullLines = textLines(fs.readFileSync(full, 'utf8'));
-    const fullShown = shownLines(tools, full, fullLines, cwd);
-    for (const [line, fullLine] of sharedSectionLines(lines, fullLines)) if (fullShown.has(fullLine)) shown.add(line);
+  const shown = shownLines(tools, file, lines, cwd, probe);
+  if (path.basename(file).startsWith('focus-')) {
+    const full = path.join(path.dirname(file), 'full.diff');
+    const fullText = presentText(full, probe);
+    if (fullText !== null) {
+      const fullLines = textLines(fullText);
+      const fullShown = shownLines(tools, full, fullLines, cwd, probe);
+      for (const [line, fullLine] of sharedSectionLines(lines, fullLines)) if (fullShown.has(fullLine)) shown.add(line);
+    }
   }
   return shown.size / lines.length;
 }
@@ -4462,7 +4522,9 @@ function diffCoverage(tools, file, cwd) {
 // A target with a selector-like tail, and the whole path of a list tool before its `;` split, can name more than one
 // path (see pathInterpretations). The read scope checks the path that omp opens (see ompTargetPath) and also each of
 // these paths that exists when transcripts runs, so the scope fails closed when omp could have opened another one: such
-// a path that is not allowed is outside, as written.
+// a path that is not allowed is outside, as written. Each existing backing file of these texts (see backingFiles) must
+// be allowed too, also for a member of a grouped read that omp could not read (`unread`, see transcriptFacts), except
+// for an exclusion part.
 // The reviewer setup is newer than the cases. When a case changes the file of an optional instruction read, that read
 // shows a later version of a file under review, which can show the fix. `changedFiles` are the repository paths that
 // the case changes (transcriptsCommand reads them). The rule compares keys, the paths from the skill folder name on:
@@ -4501,6 +4563,7 @@ export function readScope(
     heldSkills,
     changedFiles,
     bundled,
+    probe,
   });
   const outside = new Set();
   const missing = new Set();
@@ -4511,6 +4574,7 @@ export function readScope(
     query,
     resultUrls: cited = [],
     resultFiles: shown = [],
+    unread = [],
     error = false,
   } of toolCalls) {
     if (name === WEB_SEARCH_TOOL) {
@@ -4531,8 +4595,14 @@ export function readScope(
       if (SEARCH_TOOLS.has(name)) outside.add(`${name} without a path`);
       continue;
     }
-    const refuse = (target, refused) =>
-      (error && refused.every((part) => pathMissing(part, cwd)) ? missing : outside).add(target);
+    // A failed call read nothing when each refused path is confirmed missing (see pathMissing): its target goes to
+    // `missing`. Else each refused path that can exist goes to `outside`, a member of a group by its own path, and the
+    // group label goes to neither list. A successful call gives its target, a group by its label, to `outside`.
+    const refuse = (target, refused) => {
+      if (!error) outside.add(target);
+      else if (refused.every((part) => pathMissing(part, cwd, probe))) missing.add(target);
+      else for (const part of refused) if (!pathMissing(part, cwd, probe)) outside.add(part);
+    };
     const searches = SEARCH_TOOLS.has(name);
     const verdicts = new Map();
     const check = (item) => {
@@ -4552,7 +4622,7 @@ export function readScope(
       const parts = lists.get(target);
       alternatives.push([target, parts !== undefined]);
       if (parts !== undefined) {
-        for (const part of parts) alternatives.push([part, false]);
+        for (const part of parts) alternatives.push([part, false, target]);
         const opened = distinct(parts.map((part) => ompTargetPath(part, cwd, name, probe)));
         const refused = opened.filter((part) => !check(part));
         if (refused.length) refuse(target, refused);
@@ -4562,14 +4632,24 @@ export function readScope(
       if (!check(read)) refuse(read, [read]);
     }
     // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
-    // which of them omp opened (see pathInterpretations). Such a path exists, so it is outside, never missing: a refused
-    // target that went to `missing` and that the probe finds, or cannot decide, moves to `outside`.
-    for (const [text, always] of alternatives) {
-      for (const item of existingInterpretations(text, name, probe, always)) {
-        if (check(item)) continue;
-        outside.add(item);
-        missing.delete(item);
-      }
+    // which of them omp opened (see pathInterpretations), and so must each existing backing file of these texts and of
+    // the members of a grouped read that omp could not read (see backingFiles); an exclusion part reads nothing, so
+    // its backing files are not checked. Such a path exists, so it is outside, never missing: a refused target that
+    // went to `missing` and that the probe finds, or cannot decide, moves to `outside`, and the label of the group of
+    // such a member leaves `missing`.
+    const backingOf = (text) =>
+      isExclusion(name, text, cwd, probe) ? [] : backingFiles(text, name).filter((item) => probe(item) !== 'missing');
+    const others = [
+      ...alternatives.flatMap(([text, always, group]) =>
+        [...existingInterpretations(text, name, probe, always), ...backingOf(text)].map((item) => [item, group]),
+      ),
+      ...unread.flatMap((text) => backingOf(text).map((item) => [item, targets[0]])),
+    ];
+    for (const [item, group] of others) {
+      if (check(item)) continue;
+      outside.add(item);
+      missing.delete(item);
+      if (group !== undefined) missing.delete(group);
     }
   }
   const scope = { outside: [...outside] };
@@ -4616,8 +4696,8 @@ function diffFiles(text) {
 // comma-separated paths, each maybe in backticks. The function also splits a cell on white space, so two paths without
 // a comma between them give two paths. The helper finds no Files cell in a Steps row that does not have 8 cells, so the
 // function stops on such a row.
-function planStepFiles(file) {
-  const text = readText(file, CHANGED_FILES_HINT);
+function planStepFiles(file, probe) {
+  const text = readText(file, CHANGED_FILES_HINT, probe);
   let plan;
   try {
     plan = parsePlan(text);
@@ -4642,14 +4722,15 @@ function planStepFiles(file) {
 // The repository paths that the case of a reviewer changes, for the case-change rule of readScope: for a plan or
 // plan-delta case, the Files cells of the Steps table of the plan export; for a run with round folders, the paths of
 // the full.diff of the round (round 1 reviews the full.diff of the case folder); for a single-review code run, the
-// paths of each diff file of the case folder. `dir` is the run folder or the round folder of the reviewer.
-function caseChangedFiles(caseDir, family, round, dir) {
-  if (family === 'plan') return planStepFiles(path.join(caseDir, 'plan.md'));
+// paths of each diff file of the case folder. `dir` is the run folder or the round folder of the reviewer, and `probe`
+// is the file probe of the transcript (see cachedProbe).
+function caseChangedFiles(caseDir, family, round, dir, probe) {
+  if (family === 'plan') return planStepFiles(path.join(caseDir, 'plan.md'), probe);
   const diffs =
     round === undefined
-      ? distinct(['full', ...baseNames(caseDir, '.diff')]).map((name) => path.join(caseDir, `${name}.diff`))
+      ? distinct(['full', ...baseNames(caseDir, '.diff', probe)]).map((name) => path.join(caseDir, `${name}.diff`))
       : [path.join(round === 1 ? caseDir : dir, 'full.diff')];
-  return distinct(diffs.flatMap((file) => diffFiles(readText(file, CHANGED_FILES_HINT))));
+  return distinct(diffs.flatMap((file) => diffFiles(readText(file, CHANGED_FILES_HINT, probe))));
 }
 
 // The fields of a finding that the judge reads in pairs.json. A finding id names a place in a block, not a text, so a
@@ -5211,20 +5292,21 @@ export function transcriptsCommand(ws, sessionsDir) {
       Object.assign(entry, facts);
       const session = transcriptSession(entries);
       const tools = toolCallResults(entries);
+      // One probe for the changed-files read, the skill inventory, the list inference, the read scope, and the diff
+      // coverage of this transcript (see cachedProbe).
+      const probe = cachedProbe(session.cwd);
       if (toolCalls) {
         const caseDir = path.join(ws, caseId);
-        changedFiles ??= caseChangedFiles(caseDir, family, round, dir);
+        changedFiles ??= caseChangedFiles(caseDir, family, round, dir, probe);
         const runDir = path.join(caseDir, arm, run);
-        // One probe for the list inference and the read scope of this transcript (see cachedProbe).
-        const probe = cachedProbe(session.cwd);
         const lists = readLists(tools, session.cwd, probe);
-        const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots]);
+        const heldSkills = pluginSkills([...session.pluginRoots, ...session.skillRoots], probe);
         const bundled = isBundledReviewer(reviewer);
         const options = { runDir, round, changedFiles, ...session, heldSkills, lists, probe, bundled };
         entry.readScope = readScope(toolCalls, options);
       }
       const ownDiff = ownDiffFile(reviewer, round === undefined || round === 1 ? caseFolder : path.resolve(dir));
-      const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd);
+      const coverage = ownDiff === null ? null : diffCoverage(tools, ownDiff, session.cwd, probe);
       if (coverage !== null) entry.diffCoverage = coverage;
       let block;
       if (meta.bundledOmp !== undefined && isBundledReviewer(reviewer)) {

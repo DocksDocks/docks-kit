@@ -187,19 +187,135 @@ test('a quoted instruction path keeps an apostrophe in the category folder of it
   ]);
 });
 // Code review round 1 of plan #216: the read scope probes the file system for the literal path of a call only where
-// the literal path can change how omp splits a list: a grep, glob, or ast_grep path with a `;`.
+// the literal path can change how omp splits a list: a grep, glob, or ast_grep path with a `;`. Plan #244 counts the
+// `lstat` and `existsSync` checks together: the ranged read checks its interpretation `sync.mjs` once (see
+// pathInterpretations), and the plain read and the grep of that file add no check.
 test('readScope probes the file system for a literal path only for a search path with a `;`', () => {
   const scope = { runDir: `${SCOPE_CASE}/C3-low/run-1`, cwd: LIVE, pluginRoots: [LIVE_PLUGIN] };
+  const lstat = vi.spyOn(fs, 'lstatSync');
   const exists = vi.spyOn(fs, 'existsSync');
-  onTestFinished(() => exists.mockRestore());
-  const probes = (target) => exists.mock.calls.filter(([file]) => file === target).length;
+  onTestFinished(() => {
+    lstat.mockRestore();
+    exists.mockRestore();
+  });
+  const probes = (target) => [...lstat.mock.calls, ...exists.mock.calls].filter(([file]) => file === target).length;
   const file = `${SCOPE_CASE}/snapshot/src/sync.mjs`;
-  const calls = [...reads(file, `${file}:1-20`), { name: 'grep', path: file }];
-  score.readScope(calls, scope);
+  score.readScope([...reads(file), { name: 'grep', path: file }], scope);
   assert.equal(probes(file), 0);
+  score.readScope([...reads(file, `${file}:1-20`), { name: 'grep', path: file }], scope);
+  assert.equal(probes(file), 1);
   const listed = `${SCOPE_CASE}/snapshot/src;b`;
   score.readScope([{ name: 'grep', path: listed }], scope);
   assert.equal(probes(listed), 1);
+});
+// Plan #244, step 1 (Goal outcome 3): the changed-files read, the skill inventory, the list inference, the read scope,
+// and the diff coverage of a transcript share one file probe, and a read runs before its existence check. So one
+// `transcripts` pass checks each selected file at most once (`lstat` and `existsSync` together); only a link or an
+// inconclusive `lstat` adds an `existsSync`. Each workspace name holds a `;`, so the list inference checks the path of
+// each call.
+test('one transcripts pass checks each selected file at most once', () => {
+  const root = scratch();
+  const lstat = vi.spyOn(fs, 'lstatSync');
+  const exists = vi.spyOn(fs, 'existsSync');
+  onTestFinished(() => {
+    lstat.mockRestore();
+    exists.mockRestore();
+  });
+  const counted = (spy, file) => spy.mock.calls.filter(([item]) => item === file).length;
+  const checks = (file) => counted(lstat, file) + counted(exists, file);
+  // The run without round folders of `reviewer` in the arm `arm` of the case code-7 of the workspace `<root>/<name>`.
+  // Its session runs in the case folder and makes the tool calls that `calls(caseDir)` gives. The counts start after
+  // the fixture is written.
+  const run = (name, arm, reviewer, calls) => {
+    const ws = path.join(root, name);
+    const caseDir = path.join(ws, 'code-7');
+    const runDir = path.join(caseDir, arm, 'run-1');
+    put(ws, 'code-7/case.json', { id: 'code-7', kind: 'code', split: 'dev' });
+    put(caseDir, 'full.diff', '');
+    put(runDir, `prompts/${reviewer}.txt`, 'agent: review-bench-candidate-code-low\n\nReview.\n');
+    put(runDir, 'meta.json', { config: CONFIGS.low });
+    const sessions = path.join(root, `${name} sessions`);
+    const transcript = toolTranscript(caseDir, 30, calls(caseDir), undefined, { cwd: caseDir });
+    const dispatch = dispatchName('code-7', arm, 'run-1', reviewer);
+    put(sessions, `${dispatch}.jsonl`, transcript);
+    lstat.mockClear();
+    exists.mockClear();
+    return { ws, sessions, caseDir, dispatch };
+  };
+  // A full review reads full.diff, its own diff and a changed-files input, and a regular file with a line selector.
+  const full = run('bench;1', 'C1-low', 'full', (caseDir) => {
+    put(caseDir, 'snapshot/SKILL.md', '# Skill\n');
+    return [
+      ['read', { path: path.join(caseDir, 'full.diff') }],
+      ['read', { path: `${path.join(caseDir, 'snapshot', 'SKILL.md')}:1-20` }],
+    ];
+  });
+  assert.deepEqual(transcriptsCommand(full.ws, full.sessions), [full.dispatch]);
+  assert.ok(checks(path.join(full.caseDir, 'full.diff')) <= 1);
+  assert.ok(checks(path.join(full.caseDir, 'snapshot', 'SKILL.md')) <= 1);
+  // A single-review code run greps its case folder, which the changed-files read lists too.
+  const grep = run('bench;2', 'C1-low', 'full', (caseDir) => [['grep', { pattern: 'lock', path: caseDir }]]);
+  assert.deepEqual(transcriptsCommand(grep.ws, grep.sessions), [grep.dispatch]);
+  assert.ok(checks(grep.caseDir) <= 1);
+  // A lens reads its own focus diff, which is missing.
+  const lens = run('bench;3', 'C3-low', 'correctness', (caseDir) => [
+    ['read', { path: `${path.join(caseDir, 'focus-correctness.diff')}:1-20` }],
+  ]);
+  assert.deepEqual(transcriptsCommand(lens.ws, lens.sessions), [lens.dispatch]);
+  assert.ok(checks(path.join(lens.caseDir, 'focus-correctness.diff')) <= 1);
+  // Without full.diff, the changed-files read stops the command after one `lstat` of the file.
+  const fullDiff = path.join(full.caseDir, 'full.diff');
+  fs.rmSync(fullDiff);
+  lstat.mockClear();
+  exists.mockClear();
+  assert.throws(() => transcriptsCommand(full.ws, full.sessions), /full\.diff is missing/);
+  assert.deepEqual([counted(lstat, fullDiff), counted(exists, fullDiff)], [1, 0]);
+});
+// Plan #244, step 1: the existence check after a failed read resolves the path as the read resolved it, against the
+// working directory of the scorer, not against the working directory of the session. A relative workspace whose
+// full.diff is a folder still gives the read error.
+test('transcripts gives the read error of a full.diff folder in a relative workspace', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const caseDir = path.join(ws, 'code-7');
+  const runDir = path.join(caseDir, 'C1-low', 'run-1');
+  put(ws, 'code-7/case.json', { id: 'code-7', kind: 'code', split: 'dev' });
+  fs.mkdirSync(path.join(caseDir, 'full.diff'));
+  put(runDir, 'prompts/full.txt', 'agent: review-bench-candidate-code-low\n\nReview.\n');
+  put(runDir, 'meta.json', { config: CONFIGS.low });
+  const sessions = path.join(root, 'sessions');
+  const calls = [['read', { path: path.join(caseDir, 'plan.md') }]];
+  // The session runs two folders deeper than the case folder, so the relative workspace path names another place
+  // from there than from the working directory of the scorer.
+  const cwd = path.join(caseDir, 'snapshot', 'src');
+  put(sessions, 'Code7C1LowR1Full.jsonl', toolTranscript(caseDir, 30, calls, undefined, { cwd }));
+  assert.throws(() => transcriptsCommand(path.relative(process.cwd(), ws), sessions), { code: 'EISDIR' });
+});
+// Plan #244, step 1, guards: a failed listing or read keeps the outcome of the existence check before it. A cases
+// split that is a regular file stops the corpus count, a split that is a symbolic link loop has no case, and a lens
+// without tool calls and without full.diff reads none of its focus diff.
+test('a failed listing or read keeps the outcome of its existence check', () => {
+  const root = scratch();
+  const empty = path.join(root, 'empty');
+  fs.mkdirSync(empty);
+  const file = path.join(root, 'file');
+  put(file, 'dev', 'x\n');
+  assert.throws(() => score.corpusCounts(file), { code: 'ENOTDIR' });
+  const loop = path.join(root, 'loop');
+  fs.mkdirSync(loop);
+  fs.symlinkSync(path.join(loop, 'dev'), path.join(loop, 'dev'));
+  assert.deepEqual(score.corpusCounts(loop), score.corpusCounts(empty));
+  const ws = path.join(root, 'ws');
+  const caseDir = path.join(ws, 'code-7');
+  const runDir = path.join(caseDir, 'C3-low', 'run-1');
+  put(ws, 'code-7/case.json', { id: 'code-7', kind: 'code', split: 'dev' });
+  put(caseDir, 'focus-correctness.diff', 'diff --git a/x b/x\n+x\n');
+  put(runDir, 'prompts/correctness.txt', 'agent: review-bench-candidate-code-low\n\nReview.\n');
+  put(runDir, 'meta.json', { config: CONFIGS.low });
+  const sessions = path.join(root, 'sessions');
+  put(sessions, 'Code7C3LowR1Correctness.jsonl', toolTranscript(caseDir, 30, [], undefined, { cwd: caseDir }));
+  assert.deepEqual(transcriptsCommand(ws, sessions), ['Code7C3LowR1Correctness']);
+  assert.equal(readJson(path.join(runDir, 'meta.json')).reviewers.correctness.diffCoverage, 0);
 });
 // Code review round 8 of plan #216: the rules of the read scope read a path as the reviewer wrote it (a `..` after a
 // glob segment, a `..` in an installed skill path), so a call reuses a scope verdict only for the same spelling.
@@ -490,6 +606,132 @@ function snapshotScope(root, caseId) {
   const scope = { runDir: path.join(root, 'ws', caseId, 'C3-low', 'run-1'), cwd: snapshot, pluginRoots: [], heldSkills: [] };
   return { snapshot, scope };
 }
+// Plan #244, step 2 (#225): omp opens the backing file of a structured selector before it reads the selector: an
+// archive, a SQLite database, a PDF, a binary, or a video. Each existing backing file of a target must be allowed.
+// An exclusion part of a grep path reads nothing, so its backing files stay unchecked.
+test('readScope checks the backing file of a structured selector, but not of an exclusion part', () => {
+  const root = scratch();
+  const { snapshot, scope } = snapshotScope(root, 'code-7');
+  const live = path.join(root, 'live');
+  for (const name of ['bundle.zip', 'state.sqlite', 'doc.pdf', 'bin', 'clip.mp4']) {
+    put(live, name, 'x\n');
+    fs.symlinkSync(path.join(live, name), path.join(snapshot, name));
+  }
+  const selected = ['bundle.zip:notes.md', 'state.sqlite:items', 'doc.pdf:p1.png', 'bin:imports', 'clip.mp4:0:05'];
+  for (const target of selected) {
+    const backing = path.join(snapshot, target.slice(0, target.indexOf(':')));
+    assert.deepEqual(score.readScope(reads(path.join(snapshot, target)), scope), { outside: [backing] }, target);
+  }
+  // No file has the whole name `!review.diff:notes`, so the part is an exclusion, also when `!review.diff` exists
+  // outside the inputs.
+  put(root, '!review.diff', 'x\n');
+  const grep = { name: 'grep', path: `${path.join(snapshot, 'src')};!review.diff:notes` };
+  assert.deepEqual(score.readScope([grep], { ...scope, cwd: root }), { outside: [] });
+});
+// Plan #244, step 2: a SQLite read with a query opens the database before it runs the query. The folder of the
+// database cannot be listed, so only the check of the backing file finds its link out of the inputs. root can list
+// every folder, so the test does not run as root.
+test.skipIf(process.getuid?.() === 0)('readScope checks the database of a SQLite query read', () => {
+  const root = scratch();
+  const { snapshot, scope } = snapshotScope(root, 'code-7');
+  put(root, 'live/state.sqlite', 'x\n');
+  const locked = path.join(snapshot, 'private');
+  fs.mkdirSync(locked);
+  fs.symlinkSync(path.join(root, 'live', 'state.sqlite'), path.join(locked, 'state.sqlite'));
+  fs.chmodSync(locked, 0o300);
+  try {
+    const query = path.join(locked, 'state.sqlite?limit=1&q=SELECT%20*%20FROM%20items');
+    assert.deepEqual(score.readScope(reads(query), scope), { outside: [path.join(locked, 'state.sqlite')] });
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+});
+// Plan #244, step 2, end to end: omp opened the archive of a member of a grouped read before it found that the member
+// is missing, so `score.mjs transcripts` checks that archive, although the tool result notes that omp could not read
+// the member.
+test('score.mjs transcripts checks the archive of a grouped read member that omp could not read', () => {
+  const root = scratch();
+  const ws = path.join(root, 'ws');
+  const sessions = path.join(root, 'sessions');
+  const caseDir = path.join(ws, 'plan-3');
+  const run = path.join(caseDir, 'P0-low', 'run-1');
+  const agent = 'review-bench-candidate-plan-low';
+  put(caseDir, 'case.json', { id: 'plan-3', kind: 'plan', split: 'dev' });
+  put(caseDir, 'plan.md', '# Plan 3\n');
+  put(caseDir, 'snapshot/a.md', 'a\n');
+  put(root, 'live/bundle.zip', 'x\n');
+  const bundle = path.join(caseDir, 'snapshot', 'bundle.zip');
+  fs.symlinkSync(path.join(root, 'live', 'bundle.zip'), bundle);
+  put(run, 'prompts/plan.txt', `agent: ${agent}\n\nReview.\n`);
+  put(run, 'meta.json', { config: CONFIGS.low });
+  const members = [path.join(caseDir, 'snapshot', 'a.md'), `${bundle}:missing.md`];
+  const details = {
+    displayReadTargets: members,
+    notes: [`Could not read ${members[1]}: Path '${members[1]}' not found`],
+  };
+  const calls = [['read', { path: members.join(';') }]];
+  put(
+    sessions,
+    'Plan3P0LowR1Plan.jsonl',
+    toolTranscript(caseDir, 30, calls, agent, { results: { 'call-1': details } }),
+  );
+  const args = [path.join(SCRIPTS_DIR, 'score.mjs'), 'transcripts', ws, '--omp-sessions', sessions];
+  const cli = spawnSync(BUN_RUNTIME, args, { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(readJson(path.join(run, 'meta.json')).reviewers.plan.readScope, { outside: [bundle] });
+});
+// Plan #244, step 3 (#225): omp splits a search path at the `;` outside `{}` and not after a backslash, so a brace
+// glob with a `;` is one target, and its members do not resolve against the working directory.
+test('readScope keeps a brace glob with a `;` as one target', () => {
+  const root = scratch();
+  const { snapshot, scope } = snapshotScope(root, 'code-7');
+  const glob = { name: 'glob', path: path.join(snapshot, 'src', '{one;two,three}.mjs') };
+  assert.deepEqual(score.readScope([glob], { ...scope, cwd: root }), { outside: [] });
+});
+// Plan #244, step 4 (#225): a failed call read nothing only when each refused path is confirmed missing; `lstat`
+// decides, so a dangling link exists. When a refused member of a failed group exists, the member goes to `outside`
+// by its own path, and the group label goes to neither list.
+test('a failed group reports an existing refused member, not its label', () => {
+  const root = scratch();
+  const { snapshot, scope } = snapshotScope(root, 'code-7');
+  const allowed = path.join(snapshot, 'src', 'sync.mjs');
+  fs.symlinkSync(path.join(root, 'gone.mjs'), path.join(root, 'dangling.mjs'));
+  fs.mkdirSync(path.join(root, 'outside'));
+  const failed = (target, members) => {
+    const lists = members === undefined ? new Map() : new Map([[target, members]]);
+    return score.readScope([{ name: 'grep', path: target, error: true }], { ...scope, cwd: root, lists });
+  };
+  const dangling = `${allowed}, dangling.mjs`;
+  assert.deepEqual(failed(dangling, [allowed, 'dangling.mjs']), { outside: ['dangling.mjs'] });
+  // Guards: a group whose refused member is missing read nothing, and so did a search of a missing folder. A search
+  // of an existing folder outside the inputs stays outside: the folder before the first glob segment decides.
+  const absent = `${allowed}, absent.mjs`;
+  assert.deepEqual(failed(absent, [allowed, 'absent.mjs']), { outside: [], missing: [absent] });
+  assert.deepEqual(failed('absent/*.mjs'), { outside: [], missing: ['absent/*.mjs'] });
+  assert.deepEqual(failed('outside/*.mjs'), { outside: ['outside/*.mjs'] });
+  // A relative read without a working directory cannot be checked, so it stays outside.
+  const relative = [{ name: 'read', path: 'src/sync.mjs', error: true }];
+  assert.deepEqual(score.readScope(relative, { ...scope, cwd: null }), { outside: ['src/sync.mjs'] });
+});
+// Plan #244, step 5 (#225): omp opens an existing literal file whose name holds a glob character, such as
+// `settings.json?q=.mode`, before it reads a JSON query. Its folder cannot be listed, so the glob check of that name
+// finds nothing; the literal check finds its link out of the inputs. root can list every folder, so the test does not
+// run as root.
+test.skipIf(process.getuid?.() === 0)('readScope checks an existing literal file with a glob character', () => {
+  const root = scratch();
+  const { snapshot, scope } = snapshotScope(root, 'code-7');
+  put(root, 'live/settings.json', '{}\n');
+  const locked = path.join(snapshot, 'private');
+  fs.mkdirSync(locked);
+  const literal = path.join(locked, 'settings.json?q=.mode');
+  fs.symlinkSync(path.join(root, 'live', 'settings.json'), literal);
+  fs.chmodSync(locked, 0o300);
+  try {
+    assert.deepEqual(score.readScope(reads(literal), scope), { outside: [literal] });
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+});
 test('readScope refuses a search of a snapshot whose link reaches a folder that holds the benchmark folder', () => {
   const root = scratch();
   const { snapshot, scope } = snapshotScope(root, 'code-7');
