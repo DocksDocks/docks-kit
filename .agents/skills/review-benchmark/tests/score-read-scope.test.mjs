@@ -716,14 +716,26 @@ test('a failed group reports an existing refused member, not its label', () => {
   // A relative read without a working directory cannot be checked, so it stays outside.
   const relative = [{ name: 'read', path: 'src/sync.mjs', error: true }];
   assert.deepEqual(score.readScope(relative, { ...scope, cwd: null }), { outside: ['src/sync.mjs'] });
-  // Code review round 1 of plan #244: a refused target whose backing file exists outside the inputs is no read of a
-  // missing path, for a member of a failed group and for a failed standalone read. omp opened the archive, so only the
-  // archive is outside, and the target leaves `missing`.
+  // Code review round 1 of plan #244: an existing backing file outside the inputs moves its refused target out of
+  // `missing`. For the member of a failed grep, the scorer checks the prefix whether or not omp opened it, so the check
+  // fails closed; a failed read of an archive member opened the archive. Only the archive is outside.
   put(root, 'bundle.zip', 'x\n');
   const member = `${allowed}, bundle.zip:missing.md`;
   assert.deepEqual(failed(member, [allowed, 'bundle.zip:missing.md']), { outside: ['bundle.zip'] });
   const standalone = [{ name: 'read', path: 'bundle.zip:missing.md', error: true }];
   assert.deepEqual(score.readScope(standalone, { ...scope, cwd: root }), { outside: ['bundle.zip'] });
+  // Code review round 2: the alternatives pass of a call clears only the missing targets of that call. Two failed reads
+  // share the target `settings.json`, but only the second one names an existing file, `settings.json?q=.mode`, so the
+  // first one stays a read of a missing path in either order.
+  put(root, 'settings.json?q=.mode', '{}\n');
+  const reads2 = [
+    { name: 'read', path: 'settings.json', error: true },
+    { name: 'read', path: 'settings.json?q=.mode', error: true },
+  ];
+  for (const calls of [reads2, [...reads2].reverse()]) {
+    const result = score.readScope(calls, { ...scope, cwd: root });
+    assert.deepEqual(result, { outside: ['settings.json?q=.mode'], missing: ['settings.json'] });
+  }
 });
 // Plan #244, step 5 (#225): omp opens an existing literal file whose name holds a glob character, such as
 // `settings.json?q=.mode`, before it reads a JSON query. Its folder cannot be listed, so the glob check of that name

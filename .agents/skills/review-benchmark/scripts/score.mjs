@@ -4604,10 +4604,12 @@ export function readScope(
     }
     // A failed call read nothing when each refused path is confirmed missing (see pathMissing): its target goes to
     // `missing`. Else each refused path that can exist goes to `outside`, a member of a group by its own path, and the
-    // group label goes to neither list. A successful call gives its target, a group by its label, to `outside`.
+    // group label goes to neither list. A successful call gives its target, a group by its label, to `outside`. The
+    // missing targets of this call are kept apart until its alternatives pass ends, so that pass clears only them.
+    const callMissing = new Set();
     const refuse = (target, refused) => {
       if (!error) outside.add(target);
-      else if (refused.every((part) => pathMissing(part, cwd, probe))) missing.add(target);
+      else if (refused.every((part) => pathMissing(part, cwd, probe))) callMissing.add(target);
       else for (const part of refused) if (!pathMissing(part, cwd, probe)) outside.add(part);
     };
     const searches = SEARCH_TOOLS.has(name);
@@ -4657,9 +4659,10 @@ export function readScope(
     for (const [item, label] of others) {
       if (check(item)) continue;
       outside.add(item);
-      missing.delete(item);
-      if (label !== undefined) missing.delete(label);
+      callMissing.delete(item);
+      if (label !== undefined) callMissing.delete(label);
     }
+    for (const target of callMissing) missing.add(target);
   }
   const scope = { outside: [...outside] };
   if (missing.size) scope.missing = [...missing];
