@@ -19,6 +19,8 @@ import { BUNDLE_PATH } from "./build-bundle";
 const REPO_DIR = resolve(import.meta.dirname, "..", "..");
 const PACKED_BUNDLE = `package/${BUNDLE_PATH}`;
 const PACKED_STRAY_OUTPUT = /^package\/cli\/src\/.*\.js(\.map)?$/;
+// The talk extension source is not part of the npm package (DocksDocks/docks-kit#249).
+const PACKED_TALK_PREFIX = "package/cli/talk/";
 const START_TIME_RUNS = 10;
 // Measured on Linux x64 with Bun 1.4.4: 60 ms for the bundle, 162 ms for the
 // TypeScript source, and 4 ms for `bun -e 0`, so half the source's own start
@@ -253,14 +255,15 @@ function assertNoNestedDuplicates(consumerDir: string, pins: ReadonlyArray<Pin>)
 }
 
 // `bun pm pack` ships a file that git ignores, so the tarball itself must show
-// the bundle and no build output that a misplaced build left under cli/src.
+// the bundle and no build output that a misplaced build left under cli/src. The
+// talk extension source under cli/talk must stay out of the package.
 function assertTarballContents(tarball: string): void {
   const list = spawnSync("tar", ["-tzf", tarball], { encoding: "utf8", env: CHILD_ENV });
   requireSuccess("tar -tzf", list);
-  // A tar that lists directories ends their entries with "/"; only files count.
-  const entries = list.stdout
-    .split("\n")
-    .filter((entry) => entry.length > 0 && !entry.endsWith("/"));
+  const members = list.stdout.split("\n").filter((entry) => entry.length > 0);
+  // A tar that lists directories ends their entries with "/"; only files count,
+  // but a cli/talk/ directory entry is also unwanted.
+  const entries = members.filter((entry) => !entry.endsWith("/"));
   if (!entries.includes(PACKED_BUNDLE)) {
     fail(
       `assertion "the tarball ships the bundle" failed: observed no ${PACKED_BUNDLE} among ${entries.length} entries. ` +
@@ -272,17 +275,18 @@ function assertTarballContents(tarball: string): void {
   );
   const strays = entries.filter((entry) => PACKED_STRAY_OUTPUT.test(entry));
   const maps = entries.filter((entry) => entry.endsWith(".map"));
-  const unwanted = [...new Set([...extraDist, ...strays, ...maps])];
+  const talk = members.filter((entry) => entry.startsWith(PACKED_TALK_PREFIX));
+  const unwanted = [...new Set([...extraDist, ...strays, ...maps, ...talk])];
   if (unwanted.length > 0) {
     fail(
-      `assertion "the tarball holds no map, no other cli/dist file, and no .js under cli/src" failed: observed ` +
-        `${unwanted.join(", ")}. Repair: list only "${BUNDLE_PATH}" from cli/dist in package.json files, and delete ` +
-        `the build outputs under cli/src.`,
+      `assertion "the tarball holds no map, no other cli/dist file, no .js under cli/src, and no cli/talk entry" ` +
+        `failed: observed ${unwanted.join(", ")}. Repair: list only "${BUNDLE_PATH}" from cli/dist in package.json ` +
+        `files, keep cli/talk out of it, and delete the build outputs under cli/src.`,
     );
   }
   console.log(
     `[package-smoke] tarball contents: ${entries.length} files, ${BUNDLE_PATH} present, no .map, ` +
-      `no other cli/dist file, no .js or .js.map under cli/src`,
+      `no other cli/dist file, no .js or .js.map under cli/src, no cli/talk/ entry`,
   );
 }
 

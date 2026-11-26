@@ -25,5 +25,12 @@
       }
     ]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "test/**/*.ts", "scripts/**/*.ts", "../SoT/.omp/plugin/extensions/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "talk/**/*.ts",
+    "../SoT/.omp/plugin/extensions/*.ts"
+  ]
 }

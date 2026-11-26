@@ -23,6 +23,8 @@ suites in `cli/test/`. It also holds the SoT notes. Read this file before you ed
 | `cli/src/engine-native/kitDb.ts` | Only opener of the SQLite store `~/.docks-kit/kit.db`: append-only migrations, one-time `state.json` import, TTL cache |
 | `cli/src/engine-native/kitLock.ts` | Only opener of the lock files: `~/.cache/docks-kit/tidy-lock.db` (`tidy --apply`), `sync-lock.db` (sync and `omp --fast`), and `<folder>/.docks-kit-sync-lock.db` (an omp folder that a sync or `omp --fast` writes). Each lock is an SQLite `BEGIN IMMEDIATE` transaction that the OS releases when its process ends; `node:` imports only |
 | `cli/src/engine-native/processes.ts` | `processExited`: the shared PID liveness check (true only when `process.kill(pid, 0)` throws ESRCH); `atomicWrite.ts removeStaleTemporaries` and the macOS process list of `tidy.ts` use it |
+| `cli/talk/` | Source of the `talk` omp extension, outside the npm `files` list (plan DocksDocks/docks-kit#248). `index.ts` is the bundle entry and exports the transport API; `licenses/` holds the ported-source licenses that lead the banner; `transport/` holds `frame`, `handshake`, `folder`, `trustPosix`, `sealWindows`, `registry`, `endpoint`, `request`, `connection`, `listener`, `client`, and `transport` (the `TalkTransport` service). Protocol, registry folder, threat model, and trust rules: `cli/docs/talk-transport.md` |
+| `cli/scripts/build-talk.ts` | `bun cli/scripts/build-talk.ts --out <dir>`: bundles `cli/talk/index.ts` into `<dir>/talk.js` with the generated-file header and the license banner; fails on a contributing package without a license and on a host import that is not one literal dynamic `import` |
 | `cli/test/fixtures/` | Golden fixtures: `home-fresh`, `home-drift` |
 
 ### Engine and CLI rules
@@ -34,6 +36,7 @@ suites in `cli/test/`. It also holds the SoT notes. Read this file before you ed
 - **Effect skill routing.** Effect work in this checkout must verify migration and API call shapes against the installed declarations under `node_modules/effect/dist/cli/`, never from memory or a mutable dist-tag. The `effect-ts-setup`, `effect-ts-port`, and `effect-ts-specialist` skills target Effect 3.x and do not apply.
 - **Kit store.** The SQLite store `~/.docks-kit/kit.db` holds the `omp_session` table, which only `docks-kit omp` writes (`ompSession.ts`), and a TTL cache (`cache_entry`) for `toolchain outdated` lookups. Sync never opens kit.db. The `harness_selection` table has had no use since 0.24.0 and stays in `MIGRATIONS[0]` only to keep schema 1. `kitDb.ts withKitDb` is the only opener: it runs the append-only `MIGRATIONS`, imports a legacy `state.json` session model once and renames the file to `state.json.migrated`, and refuses a store from a newer schema. Cache rows carry the kit version as fingerprint, so a new release refetches them.
 - **SOLID-aligned modules.** Axis modules own one concern each (see layout); orchestrators (`ompSync.ts`, `index.ts`, `argv.ts`, `parseArgs.ts`) keep prior exports. New shared shapes go in `sharedTypes.d.ts`, never a second local copy. The public CLI seam is `cli/src/engine.ts`.
+- **talk source boundary.** `cli/talk/` imports no module of `cli/src/`, and `cli/src/` imports nothing from `cli/talk/`; the bundle runs inside omp, not the CLI. Until the cutover child #252, no `talk` file goes under `SoT/.omp/plugin/`, and the package smoke fails on any `cli/talk/` entry in the tarball. The transport tests (`cli/test/unit/talk/transport.test.ts`) spawn Bun peers (`cli/test/fixtures/talk/peer.ts`) on a freshly built bundle with `DOCKS_KIT_TALK_DIR` in a short temporary folder; the case without the override runs only when `CI` is set.
 
 ### Engine behavior notes
 
@@ -92,11 +95,11 @@ The spawning suites launch a prebuilt bundle of `cli/src/main.ts`. The build run
 
 - The checkout launchers run `cli/src/main.ts` with Bun and never run a file in `cli/dist/`, so a binary that an older checkout built stays on disk and never shadows the source (verify: `grep -n 'main.ts' docks-kit docks-kit.ps1`; probe: `cli/test/unit/launcher.test.ts` plants a version-matching binary in `cli/dist/` that is newer than every source file and asserts that the source runs).
 - `package.json` `files` publishes `cli/src` and `cli/docs`, so a file there ships in the npm package (verify: `jq .files package.json`).
-- `format:check` runs `bun fmt` on `cli/src`, `cli/test`, and `cli/scripts`, and `bun fmt` also checks Markdown (probe: `bun fmt --no-script --check AGENTS.md` reports the root file).
+- `format:check` runs `bun fmt` on `cli/src`, `cli/test`, `cli/scripts`, and `cli/talk`, and `bun fmt` also checks Markdown (probe: `bun fmt --no-script --check AGENTS.md` reports the root file).
 
 Pointers here name concepts, not coordinates — if a path or symbol moved,
 trust the stated purpose and re-locate it (grep the symbol) before acting.
 
 <!-- machine-readable drift aid — `audit` reads `sources:` to scope its content check -->
 ## tree (metadata)
-- sources: `cli/src/engine-native/` (ompSync, ompOverlay, scratch, tidy, tidyReport, ompKitPlugin, ompPlugins, ompFileDeploy, ompYaml, ompRemovals, sharedTypes.d, kitDb, kitLock, processes, failures, syncDispatch, ompSession), `cli/src/commands/omp.ts`, `cli/src/commands/scratch.ts`, `cli/src/commands/tidy.ts`, `cli/src/engine.ts`, `cli/test/fixtures/`, `cli/test/lib/cliEntry.ts`, `cli/test/unit/launcher.test.ts`, `cli/src/commands/docs.ts`, `cli/src/engine-native/DESIGN.md`, `package.json`, `docks-kit`, `SoT/.omp/`, `SoT/toolchain.json`, `cli/docs/`
+- sources: `cli/src/engine-native/` (ompSync, ompOverlay, scratch, tidy, tidyReport, ompKitPlugin, ompPlugins, ompFileDeploy, ompYaml, ompRemovals, sharedTypes.d, kitDb, kitLock, processes, failures, syncDispatch, ompSession), `cli/src/commands/omp.ts`, `cli/src/commands/scratch.ts`, `cli/src/commands/tidy.ts`, `cli/src/engine.ts`, `cli/talk/`, `cli/scripts/build-talk.ts`, `cli/test/fixtures/`, `cli/test/lib/cliEntry.ts`, `cli/test/unit/launcher.test.ts`, `cli/src/commands/docs.ts`, `cli/src/engine-native/DESIGN.md`, `package.json`, `docks-kit`, `SoT/.omp/`, `SoT/toolchain.json`, `cli/docs/`
