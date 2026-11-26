@@ -120,6 +120,15 @@ exact rows with the same field types, and each role level is in the
 19.1.1 without a provider login lists only the `openrouter` rows, so run
 the check on a home with the `openai-codex` and `anthropic` logins.
 
+On 2026-11-26, omp 19.2.1 became both the floor and the verified pin. The
+`omp models --json` catalog of 19.2.1 listed the same 12 selectors (6
+distinct `provider/id` rows) as exact rows with the same field types, and each
+role level is in the `thinking` ladder of its model. The check read the
+catalog only, on the installed omp, whose SHA-256 matches the v19.2.1 release asset.
+omp 19.2.0 was not checked: running another omp release against a home that a
+live session uses rewrites its databases, and the check needs the provider
+logins of that home. So the floor is 19.2.1.
+
 What omp's settings catalog establishes about these roles:
 
 - `cycleOrder` lists the roles the model switcher cycles. `fable` is the

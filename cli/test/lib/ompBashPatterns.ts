@@ -1,6 +1,6 @@
 /**
  * Approval oracle for the kit's omp `bash.patterns`, ported from
- * `@oh-my-pi/pi-coding-agent` 19.0.0 rather than guessed: `src/tools/bash.ts`
+ * `@oh-my-pi/pi-coding-agent` 19.2.1 rather than guessed: `src/tools/bash.ts`
  * (`bashApprovalPatternToRegExp`, `bashCommandSegments`,
  * `bashApprovalRuleMatches`, `findNonCompoundBashRestrictionRule`,
  * `findBashApprovalPatternRule`, `hasBashApprovalShellControl`,
@@ -48,7 +48,7 @@ export interface OmpBashRule {
 }
 
 const SHELL_CONTROL = /[\n\r;&|<>`$()]/u;
-const REINTERPRETED_ARGUMENT = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const REINTERPRETED_ARGUMENT = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function patternRegExp(pattern: string): RegExp {
   const escaped = pattern
@@ -103,7 +103,7 @@ function segmentWords(command: string): Array<Array<string>> {
   return segments;
 }
 
-/** `isShellEnvironmentAssignment` in omp 19.0.0 `src/tools/shell-tokenize.ts`. */
+/** `isShellEnvironmentAssignment` in omp 19.2.1 `src/tools/shell-tokenize.ts`. */
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 
 /**
@@ -181,7 +181,9 @@ function restrictionRule(
 /**
  * `findBashApprovalPatternRule`: the approval of the rule that decides
  * `command`, or undefined when no rule matches and the approval mode decides
- * (the kit ships `yolo`).
+ * (the kit ships `yolo`). An allow rule never vouches for a command that starts
+ * with an assignment unless the rule starts with one too: omp would strip only
+ * the variables of `bash.allowedEnvVars`, and the kit sets none.
  */
 export function ompApproval(
   rules: ReadonlyArray<OmpBashRule>,
@@ -191,15 +193,17 @@ export function ompApproval(
   if (whole.length === 0) return undefined;
   const segments = commandSegments(command);
   if (hasShellControl(command)) return restrictionRule(rules, whole, segments)?.approval;
+  const leadingAssignment = SHELL_ASSIGNMENT.test(command.trimStart());
   const rule = rules.find(({ match, approval }) => {
     const regex = patternRegExp(match);
-    if (regex.test(whole)) return true;
-    return approval !== "allow" && segments.some((segment) => regex.test(segment));
+    if (approval === "allow")
+      return (!leadingAssignment || SHELL_ASSIGNMENT.test(match)) && regex.test(whole);
+    return regex.test(whole) || segments.some((segment) => regex.test(segment));
   });
   return rule?.approval;
 }
 
-/** `CRITICAL_BASH_PATTERNS` in omp 19.0.0 `src/tools/bash.ts`, verbatim (the same list as in omp 18). */
+/** `CRITICAL_BASH_PATTERNS` in omp 19.2.1 `src/tools/bash.ts`, verbatim (the same list as in omp 18). */
 const CRITICAL_BASH_PATTERNS: ReadonlyArray<RegExp> = [
   /\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
   /\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
