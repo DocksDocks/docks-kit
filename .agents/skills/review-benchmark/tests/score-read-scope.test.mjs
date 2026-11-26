@@ -224,35 +224,39 @@ test('one transcripts pass checks each selected file at most once', () => {
   const counted = (spy, file) => spy.mock.calls.filter(([item]) => item === file).length;
   const checks = (file) => counted(lstat, file) + counted(exists, file);
   // The run without round folders of `reviewer` in the arm `arm` of the case code-7 of the workspace `<root>/<name>`.
-  // Its session runs in the case folder and makes the tool calls that `calls(caseDir)` gives. The counts start after
-  // the fixture is written.
-  const run = (name, arm, reviewer, calls) => {
+  // Its session runs in the case folder, names the plugin root `<ws>/plugin`, which holds the code-reviewer skill,
+  // and makes the tool calls that `calls(caseDir, plugin)` gives, with the tool results `results`. The counts start
+  // after the fixture is written.
+  const run = (name, arm, reviewer, calls, results = {}) => {
     const ws = path.join(root, name);
     const caseDir = path.join(ws, 'code-7');
     const runDir = path.join(caseDir, arm, 'run-1');
+    const plugin = path.join(ws, 'plugin');
     put(ws, 'code-7/case.json', { id: 'code-7', kind: 'code', split: 'dev' });
-    put(caseDir, 'full.diff', '');
+    put(caseDir, 'full.diff', 'diff --git a/x b/x\n+x\n');
+    put(plugin, 'skills/code-reviewer/SKILL.md', '# Code reviewer\n');
     put(runDir, `prompts/${reviewer}.txt`, 'agent: review-bench-candidate-code-low\n\nReview.\n');
     put(runDir, 'meta.json', { config: CONFIGS.low });
     const sessions = path.join(root, `${name} sessions`);
-    const transcript = toolTranscript(caseDir, 30, calls(caseDir), undefined, { cwd: caseDir });
+    const transcript = toolTranscript(caseDir, 30, calls(caseDir, plugin), undefined, { cwd: caseDir, results });
     const dispatch = dispatchName('code-7', arm, 'run-1', reviewer);
-    put(sessions, `${dispatch}.jsonl`, transcript);
+    put(sessions, `${dispatch}.jsonl`, transcript.replaceAll(LIVE_PLUGIN, plugin));
     lstat.mockClear();
     exists.mockClear();
-    return { ws, sessions, caseDir, dispatch };
+    return { ws, sessions, caseDir, runDir, plugin, dispatch };
   };
-  // A full review reads full.diff, its own diff and a changed-files input, and a regular file with a line selector.
-  const full = run('bench;1', 'C1-low', 'full', (caseDir) => {
-    put(caseDir, 'snapshot/SKILL.md', '# Skill\n');
-    return [
-      ['read', { path: path.join(caseDir, 'full.diff') }],
-      ['read', { path: `${path.join(caseDir, 'snapshot', 'SKILL.md')}:1-20` }],
-    ];
-  });
+  // A full review reads full.diff, its own diff and a changed-files input, whole, and the SKILL.md of its own skill,
+  // which the skill inventory checks too, with a line selector.
+  const fullRead = (caseDir, plugin) => [
+    ['read', { path: path.join(caseDir, 'full.diff') }],
+    ['read', { path: `${path.join(plugin, 'skills', 'code-reviewer', 'SKILL.md')}:1-20` }],
+  ];
+  const full = run('bench;1', 'C1-low', 'full', fullRead, { 'call-1': { totalLines: 2 } });
   assert.deepEqual(transcriptsCommand(full.ws, full.sessions), [full.dispatch]);
   assert.ok(checks(path.join(full.caseDir, 'full.diff')) <= 1);
-  assert.ok(checks(path.join(full.caseDir, 'snapshot', 'SKILL.md')) <= 1);
+  assert.ok(checks(path.join(full.plugin, 'skills', 'code-reviewer', 'SKILL.md')) <= 1);
+  assert.deepEqual(readJson(path.join(full.runDir, 'meta.json')).reviewers.full.readScope, { outside: [] });
+  assert.equal(readJson(path.join(full.runDir, 'meta.json')).reviewers.full.diffCoverage, 1);
   // A single-review code run greps its case folder, which the changed-files read lists too.
   const grep = run('bench;2', 'C1-low', 'full', (caseDir) => [['grep', { pattern: 'lock', path: caseDir }]]);
   assert.deepEqual(transcriptsCommand(grep.ws, grep.sessions), [grep.dispatch]);
@@ -712,6 +716,14 @@ test('a failed group reports an existing refused member, not its label', () => {
   // A relative read without a working directory cannot be checked, so it stays outside.
   const relative = [{ name: 'read', path: 'src/sync.mjs', error: true }];
   assert.deepEqual(score.readScope(relative, { ...scope, cwd: null }), { outside: ['src/sync.mjs'] });
+  // Code review round 1 of plan #244: a refused target whose backing file exists outside the inputs is no read of a
+  // missing path, for a member of a failed group and for a failed standalone read. omp opened the archive, so only the
+  // archive is outside, and the target leaves `missing`.
+  put(root, 'bundle.zip', 'x\n');
+  const member = `${allowed}, bundle.zip:missing.md`;
+  assert.deepEqual(failed(member, [allowed, 'bundle.zip:missing.md']), { outside: ['bundle.zip'] });
+  const standalone = [{ name: 'read', path: 'bundle.zip:missing.md', error: true }];
+  assert.deepEqual(score.readScope(standalone, { ...scope, cwd: root }), { outside: ['bundle.zip'] });
 });
 // Plan #244, step 5 (#225): omp opens an existing literal file whose name holds a glob character, such as
 // `settings.json?q=.mode`, before it reads a JSON query. Its folder cannot be listed, so the glob check of that name

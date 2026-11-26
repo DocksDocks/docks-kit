@@ -4061,8 +4061,8 @@ function cachedProbe(cwd) {
 // without a selector of omp is its own path; else a target whose literal path exists (or cannot be checked on POSIX)
 // keeps its whole text, such as a file named `plan.md:1-20`; else the path before a colon inside a list when that path
 // exists; else the path of the selector split. Only a target with a selector of omp checks the file system, through
-// `probe` (see cachedProbe).
-function ompSplitTarget(target, cwd, probe) {
+// `probe` (see cachedProbe), which also holds the working directory that a relative target resolves against.
+function ompSplitTarget(target, probe) {
   const strict = splitSelector(target);
   if (strict.sel === undefined) return strict;
   if (probe(target) !== 'missing') return { path: target };
@@ -4074,11 +4074,11 @@ function ompSplitTarget(target, cwd, probe) {
 // The path of a target of a call of the tool `name` that the read scope checks first: a web URL as it is; an internal
 // URI without its read selector; a local path, for a `read` call without its JSON query selector (`?q=`, which omp
 // reads after the file; a search path keeps it), and then the path that omp opens (see ompSplitTarget).
-function ompTargetPath(target, cwd, name, probe) {
+function ompTargetPath(target, name, probe) {
   const scheme = uriScheme(target);
   if (WEB_SCHEMES.has(scheme)) return target;
   if (scheme !== undefined) return target.replace(READ_SELECTOR, '');
-  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, cwd, probe).path;
+  return ompSplitTarget(name === READ_TOOL ? target.replace(JSON_QUERY_SELECTOR, '') : target, probe).path;
 }
 
 // The backing files of the local text `text` of a call of the tool `name`: each prefix of the text that ends before a
@@ -4128,7 +4128,7 @@ function existingInterpretations(text, name, probe, always = false) {
 function pathTargets(name, value, cwd, probe) {
   const trimmed = value.trim();
   if (!PATH_LIST_TOOLS.has(name)) return [trimmed].filter(Boolean);
-  if (trimmed.includes(';') && probe.exists(ompSplitTarget(trimmed, cwd, probe).path)) return [trimmed];
+  if (trimmed.includes(';') && probe.exists(ompSplitTarget(trimmed, probe).path)) return [trimmed];
   // omp splits the list at each `;` outside `{}` and not after a backslash (see splitPathList), so a brace glob such
   // as `src/{one;two}.mjs` stays one target.
   return (splitPathList(trimmed, URI_DELIMITER) ?? [trimmed]).filter(
@@ -4228,23 +4228,27 @@ function recordedTargets(details) {
     .filter(Boolean);
 }
 
-// The paths of a list that omp read for a `read` call (see recordedTargets) without the paths that it could not read,
-// or null when the result records no list. omp writes a note `Could not read <path>: <reason>` for each path that it
-// could not read. Such a path read no file, so it is not in the result.
+// Whether omp wrote a note `Could not read <path>: <reason>` for the path `part` of a list in the details `details` of
+// the tool result of a `read` call: such a path read no file.
+function unreadNote(details) {
+  const notes = Array.isArray(details.notes) ? details.notes.filter((note) => typeof note === 'string') : [];
+  return (part) => notes.some((note) => note.startsWith(`${UNREAD_NOTE}${part}: `));
+}
+
+// The paths of a list that omp read for a `read` call (see recordedTargets) without the paths that it could not read
+// (see unreadNote), or null when the result records no list. Such a path read no file, so it is not in the result.
 function recordedParts(details) {
   const targets = recordedTargets(details);
   if (targets === null) return null;
-  const notes = Array.isArray(details.notes) ? details.notes.filter((note) => typeof note === 'string') : [];
-  const unread = (part) => notes.some((note) => note.startsWith(`${UNREAD_NOTE}${part}: `));
+  const unread = unreadNote(details);
   return targets.filter((part) => !unread(part));
 }
 
-// The paths of a list that omp could not read for a `read` call, from the details of its tool result: the recorded
-// paths (see recordedTargets) that a note `Could not read <path>: <reason>` names (see recordedParts). omp opens the
+// The paths of a list that omp could not read for a `read` call (see recordedTargets and unreadNote). omp opens the
 // backing file of such a path before it finds that the member is missing (see backingFiles).
 function unreadTargets(details) {
-  const parts = recordedParts(details);
-  return parts === null ? [] : recordedTargets(details).filter((part) => !parts.includes(part));
+  const targets = recordedTargets(details);
+  return targets === null ? [] : targets.filter(unreadNote(details));
 }
 
 // The tool calls of the assistant messages of a transcript, in order, and the tool result message of each call, by the
@@ -4533,9 +4537,12 @@ function diffCoverage(tools, file, cwd, probe) {
 // gives the keys of a changed path. A read is outside when its key overlaps the key of a changed path (see
 // keysOverlap). A glob gives the key of the folder before its first glob segment, so a glob that could match a changed
 // file is outside.
-// A call with an error result (`error`, see transcriptFacts) showed no file. When each path of such a call that is not
-// allowed does not exist (see pathMissing), the call read nothing: its target goes to `missing`, not to `outside`, so
-// it does not make the run invalid. A reviewer without such a read gets no `missing`.
+// A call with an error result (`error`, see transcriptFacts) showed no file. When `lstat` confirms that each path of
+// such a call that is not allowed is missing (see pathMissing; a dangling link exists), the call read nothing: its
+// target goes to `missing`, not to `outside`, so it does not make the run invalid. Else each refused path that can
+// exist goes to `outside` by its own path, also a member of a group, and the group goes to neither list; a refused
+// target whose other interpretation or backing file goes to `outside` leaves `missing` too. A reviewer without such a
+// read gets no `missing`.
 // A `bundled` reviewer (a bundled arm R1 or V1, see isBundledReviewer) gets the narrower scope of its prompt
 // (prepare.mjs buildBundledPrompt): under the case folder, only `snapshot/` and `full.diff` are inputs, and it has no
 // instruction file and no skill read, so `plan.md`, the other diffs, `prompts/`, `base-instructions/`, every
@@ -4611,7 +4618,8 @@ export function readScope(
     };
     // Each text whose interpretations that exist now must be allowed too, with `always` for a text that has no check
     // of its own: the whole path of a list tool and its `;` members outside `{}`, as omp splits them (see
-    // splitPathList), the targets, and each list target as a whole and its members.
+    // splitPathList), the targets, and each list target as a whole and its members. A target and the members of a list
+    // target carry the label under which `refuse` reports their target.
     const alternatives = [];
     if (PATH_LIST_TOOLS.has(name)) {
       const members = splitPathList(value, URI_DELIMITER) ?? [];
@@ -4620,36 +4628,37 @@ export function readScope(
     }
     for (const target of targets) {
       const parts = lists.get(target);
-      alternatives.push([target, parts !== undefined]);
       if (parts !== undefined) {
+        alternatives.push([target, true, target]);
         for (const part of parts) alternatives.push([part, false, target]);
-        const opened = distinct(parts.map((part) => ompTargetPath(part, cwd, name, probe)));
+        const opened = distinct(parts.map((part) => ompTargetPath(part, name, probe)));
         const refused = opened.filter((part) => !check(part));
         if (refused.length) refuse(target, refused);
         continue;
       }
-      const read = ompTargetPath(target, cwd, name, probe);
+      const read = ompTargetPath(target, name, probe);
+      alternatives.push([target, false, read]);
       if (!check(read)) refuse(read, [read]);
     }
     // Every other path that the call can name and that exists now must be allowed too, so the scope does not depend on
     // which of them omp opened (see pathInterpretations), and so must each existing backing file of these texts and of
     // the members of a grouped read that omp could not read (see backingFiles); an exclusion part reads nothing, so
     // its backing files are not checked. Such a path exists, so it is outside, never missing: a refused target that
-    // went to `missing` and that the probe finds, or cannot decide, moves to `outside`, and the label of the group of
-    // such a member leaves `missing`.
+    // went to `missing` and that the probe finds, or cannot decide, moves to `outside`, and the label of the target of
+    // such a path leaves `missing`.
     const backingOf = (text) =>
       isExclusion(name, text, cwd, probe) ? [] : backingFiles(text, name).filter((item) => probe(item) !== 'missing');
     const others = [
-      ...alternatives.flatMap(([text, always, group]) =>
-        [...existingInterpretations(text, name, probe, always), ...backingOf(text)].map((item) => [item, group]),
+      ...alternatives.flatMap(([text, always, label]) =>
+        [...existingInterpretations(text, name, probe, always), ...backingOf(text)].map((item) => [item, label]),
       ),
       ...unread.flatMap((text) => backingOf(text).map((item) => [item, targets[0]])),
     ];
-    for (const [item, group] of others) {
+    for (const [item, label] of others) {
       if (check(item)) continue;
       outside.add(item);
       missing.delete(item);
-      if (group !== undefined) missing.delete(group);
+      if (label !== undefined) missing.delete(label);
     }
   }
   const scope = { outside: [...outside] };
