@@ -29,8 +29,9 @@ finds static forms with `Bun.Transpiler.scanImports` and reads the other forms
 in code only, so import-like text in strings, templates, comments, and
 regular expressions does not fail the build. The check is a lexer, not a
 parser: it does not see a loader that the code reaches through another name,
-such as `const load = require` or `import.meta["require"]`, and it can read
-an unusual construct of the emitted code wrongly. The tests cover each rule
+such as `const load = require` or `import.meta["require"]`, or a loader name
+written with escapes, such as `requ\u0069re`, and it can read an unusual
+construct of the emitted code wrongly. The tests cover each rule
 of the lexer. The build writes `talk.js`
 through an exclusive temporary file and a rename, so it replaces a link at the
 name `talk.js` and never writes through it; a link in the path of the output

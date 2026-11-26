@@ -370,6 +370,38 @@ describe("talk build host imports", () => {
     expect(bundle).toContain('this.#require("@oh-my-pi/a")');
   });
 
+  it("accepts calls of Unicode member names that end in import or require", () => {
+    const entry = tempProject(
+      "unicode-members",
+      [
+        "export class Loader {",
+        "  #αimport(name) {",
+        '    return "load " + name + Math.random();',
+        "  }",
+        "  #αrequire(x) {",
+        '    return "need " + x + Math.random();',
+        "  }",
+        "  run(n) {",
+        '    return [this.#αimport(n), this.#αrequire("@oh-my-pi/a")];',
+        "  }",
+        "}",
+        'const obj = { αimport: (n) => "obj " + n + Math.random() };',
+        "export const viaObject = (n) => obj.αimport(n);",
+        "",
+      ].join("\n"),
+      {},
+    );
+    const outDir = tempDir("unicode-members-out");
+    const result = runBuild(["--entry", entry, "--out", outDir]);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const bundle = readFileSync(join(outDir, "talk.js"), "utf8");
+    // Bun writes α as the escape \u{3b1}; the calls reach the emitted code.
+    expect(bundle).toContain(String.raw`this.#\u{3b1}import(n)`);
+    expect(bundle).toContain(String.raw`this.#\u{3b1}require("@oh-my-pi/a")`);
+    expect(bundle).toContain(String.raw`obj.\u{3b1}import(n)`);
+  });
+
   const rejected: ReadonlyArray<readonly [string, string, string]> = [
     [
       "a static import",
@@ -484,11 +516,31 @@ describe("talk build lexer", () => {
     expect(lexCode(code).text).toBe(expected);
   });
 
-  it("pairs each ( with its )", () => {
-    expect([...lexCode('f(a(b), (c), ")(")').closeParens]).toEqual([
-      [3, 5],
-      [8, 10],
-      [1, 17],
+  it("keeps the close of each ( after an import word, nested or not closed", () => {
+    expect([...lexCode("import(import(n))").importCalls]).toEqual([
+      [0, 16],
+      [7, 15],
+    ]);
+    expect([...lexCode("import(a").importCalls]).toEqual([[0, -1]]);
+  });
+
+  it("keeps no ( after a member, private, longer, or escaped name", () => {
+    const code = String.raw`f(x.import(a), this.#import(b), αimport(c), \u{3b1}import(c), (e), import /* c */ (d))`;
+    expect([...lexCode(code).importCalls]).toEqual([
+      [code.indexOf("import /*"), code.indexOf("(d)") + 2],
+    ]);
+  });
+
+  it("finds require, __require, and import.meta.require calls but no other calls", () => {
+    const code =
+      'require("a");__require("b");import.meta.require("c");' +
+      'x.require("d");x?.require("e");this.#require("f");#require(g){}' +
+      'require.resolve("h");import.meta.resolve("i");require;("j")';
+    const at = (text: string): number => code.indexOf(text);
+    expect([...lexCode(code).requireCalls]).toEqual([
+      [0, 7],
+      [at("__require"), at('("b")')],
+      [at("import.meta"), at('("c")')],
     ]);
   });
 });
@@ -503,11 +555,34 @@ describe("talk build loader calls", () => {
     }
   });
 
+  it("reports an import whose ( is not closed", () => {
+    expect(loaderCallProblems("import(a")).toHaveLength(1);
+  });
+
+  it("reports require calls of a host module", () => {
+    const problems = loaderCallProblems(
+      '__require("@oh-my-pi/a");import.meta.require("@oh-my-pi/b");require("other")',
+    );
+    expect(problems.map((problem) => /^require at offset (\d+)/.exec(problem)?.[1])).toEqual([
+      "0",
+      "25",
+    ]);
+  });
+
   it.each([
     ["a literal dynamic import", 'import("@oh-my-pi/a")'],
     ["a method named import", "class A{import(n){return n}}"],
     ["private member calls", 'this.#import(n);this.#require("@oh-my-pi/a")'],
     ["property calls", 'x.import(n);x?.require("@oh-my-pi/a")'],
+    [
+      "Unicode member names",
+      'this.#αimport(n);this.#αrequire("@oh-my-pi/a");obj.αimport(n);obj.αrequire("@oh-my-pi/a")',
+    ],
+    [
+      "escaped member names",
+      String.raw`this.#\u{3b1}import(n);this.#\u{3b1}require("@oh-my-pi/a");obj.\u{3b1}import(n)`,
+    ],
+    ["a longer name that ends in import", String.raw`αimport(n);\u{3b1}import(n);ximport(n)`],
   ])("reports nothing for %s", (_label, code) => {
     expect(loaderCallProblems(code)).toEqual([]);
   });

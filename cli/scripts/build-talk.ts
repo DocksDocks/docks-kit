@@ -49,27 +49,17 @@ const SCOPE_PREFIX = "@";
 const COMMENT_END = "*/";
 
 // The host-import rules check the emitted code, so they also see an import
-// that a dependency adds. Bun reports the static forms. The other rules match
-// the text of lexCode(), so text in a string, a comment, or a regular
-// expression does not match them.
+// that a dependency adds. Bun reports the static forms. lexCode() finds the
+// loader calls by whole tokens, so text in a string, a comment, or a regular
+// expression, and a longer or member name, does not match them.
 const HOST_PREFIX = "@oh-my-pi/";
 const DYNAMIC_IMPORT_KIND = "dynamic-import";
-// Not a member name such as `x.name`, `x?.name`, or `#name`. A spread `...name`
-// is not a member name.
-const NOT_MEMBER = String.raw`(?<![\w$#]|(?<!\.)\.\s*)`;
-// `import(`, but not a member call such as `x.import(` or `this.#import(`.
-const DYNAMIC_IMPORT = new RegExp(String.raw`${NOT_MEMBER}import\s*\(`, "g");
 // In lexCode() text, a string literal is two quotes with only spaces between them.
-const ONE_STRING_ARGUMENT = /\s*(?:" *"|' *')\s*\)/y;
+const LITERAL_IMPORT = /import\s*\(\s*(?:" *"|' *')\s*\)/y;
 // After the ")" of `import(...)`, a "{" starts the body of a method definition.
 const METHOD_BODY = /\s*\{/y;
-// A call of `require`, `__require`, or `import.meta.require` whose argument starts
-// with a quote, but not a member call such as `x.require(`. Bun emits
-// `__require` for a `require` call, and scanImports does not report it.
-const REQUIRE_CALL = new RegExp(
-  String.raw`${NOT_MEMBER}(?:import\s*\.\s*meta\s*\.\s*)?[\w$]*require\s*\(\s*(?=["'\`])`,
-  "g",
-);
+// The spaces before the quote that starts a call argument.
+const QUOTED_ARGUMENT = /\s*(?=["'`])/y;
 const SNIPPET_LENGTH = 60;
 
 /** A package that adds code to the bundle has no license file. */
@@ -133,7 +123,8 @@ function snippet(code: string, at: number): string {
  * counts as a division and a "/" after "}" as a regular expression. A call
  * `import(x)` followed by a new line and a block counts as a method definition.
  * A loader that the code reaches through another name, such as
- * `const load = require` or `import.meta["require"]`, is not seen. */
+ * `const load = require` or `import.meta["require"]`, is not seen, and an
+ * escape in a loader name, such as `requ\u0069re`, is not decoded. */
 export function hostImportProblems(code: string): ReadonlyArray<string> {
   const problems: Array<string> = [];
   for (const { kind, path } of new Bun.Transpiler({ loader: "js" }).scanImports(code)) {
@@ -148,25 +139,21 @@ export function hostImportProblems(code: string): ReadonlyArray<string> {
  * string literal in `code`. Unlike hostImportProblems(), it does not need Bun. */
 export function loaderCallProblems(code: string): ReadonlyArray<string> {
   const problems: Array<string> = [];
-  const { text, closeParens } = lexCode(code);
-  for (const match of text.matchAll(REQUIRE_CALL)) {
-    // The match ends at the quote that starts the argument.
-    if (code.startsWith(HOST_PREFIX, match.index + match[0].length + 1)) {
-      problems.push(`require at offset ${match.index}: ${snippet(code, match.index)}`);
+  const { text, importCalls, requireCalls } = lexCode(code);
+  for (const [start, open] of requireCalls) {
+    QUOTED_ARGUMENT.lastIndex = open + 1;
+    if (QUOTED_ARGUMENT.test(text) && code.startsWith(HOST_PREFIX, QUOTED_ARGUMENT.lastIndex + 1)) {
+      problems.push(`require at offset ${start}: ${snippet(code, start)}`);
     }
   }
-  for (const match of text.matchAll(DYNAMIC_IMPORT)) {
-    const open = match.index + match[0].length - 1;
-    ONE_STRING_ARGUMENT.lastIndex = open + 1;
-    if (ONE_STRING_ARGUMENT.test(text)) continue;
+  for (const [start, close] of importCalls) {
+    LITERAL_IMPORT.lastIndex = start;
+    if (LITERAL_IMPORT.test(text)) continue;
     // A method named `import`, such as `import(name) { ... }`, is not an import.
-    const close = closeParens.get(open);
-    if (close !== undefined) {
-      METHOD_BODY.lastIndex = close + 1;
-      if (METHOD_BODY.test(text)) continue;
-    }
+    METHOD_BODY.lastIndex = close + 1;
+    if (close !== -1 && METHOD_BODY.test(text)) continue;
     problems.push(
-      `dynamic import without one string literal at offset ${match.index}: ${snippet(code, match.index)}`,
+      `dynamic import without one string literal at offset ${start}: ${snippet(code, start)}`,
     );
   }
   return problems;
@@ -174,6 +161,17 @@ export function loaderCallProblems(code: string): ReadonlyArray<string> {
 
 const SPACE_CHAR = /\s/;
 const WORD_CHAR = /[\w$\u0080-\uffff]/;
+// Bun writes a non-ASCII identifier character as an escape such as `\u{3b1}`.
+const UNICODE_ESCAPE = /\\u(?:\{[0-9a-fA-F]+\}|[0-9a-fA-F]{4})/y;
+
+/** The length of the identifier part at `at`: one character, a `\uXXXX` or
+ * `\u{...}` escape, or 0 when no identifier part starts there. */
+function identifierPartLength(code: string, at: number): number {
+  if (WORD_CHAR.test(code[at] ?? "")) return 1;
+  UNICODE_ESCAPE.lastIndex = at;
+  return UNICODE_ESCAPE.test(code) ? UNICODE_ESCAPE.lastIndex - at : 0;
+}
+
 /** After one of these words, a "/" starts a regular expression. */
 const WORDS_BEFORE_EXPRESSION: Readonly<Record<string, true>> = {
   await: true,
@@ -204,9 +202,23 @@ export interface LexedCode {
   /** The code with the text of each string literal, template literal, comment,
    * and regular expression literal replaced by spaces. */
   readonly text: string;
-  /** The offset of the ")" that closes each "(" of the code, by the offset of the "(". */
-  readonly closeParens: ReadonlyMap<number, number>;
+  /** For each `import` word followed by "(": the offset of the ")" that closes
+   * that "(", or -1 when none does, by the offset of the word. */
+  readonly importCalls: ReadonlyMap<number, number>;
+  /** For each call of `require`, of another name that ends in `require` such as
+   * `__require`, or of `import.meta.require`: the offset of its "(", by the
+   * offset of the name. A member call such as `x.require(` is not one. */
+  readonly requireCalls: ReadonlyMap<number, number>;
 }
+
+/** What the tokens before a "(" call: nothing that matters, the `import` word,
+ * `import.meta`, or a `require` loader. */
+type Callee = "none" | "import" | "import.meta" | "require";
+
+// The stack entry of a "(" that does not follow `import`; an `import(` entry is
+// the offset of its word.
+const PLAIN_PAREN = -1;
+const CONTROL_PAREN = -2;
 
 /** Lex `code` in one pass. In the returned text, quotes, backticks, the `${`
  * and `}` of a template, and the slashes and flags of a regular expression
@@ -214,7 +226,8 @@ export interface LexedCode {
  * the start, after an operator, an opening bracket, `}`, a word such as
  * `return`, or the `)` of `if (...)`, `for (...)`, `while (...)`, or
  * `with (...)`; otherwise it is a division. A word after "." or "?." and a
- * private name such as `#return` are member names, not keywords. */
+ * private name such as `#return` are member names, not keywords. A name with
+ * escapes, such as `\u{3b1}import`, is one word. */
 export function lexCode(code: string): LexedCode {
   const parts: Array<string> = [];
   let copied = 0;
@@ -224,16 +237,19 @@ export function lexCode(code: string): LexedCode {
     parts.push(code.slice(copied, from), " ".repeat(end - from));
     copied = end;
   };
-  const closeParens = new Map<number, number>();
+  const importCalls = new Map<number, number>();
+  const requireCalls = new Map<number, number>();
   // The brace depth at each open template `${`, innermost last.
   const templateBraces: Array<number> = [];
-  // Each open "(": its offset, and whether a control word comes just before it.
-  const openParens: Array<{ readonly open: number; readonly afterControl: boolean }> = [];
+  // Each open "(": the offset of its `import` word, PLAIN_PAREN, or CONTROL_PAREN.
+  const openParens: Array<number> = [];
   let braces = 0;
   let regexNext = true;
   let word = "";
   // Whether the token before is the "." of a property access.
   let propertyNext = false;
+  let callee: Callee = "none";
+  let calleeStart = 0;
   let at = 0;
 
   // Skip template text from `at` to the closing backtick or the next `${`.
@@ -260,14 +276,30 @@ export function lexCode(code: string): LexedCode {
       at += 1;
       continue;
     }
-    // A private name `#name` is one member-name token. Its word keeps the "#",
-    // so it never matches a keyword.
-    const privateName = char === "#" && WORD_CHAR.test(next ?? "");
-    if (privateName || WORD_CHAR.test(char)) {
+    // A private name `#name` is one member-name token, never a keyword or a loader.
+    const privateName = char === "#" && identifierPartLength(code, at + 1) > 0;
+    if (privateName || identifierPartLength(code, at) > 0) {
       const start = at;
-      at += 1;
-      while (at < code.length && WORD_CHAR.test(code[at] ?? "")) at += 1;
-      word = propertyNext ? "" : code.slice(start, at);
+      at += privateName ? 1 : 0;
+      let part = identifierPartLength(code, at);
+      while (part > 0) {
+        at += part;
+        part = identifierPartLength(code, at);
+      }
+      const name = code.slice(start, at);
+      if (propertyNext || privateName) {
+        // A member name continues `import.meta.require`; any other ends the callee.
+        if (callee === "import" && name === "meta") callee = "import.meta";
+        else if (callee === "import.meta" && name === "require") callee = "require";
+        else callee = "none";
+        word = "";
+      } else {
+        if (name === "import") callee = "import";
+        else if (name.endsWith("require")) callee = "require";
+        else callee = "none";
+        calleeStart = start;
+        word = name;
+      }
       propertyNext = false;
       regexNext = WORDS_BEFORE_EXPRESSION[word] === true;
       continue;
@@ -288,8 +320,11 @@ export function lexCode(code: string): LexedCode {
       continue;
     }
     const before = word;
+    const called = callee;
     word = "";
     propertyNext = char === "." && next !== "." && code[at - 1] !== ".";
+    // A property "." keeps the callee for the member name after it.
+    if (!propertyNext) callee = "none";
     if (char === '"' || char === "'") {
       let end = at + 1;
       while (end < code.length && code[end] !== char) end += code[end] === "\\" ? 2 : 1;
@@ -335,18 +370,26 @@ export function lexCode(code: string): LexedCode {
       regexNext = false;
       continue;
     }
-    if (char === "(") openParens.push({ open: at, afterControl: CONTROL_WORDS[before] === true });
+    if (char === "(") {
+      if (called === "import") {
+        importCalls.set(calleeStart, -1);
+        openParens.push(calleeStart);
+      } else {
+        if (called === "require") requireCalls.set(calleeStart, at);
+        openParens.push(CONTROL_WORDS[before] === true ? CONTROL_PAREN : PLAIN_PAREN);
+      }
+    }
     if (char === "{") braces += 1;
     if (char === "}") braces -= 1;
     if (char === ")") {
-      const paren = openParens.pop();
-      if (paren !== undefined) closeParens.set(paren.open, at);
-      regexNext = paren?.afterControl ?? false;
+      const open = openParens.pop() ?? PLAIN_PAREN;
+      if (open >= 0) importCalls.set(open, at);
+      regexNext = open === CONTROL_PAREN;
     } else regexNext = char !== "]";
     at += 1;
   }
   parts.push(code.slice(copied));
-  return { text: parts.join(""), closeParens };
+  return { text: parts.join(""), importCalls, requireCalls };
 }
 
 /** The package that holds a metafile input path, or undefined for source outside node_modules.
