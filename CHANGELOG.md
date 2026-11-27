@@ -13,7 +13,7 @@ The user still reviews the summary and types the confirm code.
   that target: a side turn writes the summary, the review shows the note
   above the draft, the user edits the text and types the confirm code, and
   the text goes to the target with a request for a turn. The side-turn
-  waiting view shows ``talk: agent handover to `<name>` (<instance id>) ·
+  waiting view shows ``talk: agent handover to <instance id> (`<name>`) ·
   ⎋ cancels``, and the review mounts after omp drew that view once. The
   first line of the confirm view says that the agent started the handover,
   and the view takes no code unless it shows that line in full, so the user

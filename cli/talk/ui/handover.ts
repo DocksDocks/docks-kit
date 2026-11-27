@@ -91,15 +91,18 @@ export const HANDOVER_STARTED =
 
 /**
  * The waiting view of the side turn of a handover that the `talk` tool
- * started (#260 H2): the agent as the starter and the target with its full
- * instance id, cleaned as the views clean names. omp shows a notice of a
- * tool call only after the call ends, so talk's own view says it. The line
- * stays short, so the fallback name of an unnamed session (`session-` and 8
- * characters) fits 80 columns with the instance id. The confirm view names
- * the agent again at the point of approval, in full or with no code taken.
+ * started (#260 H2): the agent as the starter, the full instance id of the
+ * target, then its name, cleaned as the views clean names. omp shows a
+ * notice of a tool call only after the call ends, so talk's own view says
+ * it. The origin and the id come first and take 40 columns, so a row that
+ * the pane cuts still shows them; the optional name follows. The confirm
+ * view names the agent again at the point of approval, in full or with no
+ * code taken.
  */
-export const agentHandoverWaiting = (destination: Destination): string =>
-  `talk: agent handover to ${shownName(destination)} (${destination.instanceId}) · ⎋ cancels`;
+export const agentHandoverWaiting = (destination: Destination): string => {
+  const name = destination.name === undefined ? "(no name)" : `(${shownName(destination)})`;
+  return `talk: agent handover to ${destination.instanceId} ${name} · ⎋ cancels`;
+};
 
 /**
  * The first text of the review (#260 H1): the note of the agent, cleaned as

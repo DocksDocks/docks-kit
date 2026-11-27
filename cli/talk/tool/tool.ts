@@ -1137,10 +1137,9 @@ const dispatchResult = (
   }
 };
 
-const handoverResult = (end: HandoverEnd): Effect.Effect<TalkToolOutcome, TalkToolFailed> => {
+/** The result of a flow that the action started; a refusal of `start` never gets here (H4). */
+const handoverResult = (end: FlowEnd): Effect.Effect<TalkToolOutcome, TalkToolFailed> => {
   switch (end._tag) {
-    case "Refused":
-      return fail(end.text);
     case "Cancelled":
       return fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
     case "Failed":
@@ -1278,7 +1277,10 @@ const runHandover = Effect.fnUntraced(function* (
   if (params.noWake === true) return yield* fail(HANDOVER_ALWAYS_WAKES);
   const flow = context.handover;
   if (flow === undefined) return yield* fail(NO_HANDOVER_FLOW);
-  yield* refuseHandover(flow);
+  // H4: a refusal keeps the instance id that the call knows: the exact `instance` of the call
+  // for the session checks, the resolved target for the checks right before the side turn.
+  const exact = selector._tag === "Instance" ? selector.instanceId : undefined;
+  yield* refuseHandover(flow).pipe(Effect.mapError(knowing(exact)));
   const { signal } = context;
   const target = yield* handoverTarget(context, flow, selector, signal).pipe(
     Effect.catch((error) => preflightFailed(flow, signal, error)),
@@ -1289,6 +1291,8 @@ const runHandover = Effect.fnUntraced(function* (
     try: () => flow.start(target, params.message, signal),
     catch: () => new TalkToolFailed({ message: HANDOVER_FAILED, outcome: "failed" }),
   });
+  if (end._tag === "Refused")
+    return yield* fail(end.text, { instanceId: target.target.instanceId });
   return yield* handoverResult(end);
 });
 

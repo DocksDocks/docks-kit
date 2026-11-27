@@ -3061,7 +3061,7 @@ const EDITED_HANDOVER = "talk-ui smoke pasted summary.\nTyped: Pasted next step.
  */
 const AGENT_NOTICE_START = "talk: agent handover to ";
 const AGENT_PROVENANCE = "a handover that the agent started";
-/** The end of the waiting line after the instance (`agentHandoverWaiting` in `cli/talk/ui/handover.ts`). */
+/** The end of the waiting line after the instance id and the name (`agentHandoverWaiting` in `cli/talk/ui/handover.ts`). */
 const AGENT_WAITING_REST = "⎋ cancels";
 /**
  * The outcome texts of a handover that the session accepted, by the word that starts them (`OUTCOME_TEXT` and
@@ -3803,7 +3803,7 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       await screen.waitFor(draftLine, asked, "side-turn draft in the agent handover review");
       const shown = screen.text(asked);
       const waiting = new RegExp(
-        `${AGENT_NOTICE_START}[^\\n]* \\(${instance}\\) · ${AGENT_WAITING_REST}`,
+        `${AGENT_NOTICE_START}${instance} \\([^\\n]*\\) · ${AGENT_WAITING_REST}`,
       ).exec(shown);
       if (waiting === null || waiting.index > shown.indexOf(draftLine))
         failStep(

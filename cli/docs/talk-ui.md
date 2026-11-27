@@ -485,8 +485,12 @@ each tool call of the side turn.
 While the side turn runs, a waiting view at the bottom of the screen holds
 the focus: `talk: a side turn writes the handover summary · ⎋ cancels`, or
 for a tool-started handover
-``talk: agent handover to `<name>` (<instance id>) · ⎋ cancels``, with
-`(no name)` for a session without a name.
+``talk: agent handover to <instance id> (`<name>`) · ⎋ cancels``. Its first
+40 columns always read `talk: agent handover to <instance id>` (16 hex
+digits), so a row that the pane cuts still shows the origin and the target.
+A listed peer without a name that its user set shows its fallback name
+`session-<prefix>`. `(no name)` shows only when an exact `instance` resolves
+from a pair that this process kept without listing metadata.
 `escape` and `alt+t` there end the flow; every other key does nothing, so no
 key reaches the composer of omp. When the flow ends during the side turn,
 the flow aborts it, shows no error, and mounts no review. When the reply

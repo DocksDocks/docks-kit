@@ -492,12 +492,17 @@ description says to use the action only when the user asks for a handover
 3. The flow runs the side turn with `HANDOVER_PROMPT`, outside the main
    context. It shows no start notice, because omp shows a notice of a tool
    call only after the call ends. Instead, the side-turn waiting view shows
-   ``talk: agent handover to `<name>` (<instance id>) · ⎋ cancels``, with
-   `(no name)` for a session without a name; omp draws it as it draws other
-   waiting lines. The review mounts only after omp drew the waiting view
-   once, whatever the size of the pane. When omp closes the waiting view
-   before that frame, the flow ends as `cancelled`. A failed or empty side
-   turn is reported at once.
+   ``talk: agent handover to <instance id> (`<name>`) · ⎋ cancels``, with the
+   16-hex instance id; omp draws it as it draws other waiting lines. The
+   first 40 columns always read `talk: agent handover to <instance id>`, so a
+   row that the pane cuts still shows the origin and the target. A listed
+   peer without a name that its user set shows its fallback name
+   `session-<prefix>` (see [Names](#names)); `(no name)`, without a code
+   span, shows only when an exact `instance` resolves from a pair that this
+   process kept without listing metadata. The review mounts only after omp
+   drew the waiting view once, whatever the size of the pane. When omp
+   closes the waiting view before that frame, the flow ends as `cancelled`.
+   A failed or empty side turn is reported at once.
 4. The review holds only the text that can be sent: the note of `message`,
    cleaned with `safeMultiline` as the draft is, then a blank line, then the
    draft. A note that is blank after the cleaner adds nothing. The note does
@@ -543,9 +548,12 @@ Each refusal fails the call before the side turn and sends nothing. Its text
 says what the user or the agent can do. Its `details` hold the outcome
 `failed`, or a more specific one such as the probe outcome or `not-live`.
 They hold the instance id whenever the action knows the one instance: the
-exact `instance`, or the single session that `to` matched. That covers an
-own target, a `to` whose one match ended or did not answer, and an
-`instance` that did not answer.
+exact `instance`, or the single session that `to` matched. That covers the
+session checks of an `instance` call (mode, UI, subagent, open view, no
+side turn), the same checks right before the side turn once the target
+resolved, an own target, a `to` whose one match ended or did not answer,
+and an `instance` that did not answer. A `to` refusal before the target
+resolved and an argument error carry no id.
 
 | Case                                                                                                           | Text starts with                                                                         |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |

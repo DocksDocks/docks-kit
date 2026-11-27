@@ -623,7 +623,7 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(h.services.targets).toEqual([]);
     expect(h.services.turns.map((turn) => turn.promptText)).toEqual([HANDOVER_PROMPT]);
     const waiting = agentHandoverWaiting(GAMMA);
-    expect(waiting).toBe(`talk: agent handover to ${literal("gamma")} (${ID_C}) · ⎋ cancels`);
+    expect(waiting).toBe(`talk: agent handover to ${ID_C} (${literal("gamma")}) · ⎋ cancels`);
     expect(prop(h.tui.top.node, "text")).toBe(waiting);
     reply.resolve({ replyText: DRAFT });
     await flush();
@@ -852,28 +852,34 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     },
   );
 
-  it("fits the whole waiting line of an unnamed peer with its full instance id into 80 columns", async () => {
-    const h = await harness();
-    h.tui.size = { columns: 80, rows: 1 };
-    const reply = Promise.withResolvers<unknown>();
-    h.services.reply = () => reply.promise;
-    // A session without a name lists as `session-` and the first 8 characters of its session id.
-    const unnamed = { ...GAMMA, name: "session-0123abcd" };
-    const flow = h.run({
-      _tag: "AgentHandover",
-      destination: unnamed,
-      note: undefined,
-      isOwn: () => false,
-    });
-    await flush();
-    const text = String(prop(h.tui.top.node, "text"));
-    expect(text).toBe(
-      `talk: agent handover to ${literal("session-0123abcd")} (${ID_C}) · ⎋ cancels`,
-    );
-    expect([...text].length).toBeLessThanOrEqual(80);
-    press(h.tui.top.node, "escape");
-    expect(await flow).toEqual({ _tag: "Cancelled" });
-  });
+  it.each([
+    // A session without a user-set name lists as `session-` and the first 8 characters of its session id.
+    ["a peer with the fallback name", "session-0123abcd"],
+    ["a peer with a long name", "a-very-long-session-name-that-a-one-row-pane-cannot-show-whole"],
+    ["a peer without listing metadata", undefined],
+  ] as const)(
+    "puts the agent origin and the full instance id before the name of %s, inside the first 40 columns",
+    async (_name, name) => {
+      const h = await harness();
+      h.tui.size = { columns: 40, rows: 1 };
+      const reply = Promise.withResolvers<unknown>();
+      h.services.reply = () => reply.promise;
+      const flow = h.run({
+        _tag: "AgentHandover",
+        destination: { ...GAMMA, name },
+        note: undefined,
+        isOwn: () => false,
+      });
+      await flush();
+      const text = String(prop(h.tui.top.node, "text"));
+      const shownName = name === undefined ? "(no name)" : `(${literal(name)})`;
+      expect(text).toBe(`talk: agent handover to ${ID_C} ${shownName} · ⎋ cancels`);
+      // The row that a 40-column pane shows still holds the origin and the whole instance id.
+      expect([...text].slice(0, 40).join("")).toBe(`talk: agent handover to ${ID_C}`);
+      press(h.tui.top.node, "escape");
+      expect(await flow).toEqual({ _tag: "Cancelled" });
+    },
+  );
 
   it("cleans a host error for a notice: one line, no terminal controls, and a space for each tab", () => {
     expect(safeDiagnostic("open\t/home/u/x\u001b[31m failed\nretry")).toBe(

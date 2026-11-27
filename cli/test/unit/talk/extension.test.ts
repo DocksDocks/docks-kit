@@ -3136,7 +3136,7 @@ describe("handover action of the talk tool (#260)", () => {
     const { call } = startHandover(alpha, { to: "beta" });
     await until(() => openKind(alpha) === "text");
     expect(nodeProp(alpha.top.node, "text")).toBe(
-      `talk: agent handover to ${literal("beta")} (${betaId}) · ⎋ cancels`,
+      `talk: agent handover to ${betaId} (${literal("beta")}) · ⎋ cancels`,
     );
     reply.resolve({ replyText: SUMMARY });
     await until(() => openKind(alpha) === "editor");
@@ -3474,8 +3474,8 @@ describe("handover action of the talk tool (#260)", () => {
       await flow;
     });
 
-    it("refuses when a /talk flow opened while the target resolved, and that flow stays open", async () => {
-      const { alpha, beta, turns } = await sessions();
+    it("refuses with the resolved instance id when a /talk flow opened while the target resolved, and that flow stays open", async () => {
+      const { alpha, beta, betaId, turns } = await sessions();
       const gate = Promise.withResolvers<void>();
       network.listGate = gate.promise;
       const { call } = startHandover(alpha, { to: "beta" });
@@ -3484,7 +3484,9 @@ describe("handover action of the talk tool (#260)", () => {
       const flow = alpha.command("");
       await until(() => openKind(alpha) === "picker");
       gate.resolve();
-      expect(await call).toEqual(failed(HANDOVER_FLOW_OPEN, { outcome: "failed" }));
+      expect(await call).toEqual(
+        failed(HANDOVER_FLOW_OPEN, { instanceId: betaId, outcome: "failed" }),
+      );
       expect(turns).toEqual([]);
       expect(openKind(alpha)).toBe("picker");
       pressKey(alpha.top.node, "escape");
@@ -3497,6 +3499,35 @@ describe("handover action of the talk tool (#260)", () => {
       handover.alpha.sideTurn = undefined;
       await refuses(handover, { to: "beta" }, HANDOVER_NEEDS_SIDE_TURN);
     });
+
+    it.each([
+      ["mode rpc", HANDOVER_NEEDS_TUI],
+      ["no flow UI", HANDOVER_NEEDS_TUI],
+      ["a subagent session", HANDOVER_IN_SUBAGENT],
+      ["an open /talk view", HANDOVER_FLOW_OPEN],
+      ["no ctx.runEphemeralTurn", HANDOVER_NEEDS_SIDE_TURN],
+    ] as const)(
+      "keeps the exact instance id of the call when it refuses for %s",
+      async (name, text) => {
+        const handover = await sessions();
+        const { alpha, betaId } = handover;
+        if (name === "mode rpc") alpha.mode = "rpc";
+        if (name === "no flow UI") alpha.ctx["ui"] = { notify: () => undefined };
+        if (name === "a subagent session")
+          alpha.agent = { kind: "sub", id: "sub-1", parentId: "main" };
+        if (name === "no ctx.runEphemeralTurn") alpha.sideTurn = undefined;
+        const flow = name === "an open /talk view" ? alpha.command("") : undefined;
+        if (flow !== undefined) await until(() => openKind(alpha) === "picker");
+        await refuses(handover, { instance: betaId }, text, {
+          instanceId: betaId,
+          outcome: "failed",
+        });
+        if (flow !== undefined) {
+          pressKey(alpha.top.node, "escape");
+          await flow;
+        }
+      },
+    );
 
     it.each(["to", "instance"] as const)(
       "refuses this session's own registration named by %s",
