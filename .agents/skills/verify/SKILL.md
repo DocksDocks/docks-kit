@@ -1,8 +1,8 @@
 ---
 name: verify
-description: "Use when checking a change to docks-kit end to end: run the CLI the way a user does (sync dry run, toolchain doctor, removed target and flag), the dry-run goldens, the real omp on the kit trigger rules, and the kit plugin smoke in an isolated omp state, and inspect exit codes and output lines. Not for unit tests (run `bun run test:unit`), lint, or a release."
+description: "Use when checking a change to docks-kit end to end: run the CLI the way a user does (sync dry run, toolchain doctor, removed target and flag), the dry-run goldens, the real omp on the kit trigger rules, the kit plugin smoke in an isolated omp state, and the talk tool between two isolated omp processes, and inspect exit codes and output lines. Not for unit tests (run `bun run test:unit`), lint, or a release."
 metadata:
-  updated: "2026-11-23"
+  updated: "2026-11-26"
 ---
 
 # Verify docks-kit
@@ -29,13 +29,13 @@ Hosts: the commands below are POSIX shell for Linux and macOS. On Windows, run `
 | V3 | Dry-run goldens through the engine and the public CLI | `bun run golden:dryrun` | A line `golden-dryrun: OK (<n> case(s))` and exit 0 |
 | V4 | Removed sync target and flag | `./docks-kit sync omp --dry-run; echo "exit $?"; ./docks-kit sync --dry-run --prune; echo "exit $?"` | First the sync help on stdout, then `ERROR` and `Unexpected positional argument: "omp"` on stderr, and `exit 1`. Then `unknown flag --prune for 'sync'` and `exit 2`. Observed 2026-11-19 on Linux x64: exactly these lines |
 | V5 | Trigger rules on a large tool call, in the real omp | `bun .agents/skills/verify/scripts/ttsr-snippet.ts big-reset \| omp ttsr test --rule SoT/.omp/plugin/rules/git-safety.md --source tool --tool eval --file -`, then the same command with `big-quiet` | For `big-reset`, `Triggered (1)` and a `git-safety` line within a few seconds. For `big-quiet`, `No rules triggered. (evaluated 1)`. The `big-reset` snippet is a 21 KB eval cell with many `\"` escapes that ends with `sh("git reset --hard HEAD")`. The rules of 0.22.29 stayed quiet on it after 4.7 s: JavaScriptCore stopped at its match limit and reported no match, so the rule failed open |
-| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 20 `ok` lines of the V6 section below and `exit 0`. Observed 2026-11-26 on Linux x64 with omp 19.2.1: exactly these lines; the load mode took 1 s and the `hooks` mode 4 s |
+| V6 | Kit plugin in the real omp, isolated | `bun .agents/skills/verify/scripts/omp-smoke.ts; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts hooks; echo "exit $?"`, then `bun .agents/skills/verify/scripts/omp-smoke.ts talk; echo "exit $?"` | The load mode prints `docks-kit-omp -> <checkout>/SoT/.omp/plugin`, `skills: 33`, `agents: code-reviewer,plan-reviewer`, `warnings: 0`, and `exit 0`. The `hooks` mode prints the 20 `ok` lines of the V6 section below and `exit 0`. The `talk` mode prints the 19 `ok` lines of the V6 `talk` section below and `exit 0`. Observed 2026-11-26 on Linux x64 with omp 19.2.1: exactly these lines; the load mode took 1 s, the `hooks` mode 4 s, and the `talk` mode 4 s to 13 s |
 
 ## V6 — Kit plugin smoke in an isolated omp state
 
-`omp-smoke.ts` creates a docks-kit scratch folder and makes all omp state of the run live there. omp gets only `PATH`, `USER`, `LANG`, `LC_*`, and `TERM` from the environment, so no credential and no omp session variable reaches it. It also gets `HOME` set to a home folder in the scratch folder, `PI_CONFIG_DIR` set to a config root relative to that home, and `XDG_STATE_HOME` and `TMPDIR` set to scratch folders. The scratch home holds a fresh `.cache/docks-kit/tidy.stamp`, so the session-start sweep of `hygiene.ts` (`docks-kit tidy --apply`) is not due and does not start. The script starts a fake local OpenAI-compatible model, runs `omp plugin link <checkout>/SoT/.omp/plugin`, and finds the package through the npm row `docks-kit-omp` of `omp plugin list --json`. It removes the scratch folder at the end, also after a failure. The run writes nothing outside the scratch folder: the real `~/.omp`, the real `~/.cache/docks-kit`, and the real `verify-gate.jsonl` stay unchanged. Use `--repo <path>` to test another checkout.
+`omp-smoke.ts` creates a docks-kit scratch folder and makes all omp state of the run live there. omp gets only `PATH`, `USER`, `LANG`, `LC_*`, and `TERM` from the environment, so no credential and no omp session variable reaches it. It also gets `HOME` set to a home folder in the scratch folder, `PI_CONFIG_DIR` set to a config root relative to that home, and `XDG_STATE_HOME` and `TMPDIR` set to scratch folders. The scratch home holds a fresh `.cache/docks-kit/tidy.stamp`, so the session-start sweep of `hygiene.ts` (`docks-kit tidy --apply`) is not due and does not start. The script starts a fake local OpenAI-compatible model, runs `omp plugin link <checkout>/SoT/.omp/plugin`, and finds the package through the npm row `docks-kit-omp` of `omp plugin list --json`. It removes the scratch folder at the end, also after a failure. The run writes nothing outside the scratch folder: the real `~/.omp`, the real `~/.cache/docks-kit`, and the real `verify-gate.jsonl` stay unchanged. Use `--repo <path>` to test another checkout. Use `--omp <binary>` to run another omp binary in place of `omp` from `PATH`, in each mode; the script resolves a relative path from the current folder.
 
-The load mode reads `omp skill list --json` and the task tool of one `omp -p` session. It counts the skills whose file is inside the linked plugin folder (the 32 skills moved from DocksDocks/docks and `workspace-hygiene`), and it lists the plugin agents that the task tool offers. The `hooks` mode makes a scratch git repository with its own git config. The repository holds a root `AGENTS.md`, a root `README.md`, `notes.txt`, and the nested node `scripts/AGENTS.md` with `scripts/ci.mjs`. The fake model plays scripted tool calls in `omp -p --mode json` sessions, and the script reads the JSON event stream, the requests that the fake model receives, `git log`, and the `verify-gate.jsonl` log of each session. Each session has its own `XDG_STATE_HOME` in the scratch folder. Expected output of the `hooks` mode, in order:
+The load mode reads `omp skill list --json` and the task tool of one `omp -p` session. It counts the skills whose file is inside the linked plugin folder (the 32 skills moved from DocksDocks/docks and `workspace-hygiene`), and it lists the plugin agents that the task tool offers. It fails when the `omp.extensions` list of the linked `package.json` has a `talk.js` entry, because the kit plugin does not load `talk` before the cutover; omp loads such an entry without a warning. The `hooks` mode makes a scratch git repository with its own git config. The repository holds a root `AGENTS.md`, a root `README.md`, `notes.txt`, and the nested node `scripts/AGENTS.md` with `scripts/ci.mjs`. The fake model plays scripted tool calls in `omp -p --mode json` sessions, and the script reads the JSON event stream, the requests that the fake model receives, `git log`, and the `verify-gate.jsonl` log of each session. Each session has its own `XDG_STATE_HOME` in the scratch folder. Expected output of the `hooks` mode, in order:
 
 ```text
 ok install
@@ -79,7 +79,61 @@ exit 0
 | `isolated` | The whole run | The `tidy.stamp` of the scratch home kept its modification time, so no hygiene sweep started. |
 | `real-state` | The whole run | The real omp registry files kept their modification times. The real `verify-gate.jsonl` has no new line with a `cwd` inside the scratch folder. Lines that other omp sessions add during the run do not count. |
 
-A `FAIL <reason>` line in the load mode, or a `FAIL <name>: <reason>` line in the `hooks` mode, and `exit 1` mean that the check failed; the reason tells what the run saw. A warning count above 0 is a failure, and the `FAIL` line names each warning. `install` and `sessions` fail when an omp command exits with a status other than 0. `FAIL could not remove scratch folder <path>` and `exit 1` mean that the folder stays; remove it with `docks-kit scratch remove <path>`.
+A `FAIL <reason>` line in the load mode, or a `FAIL <name>: <reason>` line in the `hooks` mode or the `talk` mode, and `exit 1` mean that the check failed; the reason tells what the run saw. A warning count above 0 is a failure, and the `FAIL` line names each warning. `install` and `sessions` fail when an omp command exits with a status other than 0. `FAIL could not remove scratch folder <path>` and `exit 1` mean that the folder stays; remove it with `docks-kit scratch remove <path>`. In the `talk` mode, this line can also name the registry folder.
+
+### The `talk` mode
+
+`omp-smoke.ts talk` checks the `talk` tool of `cli/talk/` (#250) in two real omp processes. The kit plugin does not load `talk` yet, so the mode links a changed copy of the plugin:
+
+1. It builds `talk.js` with `bun cli/scripts/build-talk.ts --out <scratch>/talk-build`, copies `SoT/.omp/plugin` to `<scratch>/plugin`, adds `extensions/talk.js` and the manifest entry `./extensions/talk.js` to the copy, and links the copy. The copy keeps each symbolic link as it is. The mode refuses a symbolic link on the copy, on its `extensions` folder, and on its `package.json`, and it refuses a copy that already has `extensions/talk.js`, so no write goes through a link to a file outside the scratch folder. `SoT/.omp/plugin` does not change, so the load mode still counts 33 skills and finds no `talk.js` entry.
+2. It makes a private registry folder (mode 0700) with `mkdtemp` in the system temporary root, for example `/tmp/dkt-AbC123`, and sets `DOCKS_KIT_TALK_DIR` to it for both omp processes. A socket path in the scratch folder is too long for `sun_path`. The cleanup removes the registry folder with the scratch folder, also after a failure, SIGINT, or SIGTERM. The last line, `registry-removed`, checks after the cleanup that the folder is gone.
+3. The isolated `config.yml` sets `tools.commands: false`. Thus omp gives `talk` to the model as a provider tool and does not mount it as a Bash command.
+4. It starts the peer as `omp --mode rpc` and sends RPC commands to it: `prompt`, `get_state`, `get_entries`, `new_session`, and `fork`. Each RPC response must have `success: true`, and each `get_entries` response must have an `entries` array of objects, else the step fails. A delivered message is the entry with `type` `custom_message`, `customType` `talk`, and `details.messageId` equal to the message id of the result. An absent message is one whose message id and payload text are in no field of any entry. It runs the sender as `omp -p --mode json`. The fake model gives each process its own model id (`talk-peer`, `talk-sender`). The script writes each turn of the sender, and a turn waits until the script has acted on the peer, so one sender process does all the `talk` calls. The peer model answers an ask with a `reply` call. It holds the turn of the RPC prompt `SLOW-TURN: wait for the driver.` until the cancel check ends, so the peer is busy.
+
+Expected output of the `talk` mode, in order:
+
+```text
+ok install
+ok talk-offered
+ok talk-list
+ok talk-send
+ok talk-ask-reply
+ok talk-queued
+ok talk-cancel
+ok new-session-list
+ok new-session-send
+ok new-session-old-instance-not-live
+ok fork-list
+ok fork-send
+ok fork-old-instance-not-live
+ok closed-peer-not-live
+ok extensions-loaded
+ok sessions
+ok isolated
+ok real-state
+ok registry-removed
+exit 0
+```
+
+| Line | Action | Expected result |
+|---|---|---|
+| `install` | Build, copy, link, and registry folder | The build and each omp command exit 0. The plugin copy has no symbolic link on a path that the mode writes. The registry folder has mode 0700. |
+| `talk-offered` | The first provider request of the peer (for the RPC prompt `Reply with ok.`) and of the sender | Each request offers the `talk` tool. The script makes no `talk` call before this check. |
+| `talk-list` | Sender: `list`; again after 250 ms, at most 20 times | A line without `(this session)` shows the first 8 characters of the peer session id from RPC `get_state`. The script keeps the full instance id of that line. |
+| `talk-send` | Sender: `send` with `to` set to the full peer session id | The result reads `Delivered:` and names the kept instance id. RPC `get_entries` of the peer holds the talk entry with that message id, and the answer of the turn that the message started comes after it. |
+| `talk-ask-reply` | Sender: `ask` with `instance`. The peer model calls `reply` with `replyTo` set to the ask id. | The result of the waiting `ask` holds `**Reply from` and the reply text with the ask id. |
+| `talk-queued` | RPC `prompt` `SLOW-TURN: wait for the driver.` makes the peer busy. Sender: `send` with `instance`. | The result reads `Queued:` and names a message id and the kept instance id. |
+| `talk-cancel` | Sender: `cancel` with the message id and the instance id of the `talk-queued` result. Then the slow turn ends. | The result reads `Cancelled:` and names the same message id. When the peer is idle again, no entry of `get_entries` holds that message id or the payload text `talk smoke: while busy`. |
+| `new-session-list` | RPC `new_session`. Sender: `list`, with the same retries. | The session id changed. A line shows the new session with an instance id that is not the old one, and no line shows the old instance id. Session ids of one run can start with the same 8 characters, so the check also compares the instance ids. |
+| `new-session-send` | Sender: `send` with `to` set to the full new session id | As `talk-send`, for the new instance id. |
+| `new-session-old-instance-not-live` | Sender: `send` with `instance` set to the old instance id, which the same sender process listed before | The result reads `talk: the send failed: not-live`. After 0.5 s, the peer is still in the new session, and no entry of RPC `get_entries` without a cursor holds the message id or the payload text of that send. |
+| `fork-list`, `fork-send`, `fork-old-instance-not-live` | RPC `fork` with `entryId` set to the last assistant message of the new session. Then the same actions as for `new_session`, with the instance id of `new-session-list` as the old instance id. | As the `new-session-` lines. Also, `get_entries` of the forked session holds the talk entry of `new-session-send`, which the fork inherited. |
+| `closed-peer-not-live` | The peer stdin ends and the peer exits. Sender: `send` with `instance` set to the instance id of `fork-list`. | The result reads `talk: the send failed: not-live`. |
+| `extensions-loaded`, `isolated`, `real-state` | The whole run; the warnings include the standard error of the peer | As in the `hooks` mode |
+| `sessions` | Both omp processes | The sender exits 0 after its last turn. The peer exits 0 after its stdin ends. |
+| `registry-removed` | After the cleanup | The registry folder does not exist. |
+
+A failed scenario check stops the scenario. Each scenario line after it prints `FAIL <name>: not run, because an earlier check failed`. The lines from `extensions-loaded` on run in each case.
 
 ## Failure signs
 
@@ -92,3 +146,6 @@ A `FAIL <reason>` line in the load mode, or a `FAIL <name>: <reason>` line in th
 | V6 prints `FAIL extensions-loaded` or `warnings:` above `0` with `Failed to load extension` | A kit extension throws when omp loads it | Fix the file that the `FAIL` line names in `SoT/.omp/plugin/extensions/` |
 | V6 prints a `FAIL gate-` or `FAIL nudge-` line | The gate or the nudge acted on the wrong command, path, or node | Check `checkCommand` in `SoT/.omp/plugin/extensions/verify-gate-core.ts` or `nudgeText` in `SoT/.omp/plugin/extensions/context-tree-core.ts`, and their adapters `verify-gate.ts` and `context-tree-nudge.ts` |
 | V6 prints a `FAIL hygiene-` line | The `scratch_new` description or the temporary-file reminder lost its preference for scratch, or the reminder did not run | Check the `scratch_new` description and `SCRATCH_NOTE` in `SoT/.omp/plugin/extensions/hygiene.ts` |
+| V6 `talk` prints `FAIL install` with `build-talk.ts failed` | The talk bundle does not build | Run `bun cli/scripts/build-talk.ts --out <folder>` with a scratch folder and fix the error that it names |
+| V6 `talk` prints `FAIL talk-offered` | omp did not load `talk.js`, or it mounted `talk` as a Bash command | Read the `extensions-loaded` line. Check that the omp version supports `tools.commands` (`omp --version`, V2) |
+| V6 `talk` prints a `FAIL talk-`, `FAIL new-session-`, `FAIL fork-`, or `FAIL closed-peer-` line | The `talk` tool or the talk transport gave a wrong result; the reason quotes the tool result | Run `node node_modules/vitest/vitest.mjs run cli/test/unit/talk`, and check `cli/talk/tool/` and `cli/docs/talk-transport.md` |

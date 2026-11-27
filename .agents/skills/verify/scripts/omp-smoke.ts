@@ -11,14 +11,24 @@
  *   hooks      Drive the verify-gate, context-tree-nudge, and hygiene extensions in `omp -p` sessions in a
  *              scratch git repository. The fake model plays scripted tool calls. Prints `ok <name>` or
  *              `FAIL <name>: <reason>` for each check.
+ *   talk       Build the `talk` extension into a copy of the plugin, start one omp as an RPC peer and drive a
+ *              second omp in print mode, both with `tools.commands` off and a private registry folder. The fake
+ *              model scripts the `talk` calls of each session. Prints `ok <name>` or `FAIL <name>: <reason>`.
  *
- * Usage: bun .agents/skills/verify/scripts/omp-smoke.ts [hooks] [--repo <path>]
+ * `--omp <binary>` runs that omp binary in place of `omp` from PATH, for every command.
+ *
+ * Usage: bun .agents/skills/verify/scripts/omp-smoke.ts [hooks|talk] [--repo <path>] [--omp <binary>]
  */
 
-import { type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
+  constants,
+  copyFileSync,
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -26,10 +36,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
-import { dirname, join, resolve, sep } from "node:path";
-import type { Readable } from "node:stream";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -66,7 +76,7 @@ const REAL_GATE_LOG = join(
   "docks",
   "verify-gate.jsonl",
 );
-const COMMANDS = ["hooks"];
+const COMMANDS = ["hooks", "talk"];
 
 // ---------- JSON narrowing ----------
 
@@ -99,7 +109,11 @@ function parseJsonText(source: string): Json | undefined {
 // ---------- arguments ----------
 
 const { values: args, positionals } = parseArgs({
-  options: { repo: { type: "string" }, help: { type: "boolean", short: "h" } },
+  options: {
+    repo: { type: "string" },
+    omp: { type: "string" },
+    help: { type: "boolean", short: "h" },
+  },
   allowPositionals: true,
   strict: true,
 });
@@ -109,7 +123,7 @@ if (
   positionals.length > 1 ||
   (command !== null && !COMMANDS.includes(command))
 ) {
-  console.log("usage: omp-smoke.ts [hooks] [--repo <path>]");
+  console.log("usage: omp-smoke.ts [hooks|talk] [--repo <path>] [--omp <binary>]");
   process.exit(args.help === true ? 0 : 2);
 }
 // omp resolves the home folder from HOME only on Linux and macOS. On Windows the scratch home would not
@@ -121,38 +135,54 @@ if (process.platform === "win32") {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(args.repo ?? join(scriptDir, "../../../.."));
 const pluginDir = join(repo, PLUGIN_DIR);
+/**
+ * The omp binary of every run. A path with a folder part is made absolute, because each run starts in a
+ * scratch folder; a bare name is looked up in PATH.
+ */
+const ompBinary =
+  args.omp === undefined
+    ? "omp"
+    : args.omp.includes(sep) && !isAbsolute(args.omp)
+      ? resolve(args.omp)
+      : args.omp;
 
 // ---------- process and scratch lifecycle ----------
 
-type Child = ChildProcessByStdio<null, Readable, Readable>;
-const children = new Set<Child>();
+const children = new Set<ChildProcess>();
 let scratch: string | null = null;
+/** The private registry folder of the talk mode. It lies outside the scratch folder; cleanup removes it too. */
+let talkDir: string | null = null;
 let server: Server | null = null;
 
+/** Removes a temporary folder with `docks-kit scratch remove`. Returns false when the folder stays. */
+function removeFolder(path: string): boolean {
+  const result = spawnSync("docks-kit", ["scratch", "remove", path], { encoding: "utf8" });
+  if (result.status === 0 && !existsSync(path)) return true;
+  const detail = (result.stderr || String(result.error ?? "")).trim();
+  if (detail) console.error(detail);
+  return false;
+}
+
 /**
- * Stops children and the fake model, and removes the scratch folder.
- * Returns the path of a scratch folder that it could not remove, else null.
+ * Stops children and the fake model, and removes the scratch folder and the talk registry folder.
+ * Returns the paths of the folders that it could not remove.
  */
-function cleanup(): string | null {
+function cleanup(): string[] {
   for (const child of children) child.kill("SIGKILL");
   children.clear();
   server?.closeAllConnections();
   server?.close();
   server = null;
-  if (scratch === null) return null;
-  const path = scratch;
+  const folders = [scratch, talkDir].filter((path) => path !== null);
   scratch = null;
-  const result = spawnSync("docks-kit", ["scratch", "remove", path], { encoding: "utf8" });
-  if (result.status === 0 && !existsSync(path)) return null;
-  const detail = (result.stderr || String(result.error ?? "")).trim();
-  if (detail) console.error(detail);
-  return path;
+  talkDir = null;
+  return folders.filter((path) => !removeFolder(path));
 }
 
 function reportCleanup(): boolean {
   const kept = cleanup();
-  if (kept !== null) console.log(`FAIL could not remove scratch folder ${kept}`);
-  return kept === null;
+  for (const path of kept) console.log(`FAIL could not remove scratch folder ${path}`);
+  return kept.length === 0;
 }
 
 for (const [signal, code] of [
@@ -217,7 +247,7 @@ function runOmp(
   env: Record<string, string>,
 ): Promise<OmpResult> {
   const { promise, resolve: done } = Promise.withResolvers<OmpResult>();
-  const child = spawn("omp", argv, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(ompBinary, argv, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
   children.add(child);
   let stdout = "";
   let stderr = "";
@@ -253,6 +283,11 @@ interface ToolCall {
 type Turn = readonly ToolCall[] | ((request: JsonObject) => readonly ToolCall[]);
 interface Script {
   turns: readonly Turn[];
+  /**
+   * When set, answers every request in place of `turns`; an empty list is a plain "ok" answer. The answer can
+   * wait for the driver, so a turn of a session lasts until the driver has acted on another session.
+   */
+  respond?: (request: JsonObject) => Promise<readonly ToolCall[]>;
 }
 
 function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): string {
@@ -261,14 +296,21 @@ function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): stri
 
 /**
  * The tool calls of the scripted turn for one request, or null for a plain "ok" answer.
- * `script.turns[n]` answers a request that holds n assistant messages.
+ * `script.turns[n]` answers a request that holds n assistant messages, unless `script.respond` is set.
  */
-function scriptedCalls(script: Script, request: JsonObject): readonly ToolCall[] | null {
-  const index = objects(request["messages"]).filter(
-    (message) => message["role"] === "assistant",
-  ).length;
-  const turn = script.turns[index];
-  const calls = typeof turn === "function" ? turn(request) : turn;
+async function scriptedCalls(
+  script: Script,
+  request: JsonObject,
+): Promise<readonly ToolCall[] | null> {
+  let calls: readonly ToolCall[] | undefined;
+  if (script.respond !== undefined) calls = await script.respond(request);
+  else {
+    const index = objects(request["messages"]).filter(
+      (message) => message["role"] === "assistant",
+    ).length;
+    const turn = script.turns[index];
+    calls = typeof turn === "function" ? turn(request) : turn;
+  }
   return calls !== undefined && calls.length > 0 ? calls : null;
 }
 
@@ -294,35 +336,40 @@ function startFakeModel(requests: JsonObject[], script: Script): Promise<Server>
       const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
       if (parsed["stream"] === true) {
         res.writeHead(200, { "content-type": "text/event-stream" });
-        const calls = scriptedCalls(script, parsed);
-        if (calls) {
-          const toolCalls = calls.map((call, index) => ({
-            index,
-            id: call.id,
-            type: "function",
-            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-          }));
-          res.write(
-            sseChunk(model, {
-              index: 0,
-              delta: { role: "assistant", tool_calls: toolCalls },
-              finish_reason: null,
-            }),
-          );
-          res.write(
-            sseChunk(model, { index: 0, delta: {}, finish_reason: "tool_calls" }, { usage }),
-          );
-        } else {
-          res.write(
-            sseChunk(model, {
-              index: 0,
-              delta: { role: "assistant", content: "ok" },
-              finish_reason: null,
-            }),
-          );
-          res.write(sseChunk(model, { index: 0, delta: {}, finish_reason: "stop" }, { usage }));
-        }
-        res.end("data: [DONE]\n\n");
+        void scriptedCalls(script, parsed)
+          .catch(() => null)
+          .then((calls) => {
+            // Cleanup closes the connection of a turn that still waits.
+            if (res.destroyed) return;
+            if (calls) {
+              const toolCalls = calls.map((call, index) => ({
+                index,
+                id: call.id,
+                type: "function",
+                function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+              }));
+              res.write(
+                sseChunk(model, {
+                  index: 0,
+                  delta: { role: "assistant", tool_calls: toolCalls },
+                  finish_reason: null,
+                }),
+              );
+              res.write(
+                sseChunk(model, { index: 0, delta: {}, finish_reason: "tool_calls" }, { usage }),
+              );
+            } else {
+              res.write(
+                sseChunk(model, {
+                  index: 0,
+                  delta: { role: "assistant", content: "ok" },
+                  finish_reason: null,
+                }),
+              );
+              res.write(sseChunk(model, { index: 0, delta: {}, finish_reason: "stop" }, { usage }));
+            }
+            res.end("data: [DONE]\n\n");
+          });
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });
@@ -346,7 +393,7 @@ function startFakeModel(requests: JsonObject[], script: Script): Promise<Server>
   return promise;
 }
 
-function modelsYaml(port: number): string {
+function modelsYaml(port: number, modelIds: readonly string[]): string {
   return [
     "providers:",
     `  ${MODEL_PROVIDER}:`,
@@ -354,13 +401,15 @@ function modelsYaml(port: number): string {
     "    api: openai-completions",
     "    auth: none",
     "    models:",
-    `      - id: ${MODEL_ID}`,
-    "        name: omp smoke fake model",
-    "        reasoning: false",
-    "        input: [text]",
-    "        contextWindow: 128000",
-    "        maxTokens: 4096",
-    "        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }",
+    ...modelIds.flatMap((id) => [
+      `      - id: ${id}`,
+      "        name: omp smoke fake model",
+      "        reasoning: false",
+      "        input: [text]",
+      "        contextWindow: 128000",
+      "        maxTokens: 4096",
+      "        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }",
+    ]),
     "",
   ].join("\n");
 }
@@ -549,6 +598,8 @@ interface OmpOptions {
 interface Run {
   readonly isolation: Isolation;
   readonly env: Record<string, string>;
+  /** The folder that omp runs in by default. */
+  readonly workDir: string;
   readonly requests: JsonObject[];
   readonly script: Script;
   readonly results: OmpResult[];
@@ -558,11 +609,28 @@ interface Run {
   readonly sweepStampMtime: number | null;
 }
 
+/** What a mode changes in the isolated state before omp links the plugin. */
+interface InstallSetup {
+  /** The model ids that the fake provider offers. */
+  readonly modelIds: readonly string[];
+  /** The text of `<config root>/agent/config.yml`, or null for no file. */
+  readonly configYaml: string | null;
+  /** Returns the plugin folder to link; it can make that folder in the scratch folder. */
+  readonly pluginFolder: (scratchDir: string, failures: string[]) => string;
+}
+
+const DEFAULT_SETUP: InstallSetup = {
+  modelIds: [MODEL_ID],
+  configYaml: null,
+  pluginFolder: () => pluginDir,
+};
+
 /**
  * Creates the scratch folder with isolated omp state, starts the fake model, links the kit plugin folder of
- * this checkout, and finds its npm row. Each omp command that exits non-zero adds a failure.
+ * this checkout (or the folder that `setup` makes), and finds its npm row. Each omp command that exits
+ * non-zero adds a failure.
  */
-async function install(failures: string[]): Promise<Run> {
+async function install(failures: string[], setup: InstallSetup = DEFAULT_SETUP): Promise<Run> {
   scratch = createScratch();
   const home = join(scratch, "home");
   const isolation: Isolation = {
@@ -592,7 +660,12 @@ async function install(failures: string[]): Promise<Run> {
   const address = fake.address();
   if (address === null || typeof address === "string")
     throw new Error("the fake model has no TCP port");
-  writeFileSync(join(isolation.stateDir, "agent", "models.yml"), modelsYaml(address.port));
+  writeFileSync(
+    join(isolation.stateDir, "agent", "models.yml"),
+    modelsYaml(address.port, setup.modelIds),
+  );
+  if (setup.configYaml !== null)
+    writeFileSync(join(isolation.stateDir, "agent", "config.yml"), setup.configYaml);
 
   const results: OmpResult[] = [];
   const omp = async (argv: readonly string[], options: OmpOptions = {}): Promise<OmpResult> => {
@@ -605,7 +678,7 @@ async function install(failures: string[]): Promise<Run> {
     return result;
   };
 
-  await omp(["plugin", "link", pluginDir]);
+  await omp(["plugin", "link", setup.pluginFolder(scratch, failures)]);
   if (!existsSync(join(isolation.stateDir, "plugins")))
     failures.push(`omp kept no plugin state in ${isolation.stateDir}`);
   const pluginList = parseJson(
@@ -623,6 +696,7 @@ async function install(failures: string[]): Promise<Run> {
   return {
     isolation,
     env,
+    workDir,
     requests,
     script,
     results,
@@ -652,6 +726,31 @@ function manifestName(failures: string[]): string {
   return name;
 }
 
+/** The entries of the `omp.extensions` list of a plugin manifest that load a `talk.js` file. */
+function talkExtensionEntries(manifest: JsonObject | null): string[] {
+  const ompField = manifest?.["omp"];
+  const extensions = isObject(ompField) ? ompField["extensions"] : undefined;
+  return Array.isArray(extensions)
+    ? extensions.filter(
+        (entry): entry is string => typeof entry === "string" && basename(entry) === TALK_BUNDLE,
+      )
+    : [];
+}
+
+/** The load mode runs before the talk cutover: the manifest of the linked plugin has no `talk.js` entry. */
+function linkedTalkEntries(plugin: LinkedPlugin, failures: string[]): void {
+  const manifest = join(plugin.realPath, "package.json");
+  if (!existsSync(manifest)) {
+    failures.push(`the linked manifest ${manifest} does not exist`);
+    return;
+  }
+  const entries = talkExtensionEntries(
+    parseJson(readFileSync(manifest, "utf8"), manifest, failures),
+  );
+  if (entries.length > 0)
+    failures.push(`the linked manifest ${manifest} has the talk entry ${entries.join(", ")}`);
+}
+
 async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
   const failures: string[] = [];
   if (!existsSync(pluginDir)) {
@@ -678,8 +777,10 @@ async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
   ]);
 
   const lines = [`${name} -> ${run.plugin?.realPath ?? "missing"}`];
-  if (run.plugin !== null && run.plugin.realPath !== realpathSync(pluginDir)) {
-    failures.push(`${PACKAGE_NAME} resolves to ${run.plugin.realPath}, expected ${pluginDir}`);
+  if (run.plugin !== null) {
+    if (run.plugin.realPath !== realpathSync(pluginDir))
+      failures.push(`${PACKAGE_NAME} resolves to ${run.plugin.realPath}, expected ${pluginDir}`);
+    linkedTalkEntries(run.plugin, failures);
   }
 
   const roots = run.plugin === null ? [] : pluginRoots(run.plugin);
@@ -1131,12 +1232,814 @@ async function hooks(): Promise<string[]> {
   return checks;
 }
 
+// ---------- talk ----------
+
+/** The bundle builder of the talk extension, relative to the repository root, and the file that it writes. */
+const TALK_BUILD_SCRIPT = "cli/scripts/build-talk.ts";
+const TALK_BUNDLE = "talk.js";
+/** The manifest entry of the bundle in the plugin copy. */
+const TALK_EXTENSION_ENTRY = `./extensions/${TALK_BUNDLE}`;
+/** The registry folder override of the talk transport (`cli/talk/transport/folder.ts`). */
+const TALK_DIR_ENV = "DOCKS_KIT_TALK_DIR";
+/**
+ * The prefix of the private registry folder in the system temporary root. The scratch folder is too deep:
+ * the short path keeps each socket path inside `sun_path`.
+ */
+const TALK_DIR_PREFIX = "dkt-";
+const PRIVATE_FOLDER_MODE = 0o700;
+const PERMISSION_BITS = 0o777;
+const PEER_MODEL_ID = "talk-peer";
+const SENDER_MODEL_ID = "talk-sender";
+/** omp offers each enabled tool to the provider and mounts none as a Bash command, so `talk` is a provider tool. */
+const TALK_CONFIG_YAML = "tools:\n  commands: false\n";
+const TALK_TOOL = "talk";
+/** The `customType` of a talk message entry in a session (`TALK_MESSAGE_TYPE` in `cli/talk/tool/host.ts`). */
+const TALK_ENTRY_TYPE = "talk";
+/** A prompt with this marker makes the fake model hold the peer turn until the cancel check ends. */
+const SLOW_MARKER = "SLOW-TURN";
+const SLOW_PROMPT = `${SLOW_MARKER}: wait for the driver.`;
+/** The reply hint of an ask (`replyHint` in `cli/talk/tool/format.ts`). */
+const ASK_HINT = /action "reply", replyTo "([0-9a-f]{16})"/;
+/** The id lines of a `send`, `ask`, or `cancel` result (`idLines` in `cli/talk/tool/tool.ts`). */
+const MESSAGE_ID_LINE = /^Message id: ([0-9a-f]{16})$/m;
+const INSTANCE_LINE = /^Instance: (\S+)/m;
+/**
+ * One session line of a `list` result: the own marker, the short session id, and the full instance id. The
+ * tool shows peer metadata as code spans (`literal` in `cli/talk/tool/attachments.ts`); a session id has no
+ * backtick and no edge space, so its span is one backtick on each side.
+ */
+const LIST_LINE =
+  /^- .* \[[^\]]*\]( \(this session\))?: session `([^`\s]+)`, folder .*, instance ([^\s;]+)/;
+const NOT_LIVE_SEND = "the send failed: not-live";
+const PONG = "talk smoke pong";
+/** The longest wait of one step: a tool call, an RPC command, or a peer state. */
+const STEP_TIMEOUT_MS = 30_000;
+const POLL_MS = 100;
+/** A new registration appears within the 1 s repair timer of talk; the list retries until then. */
+const LIST_ATTEMPTS = 20;
+const LIST_RETRY_MS = 250;
+/** The wait before a check that expects no entry, so that a late append would show. */
+const SETTLE_MS = 500;
+const PEER_CLOSE_MS = 10_000;
+/** The number of session id characters that a `list` line shows. */
+const SHORT_ID_LENGTH = 8;
+
+/** The checks of the talk mode, in output order. A check that does not run prints a FAIL line. */
+const TALK_CHECKS = [
+  "install",
+  "talk-offered",
+  "talk-list",
+  "talk-send",
+  "talk-ask-reply",
+  "talk-queued",
+  "talk-cancel",
+  "new-session-list",
+  "new-session-send",
+  "new-session-old-instance-not-live",
+  "fork-list",
+  "fork-send",
+  "fork-old-instance-not-live",
+  "closed-peer-not-live",
+  "extensions-loaded",
+  "sessions",
+  "isolated",
+  "real-state",
+] as const;
+type TalkCheck = (typeof TALK_CHECKS)[number];
+
+function sleep(ms: number): Promise<void> {
+  const { promise, resolve: done } = Promise.withResolvers<void>();
+  setTimeout(done, ms);
+  return promise;
+}
+
+/** `promise`, or a failure that names `what` when it takes longer than `ms`. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  const late = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => late.reject(new Error(`${what} took more than ${ms / 1_000} s`)),
+    ms,
+  );
+  try {
+    return await Promise.race([promise, late.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A promise with the functions that settle it, as `Promise.withResolvers` gives them. */
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: Error) => void;
+}
+
+function failStep(problem: string): never {
+  throw new Error(problem);
+}
+
+function offersTool(request: JsonObject, name: string): boolean {
+  return objects(request["tools"]).some(
+    (tool) => (isObject(tool["function"]) ? tool["function"] : tool)["name"] === name,
+  );
+}
+
+/** The text of the tool result of call `id` in a request, as the model sees it. */
+function toolResultText(request: JsonObject, id: string): string | undefined {
+  const result = objects(request["messages"]).find(
+    (message) => message["role"] === "tool" && message["tool_call_id"] === id,
+  );
+  return result === undefined ? undefined : textOf(result["content"]);
+}
+
+/**
+ * The text of the user messages after the last assistant message, which start this turn; a talk message
+ * reaches the provider as a user message. Undefined when a tool result continues the turn.
+ */
+function newUserText(request: JsonObject): string | undefined {
+  const messages = objects(request["messages"]);
+  const lastAssistant = messages.map((message) => message["role"]).lastIndexOf("assistant");
+  const fresh = messages.slice(lastAssistant + 1).filter((message) => message["role"] === "user");
+  return fresh.length === 0
+    ? undefined
+    : fresh.map((message) => textOf(message["content"])).join("\n");
+}
+
+/**
+ * A session whose model turns this program writes: each `call` becomes the next tool call of the session,
+ * and gives the tool result that the following request of the session carries.
+ */
+class ScriptedSession {
+  readonly #label: string;
+  readonly #first = Promise.withResolvers<JsonObject>();
+  #next = Promise.withResolvers<ToolCall | null>();
+  #pending: { readonly id: string; readonly result: Deferred<string> } | null = null;
+  #started = false;
+  #ended: Error | null = null;
+  #count = 0;
+
+  constructor(label: string) {
+    this.#label = label;
+    this.#first.promise.catch(() => undefined);
+  }
+
+  /** The first provider request of the session. */
+  get firstRequest(): Promise<JsonObject> {
+    return this.#first.promise;
+  }
+
+  async respond(request: JsonObject): Promise<readonly ToolCall[]> {
+    if (!this.#started) {
+      this.#started = true;
+      this.#first.resolve(request);
+    }
+    const pending = this.#pending;
+    if (pending !== null) {
+      this.#pending = null;
+      const result = toolResultText(request, pending.id);
+      if (result === undefined)
+        pending.result.reject(
+          new Error(`the next request of ${this.#label} holds no result of the call ${pending.id}`),
+        );
+      else pending.result.resolve(result);
+    }
+    const call = await this.#next.promise;
+    this.#next = Promise.withResolvers();
+    return call === null ? [] : [call];
+  }
+
+  /** Makes the next turn of the session call `name` with `args`; gives the text of its tool result. */
+  call(name: string, toolArgs: Readonly<Record<string, string>>): Promise<string> {
+    if (this.#ended !== null) return Promise.reject(this.#ended);
+    this.#count += 1;
+    const id = `${this.#label}-${this.#count}`;
+    const result = Promise.withResolvers<string>();
+    this.#pending = { id, result };
+    this.#next.resolve({ id, name, arguments: toolArgs });
+    return withTimeout(
+      result.promise,
+      STEP_TIMEOUT_MS,
+      `the ${toolArgs["action"] ?? name} call ${id}`,
+    );
+  }
+
+  /** Ends the script: the next turn answers "ok" without a tool call, so the session ends. */
+  finish(): void {
+    this.#next.resolve(null);
+  }
+
+  /** The omp process exited: a call that waits fails at once. */
+  abort(reason: string): void {
+    this.#ended = new Error(reason);
+    this.#first.reject(this.#ended);
+    this.#pending?.result.reject(this.#ended);
+    this.#pending = null;
+  }
+}
+
+/** The fake model of the peer: it replies to an ask, holds the slow turn, and else answers "ok". */
+class PeerModel {
+  readonly #first = Promise.withResolvers<JsonObject>();
+  readonly #slowStarted = Promise.withResolvers<void>();
+  readonly #release = Promise.withResolvers<void>();
+  #started = false;
+
+  get firstRequest(): Promise<JsonObject> {
+    return this.#first.promise;
+  }
+
+  /** Resolves when the fake model holds the slow turn, so the peer is busy. */
+  get slowStarted(): Promise<void> {
+    return this.#slowStarted.promise;
+  }
+
+  /** Ends the slow turn. */
+  release(): void {
+    this.#release.resolve();
+  }
+
+  async respond(request: JsonObject): Promise<readonly ToolCall[]> {
+    if (!this.#started) {
+      this.#started = true;
+      this.#first.resolve(request);
+    }
+    const prompt = newUserText(request);
+    if (prompt === undefined) return [];
+    if (prompt.includes(SLOW_MARKER)) {
+      this.#slowStarted.resolve();
+      await withTimeout(this.#release.promise, STEP_TIMEOUT_MS, "the slow turn").catch(
+        () => undefined,
+      );
+      return [];
+    }
+    const askId = ASK_HINT.exec(prompt)?.[1];
+    return askId === undefined
+      ? []
+      : [
+          {
+            id: `peer-reply-${askId}`,
+            name: TALK_TOOL,
+            arguments: { action: "reply", replyTo: askId, message: `${PONG} ${askId}` },
+          },
+        ];
+  }
+}
+
+/** An omp process in RPC mode: one JSON command per stdin line, one JSON response or event per stdout line. */
+interface RpcPeer {
+  /** Sends a command; gives the `data` of a response with `success: true`, and fails on any other response. */
+  readonly send: (command: JsonObject) => Promise<Json>;
+  /** Ends stdin and waits for the exit; SIGTERM, then SIGKILL, when omp does not exit in time. */
+  readonly close: () => Promise<OmpResult>;
+}
+
+async function startRpcOmp(
+  argv: readonly string[],
+  cwd: string,
+  env: Record<string, string>,
+): Promise<RpcPeer> {
+  const child = spawn(ompBinary, argv, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  children.add(child);
+  let stderr = "";
+  let next = 0;
+  const waiting = new Map<string, Deferred<Json>>();
+  const ready = Promise.withResolvers<void>();
+  ready.promise.catch(() => undefined);
+  const exited = Promise.withResolvers<number | null>();
+  child.stdin.on("error", () => undefined);
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  child.on("error", (error) => {
+    stderr += String(error);
+  });
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    const message = parseJsonText(line);
+    if (!isObject(message)) return;
+    if (message["type"] === "ready") ready.resolve();
+    const id = message["id"];
+    if (message["type"] !== "response" || typeof id !== "string") return;
+    const reply = waiting.get(id);
+    if (reply === undefined) return;
+    waiting.delete(id);
+    if (message["success"] !== true)
+      reply.reject(
+        new Error(
+          `RPC ${String(message["command"])} failed: ${JSON.stringify(message["error"] ?? null)}`,
+        ),
+      );
+    else reply.resolve(message["data"] ?? null);
+  });
+  child.on("close", (code) => {
+    children.delete(child);
+    const gone = new Error(`the peer omp exited ${code}: ${short(stderr)}`);
+    for (const reply of waiting.values()) reply.reject(gone);
+    waiting.clear();
+    ready.reject(gone);
+    exited.resolve(code);
+  });
+  await withTimeout(ready.promise, STEP_TIMEOUT_MS, "the ready line of the peer omp");
+
+  const send = (rpcCommand: JsonObject): Promise<Json> => {
+    next += 1;
+    const id = `smoke-${next}`;
+    const reply = Promise.withResolvers<Json>();
+    waiting.set(id, reply);
+    child.stdin.write(`${JSON.stringify({ id, ...rpcCommand })}\n`);
+    return withTimeout(reply.promise, STEP_TIMEOUT_MS, `RPC ${String(rpcCommand["type"])}`);
+  };
+  const exitWithin = (ms: number): Promise<number | null | undefined> =>
+    withTimeout(exited.promise, ms, "the exit").catch(() => undefined);
+  const close = async (): Promise<OmpResult> => {
+    child.stdin.end();
+    let code = await exitWithin(PEER_CLOSE_MS);
+    if (code === undefined) {
+      child.kill("SIGTERM");
+      code = await exitWithin(PEER_CLOSE_MS);
+    }
+    if (code === undefined) {
+      child.kill("SIGKILL");
+      code = await exited.promise;
+    }
+    return { argv, code, stdout: "", stderr };
+  };
+  return { send, close };
+}
+
+/** Whether `path` is a symbolic link; false when nothing is at `path`. */
+function isSymlink(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+}
+
+/**
+ * Builds the talk bundle in the scratch folder, copies the kit plugin folder there, and adds the bundle and
+ * its manifest entry to the copy. Returns the copy, which omp links. The copy keeps each symbolic link as it
+ * is, so a relative link does not point into the source folder. A write through a link can change a file
+ * outside the scratch folder, so the mode refuses a link on each path that it writes, and the bundle is a
+ * new file of the copy.
+ */
+function talkPluginCopy(scratchDir: string, failures: string[]): string {
+  const buildDir = join(scratchDir, "talk-build");
+  const build = spawnSync(process.execPath, [join(repo, TALK_BUILD_SCRIPT), "--out", buildDir], {
+    cwd: repo,
+    encoding: "utf8",
+  });
+  const copy = join(scratchDir, "plugin");
+  cpSync(pluginDir, copy, { recursive: true, verbatimSymlinks: true });
+  const bundle = join(buildDir, TALK_BUNDLE);
+  if (build.status !== 0 || !existsSync(bundle)) {
+    failures.push(
+      `bun ${TALK_BUILD_SCRIPT} failed: ${short(build.stderr || String(build.error ?? ""))}`,
+    );
+    return copy;
+  }
+  const extensions = join(copy, "extensions");
+  const target = join(extensions, TALK_BUNDLE);
+  const manifestPath = join(copy, "package.json");
+  const links = [copy, extensions, manifestPath].filter(isSymlink);
+  if (links.length > 0) {
+    failures.push(
+      `the plugin copy has a symbolic link on a path that the talk mode writes: ${links.join(", ")}`,
+    );
+    return copy;
+  }
+  if (lstatSync(target, { throwIfNoEntry: false }) !== undefined) {
+    failures.push(`the plugin copy already has ${target}`);
+    return copy;
+  }
+  copyFileSync(bundle, target, constants.COPYFILE_EXCL);
+  const manifest = parseJson(readFileSync(manifestPath, "utf8"), manifestPath, failures);
+  const ompField = manifest?.["omp"];
+  if (manifest === null || !isObject(ompField) || !Array.isArray(ompField["extensions"])) {
+    failures.push(`${manifestPath} has no omp.extensions list`);
+    return copy;
+  }
+  ompField["extensions"] = [...ompField["extensions"], TALK_EXTENSION_ENTRY];
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return copy;
+}
+
+interface ListedSession {
+  readonly own: boolean;
+  readonly shortId: string;
+  readonly instance: string;
+}
+
+function listedSessions(listing: string): ListedSession[] {
+  return listing.split("\n").flatMap((line) => {
+    const match = LIST_LINE.exec(line);
+    return match === null
+      ? []
+      : [{ own: match[1] !== undefined, shortId: match[2] ?? "", instance: match[3] ?? "" }];
+  });
+}
+
+/** The message id and the instance id that a `send`, `ask`, or `cancel` result names. */
+function resultIds(result: string): { readonly messageId: string; readonly instance: string } {
+  const messageId = MESSAGE_ID_LINE.exec(result)?.[1];
+  const instance = INSTANCE_LINE.exec(result)?.[1];
+  if (messageId === undefined || instance === undefined)
+    return failStep(`the result names no message id and instance: ${short(result)}`);
+  return { messageId, instance };
+}
+
+function isAssistantEntry(entry: JsonObject): boolean {
+  const message = entry["message"];
+  return entry["type"] === "message" && isObject(message) && message["role"] === "assistant";
+}
+
+/** The index of the talk message entry whose `details.messageId` is `messageId`, else -1. */
+function talkEntryIndex(entries: readonly JsonObject[], messageId: string): number {
+  return entries.findIndex((entry) => {
+    const details = entry["details"];
+    return (
+      entry["type"] === "custom_message" &&
+      entry["customType"] === TALK_ENTRY_TYPE &&
+      isObject(details) &&
+      details["messageId"] === messageId
+    );
+  });
+}
+
+/** Whether an entry holds, in any field, the message id or the payload text of a message. */
+function mentionsMessage(
+  entries: readonly JsonObject[],
+  messageId: string,
+  payload: string,
+): boolean {
+  const escaped = JSON.stringify(payload).slice(1, -1);
+  return entries.some((entry) => {
+    const serialized = JSON.stringify(entry);
+    return serialized.includes(messageId) || serialized.includes(escaped);
+  });
+}
+
+/** The talk mode (#250 E13): two isolated omp processes that talk through a private registry folder. */
+async function talkMode(): Promise<{ lines: string[]; registry: string | null }> {
+  const results = new Map<TalkCheck, string>();
+  const lines = (): string[] =>
+    TALK_CHECKS.map((name) => {
+      const problem = results.get(name);
+      if (problem === undefined) return `FAIL ${name}: not run, because an earlier check failed`;
+      return problem ? `FAIL ${name}: ${problem}` : `ok ${name}`;
+    });
+  if (!existsSync(pluginDir)) {
+    results.set("install", `plugin folder ${pluginDir} does not exist`);
+    return { lines: lines(), registry: null };
+  }
+  const realBefore = realStateSnapshot();
+  const installFailures: string[] = [];
+  const run = await install(installFailures, {
+    modelIds: [PEER_MODEL_ID, SENDER_MODEL_ID],
+    configYaml: TALK_CONFIG_YAML,
+    pluginFolder: talkPluginCopy,
+  });
+  const registry = mkdtempSync(join(tmpdir(), TALK_DIR_PREFIX));
+  talkDir = registry;
+  const mode = statSync(registry).mode & PERMISSION_BITS;
+  if (mode !== PRIVATE_FOLDER_MODE)
+    installFailures.push(
+      `the registry folder ${registry} has mode ${mode.toString(8)}, expected 700`,
+    );
+  results.set("install", installFailures.join("; "));
+  if (installFailures.length > 0) return { lines: lines(), registry };
+
+  const env: Record<string, string> = { ...run.env, [TALK_DIR_ENV]: registry };
+  const peerModel = new PeerModel();
+  const sender = new ScriptedSession(SENDER_MODEL_ID);
+  run.script.respond = (request) =>
+    request["model"] === PEER_MODEL_ID
+      ? peerModel.respond(request)
+      : request["model"] === SENDER_MODEL_ID
+        ? sender.respond(request)
+        : Promise.resolve([]);
+
+  let step: TalkCheck = "talk-offered";
+  const pass = (): void => {
+    results.set(step, "");
+  };
+  let peer: RpcPeer | null = null;
+  let peerResult: OmpResult | null = null;
+  let senderRun: Promise<OmpResult> | null = null;
+  try {
+    // The peer: omp in RPC mode. Its first provider turn answers the driver's prompt.
+    const rpc = await startRpcOmp(
+      ["--mode", "rpc", "--model", `${MODEL_PROVIDER}/${PEER_MODEL_ID}`, "--no-title"],
+      run.workDir,
+      env,
+    );
+    peer = rpc;
+    const peerState = async (): Promise<JsonObject> => {
+      const data = await rpc.send({ type: "get_state" });
+      return isObject(data) ? data : {};
+    };
+    const peerSessionId = async (): Promise<string> =>
+      text((await peerState())["sessionId"]) ?? failStep("RPC get_state gives no sessionId");
+    // RPC get_entries without a cursor gives `{ entries, leafId }`: every entry of the current session.
+    const peerEntries = async (): Promise<JsonObject[]> => {
+      const data = await rpc.send({ type: "get_entries" });
+      const entries = isObject(data) ? data["entries"] : undefined;
+      if (Array.isArray(entries) && entries.every(isObject)) return entries;
+      return failStep(
+        `RPC get_entries gives no array of entry objects: ${short(JSON.stringify(data))}`,
+      );
+    };
+    const waitFor = async (what: string, probe: () => Promise<boolean>): Promise<void> => {
+      const deadline = Date.now() + STEP_TIMEOUT_MS;
+      while (!(await probe())) {
+        if (Date.now() > deadline) failStep(`no ${what} within ${STEP_TIMEOUT_MS / 1_000} s`);
+        await sleep(POLL_MS);
+      }
+    };
+    const waitPeerIdle = (): Promise<void> =>
+      waitFor("idle peer", async () => (await peerState())["isStreaming"] === false);
+    /** A `send` result that reads `Delivered`, whose entry the peer session holds; waits for the turn that it starts. */
+    const expectDelivered = async (result: string, instance: string): Promise<string> => {
+      if (!result.includes("Delivered:"))
+        failStep(`the send did not read Delivered: ${short(result)}`);
+      const ids = resultIds(result);
+      if (ids.instance !== instance)
+        failStep(`the send reached instance ${ids.instance}, expected ${instance}`);
+      await waitFor(`entry of message ${ids.messageId} with an answer after it`, async () => {
+        const entries = await peerEntries();
+        const at = talkEntryIndex(entries, ids.messageId);
+        return at >= 0 && entries.slice(at + 1).some(isAssistantEntry);
+      });
+      await waitPeerIdle();
+      return ids.messageId;
+    };
+    /** Lists until a session line shows `sessionId` with an instance that is not in `ended`; gives that instance. */
+    const listUntil = async (sessionId: string, ended: readonly string[]): Promise<string> => {
+      const shortId = sessionId.slice(0, SHORT_ID_LENGTH);
+      for (let attempt = 1; ; attempt += 1) {
+        const listing = await sender.call(TALK_TOOL, { action: "list" });
+        const sessions = listedSessions(listing);
+        const found = sessions.find(
+          (session) =>
+            !session.own && session.shortId === shortId && !ended.includes(session.instance),
+        );
+        if (found !== undefined) {
+          const stale = sessions.find((session) => ended.includes(session.instance));
+          if (stale !== undefined)
+            failStep(`the list still shows the ended instance ${stale.instance}`);
+          return found.instance;
+        }
+        if (attempt >= LIST_ATTEMPTS)
+          failStep(
+            `${attempt} lists show no new instance of session ${shortId}: ${short(listing)}`,
+          );
+        await sleep(LIST_RETRY_MS);
+      }
+    };
+
+    await rpc.send({ type: "prompt", message: SESSION_PROMPT });
+    const peerFirst = await withTimeout(
+      peerModel.firstRequest,
+      STEP_TIMEOUT_MS,
+      "the first request of the peer",
+    );
+    if (!offersTool(peerFirst, TALK_TOOL))
+      failStep("the first provider request of the peer does not offer the talk tool");
+    await waitPeerIdle();
+    // The sender: omp in print mode. Each of its turns waits for this program.
+    const senderStarted = run.omp(
+      [
+        "-p",
+        "--mode",
+        "json",
+        "--model",
+        `${MODEL_PROVIDER}/${SENDER_MODEL_ID}`,
+        "--no-title",
+        SCRIPTED_PROMPT,
+      ],
+      { env },
+    );
+    senderRun = senderStarted;
+    void senderStarted.then((result) => sender.abort(`the sender omp exited ${result.code}`));
+    const senderFirst = await withTimeout(
+      sender.firstRequest,
+      STEP_TIMEOUT_MS,
+      "the first request of the sender",
+    );
+    if (!offersTool(senderFirst, TALK_TOOL))
+      failStep("the first provider request of the sender does not offer the talk tool");
+    pass();
+
+    step = "talk-list";
+    const firstSession = await peerSessionId();
+    const firstInstance = await listUntil(firstSession, []);
+    pass();
+
+    step = "talk-send";
+    await expectDelivered(
+      await sender.call(TALK_TOOL, {
+        action: "send",
+        to: firstSession,
+        message: "talk smoke: hello",
+      }),
+      firstInstance,
+    );
+    pass();
+
+    step = "talk-ask-reply";
+    const answer = await sender.call(TALK_TOOL, {
+      action: "ask",
+      instance: firstInstance,
+      message: "talk smoke: ping",
+    });
+    const askId = resultIds(answer).messageId;
+    if (!answer.includes("**Reply from ") || !answer.includes(`${PONG} ${askId}`))
+      failStep(`the ask result holds no reply to ask ${askId}: ${short(answer)}`);
+    await waitPeerIdle();
+    pass();
+
+    // The fake model holds the slow peer turn, so the peer is busy until the cancel check releases it.
+    step = "talk-queued";
+    const slow = rpc.send({ type: "prompt", message: SLOW_PROMPT });
+    slow.catch(() => undefined);
+    await withTimeout(peerModel.slowStarted, STEP_TIMEOUT_MS, "the slow peer turn");
+    const queuedText = "talk smoke: while busy";
+    const queuedResult = await sender.call(TALK_TOOL, {
+      action: "send",
+      instance: firstInstance,
+      message: queuedText,
+    });
+    if (!queuedResult.includes("Queued:"))
+      failStep(`the send to the busy peer did not read Queued: ${short(queuedResult)}`);
+    const queued = resultIds(queuedResult);
+    if (queued.instance !== firstInstance)
+      failStep(`the send reached instance ${queued.instance}, expected ${firstInstance}`);
+    pass();
+
+    step = "talk-cancel";
+    const cancelResult = await sender.call(TALK_TOOL, {
+      action: "cancel",
+      instance: queued.instance,
+      messageId: queued.messageId,
+    });
+    if (
+      !cancelResult.includes("Cancelled:") ||
+      resultIds(cancelResult).messageId !== queued.messageId
+    )
+      failStep(
+        `the cancel of message ${queued.messageId} did not read Cancelled: ${short(cancelResult)}`,
+      );
+    peerModel.release();
+    await slow;
+    await waitPeerIdle();
+    await sleep(SETTLE_MS);
+    if (mentionsMessage(await peerEntries(), queued.messageId, queuedText))
+      failStep(`the peer session holds the cancelled message ${queued.messageId} or its text`);
+    pass();
+
+    /**
+     * One session change of the live peer: the list shows the new session id with a new instance, a send to
+     * the new id is delivered, and a fresh send to the old instance reads not-live and adds no entry to the new
+     * session, whose entries keep `inherited` when it is set.
+     */
+    const change = async (
+      prefix: "new-session" | "fork",
+      rpcCommand: JsonObject,
+      before: { readonly sessionId: string; readonly instance: string },
+      inherited: string | null,
+    ): Promise<{ sessionId: string; instance: string; delivered: string }> => {
+      step = `${prefix}-list`;
+      const changed = await rpc.send(rpcCommand);
+      if (isObject(changed) && changed["cancelled"] === true)
+        failStep(`RPC ${String(rpcCommand["type"])} was cancelled`);
+      const sessionId = await peerSessionId();
+      if (sessionId === before.sessionId)
+        failStep(`RPC ${String(rpcCommand["type"])} kept the session id ${sessionId}`);
+      const instance = await listUntil(sessionId, [before.instance]);
+      pass();
+
+      step = `${prefix}-send`;
+      const delivered = await expectDelivered(
+        await sender.call(TALK_TOOL, {
+          action: "send",
+          to: sessionId,
+          message: `talk smoke: hello after ${prefix}`,
+        }),
+        instance,
+      );
+      pass();
+
+      step = `${prefix}-old-instance-not-live`;
+      const staleText = `talk smoke: to the instance before ${prefix}`;
+      const stale = await sender.call(TALK_TOOL, {
+        action: "send",
+        instance: before.instance,
+        message: staleText,
+      });
+      if (!stale.includes(NOT_LIVE_SEND))
+        failStep(`the send to the old instance did not fail not-live: ${short(stale)}`);
+      const staleId = resultIds(stale).messageId;
+      await sleep(SETTLE_MS);
+      const current = await peerSessionId();
+      if (current !== sessionId) failStep(`the peer moved to session ${current}`);
+      const entries = await peerEntries();
+      if (mentionsMessage(entries, staleId, staleText))
+        failStep(
+          `RPC get_entries of session ${sessionId} holds the message ${staleId} or its text`,
+        );
+      if (inherited !== null && talkEntryIndex(entries, inherited) < 0)
+        failStep(`RPC get_entries of session ${sessionId} lost the inherited message ${inherited}`);
+      pass();
+      return { sessionId, instance, delivered };
+    };
+
+    const afterNew = await change(
+      "new-session",
+      { type: "new_session" },
+      { sessionId: firstSession, instance: firstInstance },
+      null,
+    );
+    step = "fork-list";
+    const forkAt = text((await peerEntries()).filter(isAssistantEntry).at(-1)?.["id"]);
+    if (forkAt === undefined) failStep("the peer session has no assistant message to fork at");
+    const afterFork = await change(
+      "fork",
+      { type: "fork", entryId: forkAt },
+      afterNew,
+      afterNew.delivered,
+    );
+
+    step = "closed-peer-not-live";
+    peerResult = await rpc.close();
+    const closed = await sender.call(TALK_TOOL, {
+      action: "send",
+      instance: afterFork.instance,
+      message: "talk smoke: to the closed peer",
+    });
+    if (!closed.includes(NOT_LIVE_SEND))
+      failStep(`the send to the closed peer did not fail not-live: ${short(closed)}`);
+    pass();
+  } catch (error) {
+    results.set(step, error instanceof Error ? error.message : String(error));
+  }
+
+  // The sender ends after its next turn, and a slow peer turn that still waits ends; a sender that still
+  // waits in a tool call is stopped.
+  sender.finish();
+  peerModel.release();
+  if (peer !== null && peerResult === null) peerResult = await peer.close();
+  const senderResult =
+    senderRun === null
+      ? null
+      : await withTimeout(senderRun, PEER_CLOSE_MS, "the sender exit").catch(() => {
+          for (const child of children) child.kill("SIGKILL");
+          return senderRun;
+        });
+  const sessionFailures: string[] = [];
+  for (const [name, result] of [
+    ["sender", senderResult],
+    ["peer", peerResult],
+  ] as const) {
+    if (result === null) sessionFailures.push(`the ${name} omp did not run`);
+    else if (result.code !== 0)
+      sessionFailures.push(
+        `the ${name} omp exited ${result.code}: ${short(result.stderr || result.stdout)}`,
+      );
+  }
+  if (peerResult !== null) run.results.push(peerResult);
+  const warnings = countWarnings(
+    [],
+    run.results,
+    run.isolation.stateDir,
+    pluginMarkers(run.plugin),
+  );
+  results.set(
+    "extensions-loaded",
+    warnings.length > 0
+      ? `omp reported ${warnings.length} warning(s) about the plugin: ${warnings.join(" | ")}`
+      : "",
+  );
+  results.set("sessions", sessionFailures.join("; "));
+  results.set("isolated", isolationProblems(run).join("; "));
+  results.set("real-state", realStateChanges(realBefore).join("; "));
+  return { lines: lines(), registry };
+}
+
 let exitCode = 1;
 try {
   if (command === "hooks") {
     const checks = await hooks();
     for (const line of checks) console.log(line);
     exitCode = checks.some((line) => line.startsWith("FAIL")) ? 1 : 0;
+  } else if (command === "talk") {
+    const talk = await talkMode();
+    for (const line of talk.lines) console.log(line);
+    // The registry folder lies outside the scratch folder, so the check runs after the cleanup.
+    const removed = reportCleanup();
+    const kept =
+      talk.registry === null
+        ? "no registry folder was made"
+        : existsSync(talk.registry)
+          ? `the registry folder ${talk.registry} still exists`
+          : null;
+    console.log(kept === null ? "ok registry-removed" : `FAIL registry-removed: ${kept}`);
+    exitCode =
+      removed && kept === null && !talk.lines.some((line) => line.startsWith("FAIL")) ? 0 : 1;
   } else {
     const { lines, failures } = await smoke();
     for (const line of lines) console.log(line);

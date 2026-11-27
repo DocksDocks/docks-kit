@@ -4,7 +4,9 @@
  * until the process ends; registrations and their entries; the handshake, the
  * requests, withdrawal, and the repair and refresh passes. Each registration
  * has its own random instance id, so a later registration of the same session
- * id is another target.
+ * id is another target, and several live registrations of one session id can
+ * share the listener (#250 E7). The admission hook can refuse a request for a
+ * registration; the refusal withdraws it.
  */
 import { randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
@@ -21,6 +23,7 @@ import {
   randomNameHex,
 } from "./endpoint";
 import {
+  InstanceId,
   PROTOCOL_VERSION,
   type RequestFrame,
   SessionId,
@@ -43,6 +46,7 @@ import { PING_KIND, type RequestHandler, type ResponseResult, type Target } from
 const SECRET_BYTES = 32;
 
 const decodeSessionId = Schema.decodeUnknownEffect(SessionId);
+const decodeInstanceId = Schema.decodeUnknownEffect(InstanceId);
 
 export interface ListenerOptions {
   readonly platform: NodeJS.Platform;
@@ -54,10 +58,31 @@ export interface ListenerOptions {
   readonly handshakeTimeoutMs: number;
   /** The most connections that the listener admits before `ready`. */
   readonly maxUnauthenticated: number;
+  /** Asked in the tick that the listener admits a request; `undefined` admits every request. */
+  readonly admit?: AdmissionCheck | undefined;
 }
+
+/**
+ * The admission hook (#250 E7): true admits a request for the registration.
+ * The listener asks it in the tick that it admits a request, `ping` included.
+ * False, or a throw, answers `not-live` and withdraws the registration.
+ */
+export type AdmissionCheck = (registration: Target) => boolean;
 
 export interface RegistrationInput {
   readonly sessionId: string;
+  readonly name: string;
+  readonly cwd: string;
+  /**
+   * The instance id of the new registration (16 lowercase hex digits), so the
+   * caller knows the exact pair before the entry is published (#250 E7).
+   * Default: a random one. An id that this listener already served fails.
+   */
+  readonly instanceId?: string | undefined;
+}
+
+/** The new name and folder of a live registration (#250 E7, E8). */
+export interface RegistrationUpdate {
   readonly name: string;
   readonly cwd: string;
 }
@@ -75,6 +100,15 @@ export class TalkRegisterError extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("TalkRegisterError", {
   sessionId: Schema.String,
+  reason: Schema.String,
+}) {}
+
+/** A registration could not be updated: it is not live, or its entry could not be published. */
+export class TalkUpdateError extends Schema.TaggedError<
+  TalkUpdateError,
+  { readonly brand: unique symbol }
+>()("TalkUpdateError", {
+  instanceId: Schema.String,
   reason: Schema.String,
 }) {}
 
@@ -171,8 +205,9 @@ export const closeAfterDefect = (
 interface Served {
   readonly instanceId: string;
   readonly sessionId: string;
-  readonly name: string;
-  readonly cwd: string;
+  /** `update` changes the name and the folder; the identity stays. */
+  name: string;
+  cwd: string;
   readonly startTime: number;
   readonly secret: Buffer;
   readonly fileName: string;
@@ -192,7 +227,13 @@ const targetKey = (instanceId: string, sessionId: string): string =>
   `${instanceId}\u0000${sessionId}`;
 
 export interface Listener {
+  /** Registers a session; one listener can hold several live registrations of one session id. */
   readonly register: (input: RegistrationInput) => Effect.Effect<Registration, TalkRegisterError>;
+  /** Publishes a live registration again with a new name and folder, under the same identity. */
+  readonly update: (
+    registration: Target,
+    input: RegistrationUpdate,
+  ) => Effect.Effect<void, TalkUpdateError>;
   /** Ends a registration (E8 Withdrawal). An unknown or ended registration is no failure. */
   readonly withdraw: (registration: Target) => Effect.Effect<void>;
   /** Sets the handler of a request kind. */
@@ -216,12 +257,17 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   let repairPasses = 0;
   let lastRepairFailure = "";
 
-  const entryOf = (served: Served, endpoint: Endpoint): RegistryEntry => ({
+  /** The entry of a registration; `metadata` gives the name and folder to publish. */
+  const entryOf = (
+    served: Served,
+    endpoint: Endpoint,
+    metadata: RegistrationUpdate = served,
+  ): RegistryEntry => ({
     version: PROTOCOL_VERSION,
     instanceId: served.instanceId,
     sessionId: served.sessionId,
-    name: served.name,
-    cwd: served.cwd,
+    name: metadata.name,
+    cwd: metadata.cwd,
     processId: process.pid,
     endpoint,
     startTime: served.startTime,
@@ -296,6 +342,16 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
     }
   });
 
+  // #250 E7: a refusal, or a throw, of the admission hook counts as an inactive registration.
+  const admitted = (served: Served): boolean => {
+    if (options.admit === undefined) return true;
+    try {
+      return options.admit({ instanceId: served.instanceId, sessionId: served.sessionId });
+    } catch {
+      return false;
+    }
+  };
+
   const serveRequests = Effect.fnUntraced(function* (connection: Connection, served: Served) {
     if (!served.live) return yield* connection.finish;
     const link: ServedConnection = { connection, held: new HeldRequests() };
@@ -304,6 +360,11 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
       for (;;) {
         const request = yield* Effect.flatMap(connection.read, decodeRequest);
         if (!served.live || !link.held.admit(request.id)) continue;
+        if (!admitted(served)) {
+          // The withdrawal answers the held request with `not-live` and ends the connection.
+          yield* withdraw(served);
+          continue;
+        }
         yield* Effect.forkChild(
           answer(link, served, request).pipe(
             Effect.catchDefect((defect) =>
@@ -356,15 +417,23 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   const bind = bindEndpoint({ folder: registry.folder, platform: options.platform, onConnection });
 
   /**
-   * Publishes the entry of a registration with `endpoint`. The kept descriptor
-   * of the last publication stays until the new one succeeds; a failure leaves
-   * the entry stale and passes up.
+   * Publishes the entry of a registration with `endpoint`, and with
+   * `metadata` as its name and folder. The kept descriptor of the last
+   * publication stays until the new one succeeds, and the served name and
+   * folder change only then; a failure leaves the entry stale with the old
+   * name and folder, and passes up.
    */
-  const publishServed = Effect.fnUntraced(function* (served: Served, endpoint: Endpoint) {
+  const publishServed = Effect.fnUntraced(function* (
+    served: Served,
+    endpoint: Endpoint,
+    metadata: RegistrationUpdate = served,
+  ) {
     served.stale = true;
-    const published = yield* registry.publish(entryOf(served, endpoint));
+    const published = yield* registry.publish(entryOf(served, endpoint, metadata));
     const previous = served.published;
     served.published = published;
+    served.name = metadata.name;
+    served.cwd = metadata.cwd;
     served.stale = false;
     // A replacement of that name is published: a pending removal of the name must not remove it.
     pendingRemovals.delete(served.fileName);
@@ -381,17 +450,28 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
           }),
       ),
     );
+    const chosen =
+      input.instanceId === undefined
+        ? undefined
+        : yield* decodeInstanceId(input.instanceId).pipe(
+            Effect.mapError(
+              (issue) =>
+                new TalkRegisterError({
+                  sessionId,
+                  reason: `the instance id is not valid: ${issue.message}`,
+                }),
+            ),
+          );
     return yield* locked(
       Effect.gen(function* () {
-        if (liveServed().some((served) => served.sessionId === sessionId)) {
-          return yield* new TalkRegisterError({
-            sessionId,
-            reason: "the session is registered already",
-          });
-        }
+        if (
+          chosen !== undefined &&
+          [...registrations.values()].some((served) => served.instanceId === chosen)
+        )
+          return yield* new TalkRegisterError({ sessionId, reason: "the instance id is in use" });
         yield* registry.prepare;
         if (bound === undefined) bound = yield* bind;
-        const instanceId = randomNameHex();
+        const instanceId = chosen ?? randomNameHex();
         const served: Served = {
           instanceId,
           sessionId,
@@ -415,6 +495,33 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
         error._tag === "TalkRegisterError"
           ? error
           : new TalkRegisterError({ sessionId, reason: describeFailure(error) }),
+      ),
+    );
+  });
+
+  const update = Effect.fn("TalkListener.update")(function* (
+    registration: Target,
+    input: RegistrationUpdate,
+  ) {
+    const { instanceId } = registration;
+    yield* locked(
+      Effect.gen(function* () {
+        const served = registrations.get(targetKey(instanceId, registration.sessionId));
+        if (served === undefined || !served.live || bound === undefined) {
+          return yield* new TalkUpdateError({
+            instanceId,
+            reason: "no live registration of this listener matches",
+          });
+        }
+        // The publication commits the new name and folder only when it succeeds, so a failed
+        // one leaves the old ones, and the repair pass publishes those again.
+        yield* publishServed(served, bound.endpoint, input);
+      }),
+    ).pipe(
+      Effect.mapError((error) =>
+        error._tag === "TalkUpdateError"
+          ? error
+          : new TalkUpdateError({ instanceId, reason: describeFailure(error) }),
       ),
     );
   });
@@ -595,6 +702,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
 
   const listener: Listener = {
     register,
+    update,
     withdraw,
     handle: (kind, handler) =>
       Effect.sync(() => {

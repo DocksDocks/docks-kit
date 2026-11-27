@@ -1,8 +1,10 @@
 // Entry of the talk extension bundle; `cli/scripts/build-talk.ts` builds it
-// into `talk.js`. It exports the transport API of plan #249; #250 adds the
-// extension factory.
+// into `talk.js`. omp loads its default export, the extension factory
+// (plan #250); the transport API of plan #249 stays exported for the tests.
+export { default } from "./extension";
 export {
   type Client,
+  DIAL_SLOTS,
   type Peer,
   type PeerListing,
   TalkListError,
@@ -11,11 +13,14 @@ export {
 export { type Endpoint, TalkEndpointError } from "./transport/endpoint";
 export { TALK_DIR_OVERRIDE, TalkFolderError, resolveRegistryFolder } from "./transport/folder";
 export {
+  type AdmissionCheck,
   type ListenerStatus,
   type Registration,
   type RegistrationInput,
   type RegistrationStatus,
+  type RegistrationUpdate,
   TalkRegisterError,
+  TalkUpdateError,
 } from "./transport/listener";
 export { type RejectedEntry, entryFileName, sessionKey } from "./transport/registry";
 export {

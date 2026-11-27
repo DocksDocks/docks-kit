@@ -36,6 +36,8 @@ import {
   closeEndpoint,
   endpointState,
   socketFault,
+  socketFileName,
+  socketProcessId,
   sunPathFault,
 } from "../../../talk/transport/endpoint";
 import { PROTOCOL_VERSION } from "../../../talk/transport/handshake";
@@ -86,7 +88,7 @@ const entryFor = (folder: string, overrides: Partial<RegistryEntry> = {}): Regis
   name: "main",
   cwd: "/work",
   processId: 4242,
-  endpoint: { kind: "unix", path: posix.join(folder, "fedcba9876543210.sock") },
+  endpoint: { kind: "unix", path: posix.join(folder, "4242-fedcba9876543210.sock") },
   startTime: 1_700_000_000_000,
   secret: SECRET,
   ...overrides,
@@ -116,7 +118,7 @@ describe("E5 names", () => {
 
   it("owns only the three patterns, never the omp daemon names", () => {
     expect(isTalkName(entryFileName(INSTANCE, SESSION))).toBe(true);
-    expect(isTalkName("fedcba9876543210.sock")).toBe(true);
+    expect(isTalkName("4242-fedcba9876543210.sock")).toBe(true);
     expect(isTalkName(".fedcba9876543210.tmp")).toBe(true);
     for (const foreign of [
       "daemon",
@@ -128,14 +130,31 @@ describe("E5 names", () => {
       "units",
       "modules",
       "foreign.txt",
-      "0123456789ABCDEF.sock",
+      // The #249 socket pattern, without the owner process id.
+      "fedcba9876543210.sock",
+      "4242-0123456789ABCDEF.sock",
+      "0-fedcba9876543210.sock",
+      "04242-fedcba9876543210.sock",
+      "-fedcba9876543210.sock",
+      "4242-fedcba987654321.sock",
       "0123456789abcdef.entry",
       `${INSTANCE}-${sha16(SESSION)}.entry.bak`,
     ]) {
       expect(isTalkName(foreign), foreign).toBe(false);
     }
     expect(ENTRY_NAME.test(`${INSTANCE}-${sha16(SESSION)}.entry`)).toBe(true);
-    expect(SOCKET_NAME.test("fedcba9876543210.sock")).toBe(true);
+    expect(SOCKET_NAME.test("4242-fedcba9876543210.sock")).toBe(true);
+  });
+
+  it("makes socket names that carry the owner process id", () => {
+    const name = socketFileName(4242);
+    expect(name).toMatch(/^4242-[0-9a-f]{16}\.sock$/);
+    expect(socketFileName(4242)).not.toBe(name);
+    expect(socketProcessId(name)).toBe(4242);
+    expect(socketProcessId("1-fedcba9876543210.sock")).toBe(1);
+    for (const foreign of ["fedcba9876543210.sock", "daemon.sock", "0-fedcba9876543210.sock"]) {
+      expect(socketProcessId(foreign), foreign).toBeUndefined();
+    }
   });
 });
 
@@ -173,12 +192,13 @@ describe("entry Schema and rules", () => {
 
   it("rejects a socket path that is not a socket name directly in the folder", () => {
     for (const path of [
-      "/tmp/elsewhere/fedcba9876543210.sock",
+      "/tmp/elsewhere/4242-fedcba9876543210.sock",
       posix.join(folder, "daemon.sock"),
-      posix.join(folder, "sub", "fedcba9876543210.sock"),
-      `${folder}/../fedcba9876543210.sock`,
-      "fedcba9876543210.sock",
-      posix.join(folder, "fedcba9876543210.entry"),
+      posix.join(folder, "fedcba9876543210.sock"),
+      posix.join(folder, "sub", "4242-fedcba9876543210.sock"),
+      `${folder}/../4242-fedcba9876543210.sock`,
+      "4242-fedcba9876543210.sock",
+      posix.join(folder, "4242-fedcba9876543210.entry"),
     ]) {
       const entry = entryFor(folder, { endpoint: { kind: "unix", path } });
       expect(entryFault(entry, fileName, folder, "unix"), path).toMatch(/socket path/);
@@ -268,6 +288,7 @@ describe.skipIf(!POSIX)("POSIX endpoint (real)", () => {
         const path = bound.endpoint.kind === "unix" ? bound.endpoint.path : "";
         expect(join(path, "..")).toBe(base);
         expect(path.slice(base.length + 1)).toMatch(SOCKET_NAME);
+        expect(socketProcessId(path.slice(base.length + 1))).toBe(process.pid);
         expect(lstatSync(path).isSocket()).toBe(true);
         expect(await reachable(bound.endpoint)).toBe(true);
         expect(endpointState(bound)).toBe("intact");
@@ -426,7 +447,7 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
       writeFileSync(join(folder, "token"), "keep");
       const badSocket = entryFor(folder, {
         instanceId: "1111111111111111",
-        endpoint: { kind: "unix", path: join(base, "fedcba9876543210.sock") },
+        endpoint: { kind: "unix", path: join(base, "4242-fedcba9876543210.sock") },
       });
       const badName = entryFileName("1111111111111111", SESSION);
       writeFileSync(join(folder, badName), encodeEntry(badSocket), { mode: 0o600 });
@@ -487,7 +508,7 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
   });
 
   it("removes a socket file of the name rules only", async () => {
-    const socketPath = join(folder, "fedcba9876543210.sock");
+    const socketPath = join(folder, "4242-fedcba9876543210.sock");
     const bound = await bind(folder);
     try {
       writeFileSync(join(folder, "keep.sock"), "keep");
@@ -511,6 +532,30 @@ describe.skipIf(!POSIX)("POSIX registry (real)", () => {
     } finally {
       await close(bound);
     }
+  });
+
+  it("lists the files of the socket pattern with the process id that each name carries", async () => {
+    const bound = await bind(folder);
+    try {
+      writeFileSync(join(folder, "keep.sock"), "keep");
+      writeFileSync(join(folder, "fedcba9876543210.sock"), "keep");
+      const path = bound.endpoint.kind === "unix" ? bound.endpoint.path : "";
+      expect(
+        await runIn(
+          layer,
+          TalkRegistry.use((registry) => registry.sockets),
+        ),
+      ).toEqual([{ path, processId: process.pid }]);
+    } finally {
+      await close(bound);
+    }
+    rmSync(folder, { recursive: true, force: true });
+    expect(
+      await runIn(
+        layer,
+        TalkRegistry.use((registry) => registry.sockets),
+      ),
+    ).toEqual([]);
   });
 
   it("reports a deleted, rewritten, or re-moded entry as replaced", async () => {

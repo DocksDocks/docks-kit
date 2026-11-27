@@ -5,10 +5,12 @@
 // `{ "id": n, "op": "...", ... }` -> `{ "id": n, "ok": true, "value": ... }` or
 // `{ "id": n, "ok": false, "tag": ..., "outcome": ..., "reason": ... }`.
 // It prints `{ "ready": true, ... }` once the transport runs.
-// Ops: register, withdraw, list, request, probe, status, dispose (ends the
-// transport, the process stays), exit.
-// Request kinds: `echo` answers its body, `wait` never answers, and `die`
-// fails with a defect.
+// Ops: register, update, withdraw, list, request, probe, retain, known,
+// refuse (the admission hook refuses that target from now on), status,
+// dispose (ends the transport, the process stays), exit.
+// Request kinds: `echo` answers its body, `whoami` answers the pair of the
+// registration that received it, `wait` never answers, and `die` fails with
+// a defect.
 // Environment: `TALK_PEER_REPAIR_MS` sets the repair interval (default 1000).
 
 import { createInterface } from "node:readline";
@@ -24,7 +26,15 @@ if (bundle === undefined) throw new Error("usage: bun peer.ts <talk.js>");
 const talk = (await import(pathToFileURL(bundle).href)) as typeof Talk;
 
 const repairIntervalMs = Number(process.env["TALK_PEER_REPAIR_MS"] ?? "1000");
-const runtime = ManagedRuntime.make(talk.TalkTransport.layer({ repairIntervalMs }));
+// The targets that the admission hook refuses, by `<instance id>/<session id>`.
+const refused = new Set<string>();
+const pairKey = (pair: Talk.Target): string => `${pair.instanceId}/${pair.sessionId}`;
+const runtime = ManagedRuntime.make(
+  talk.TalkTransport.layer({
+    repairIntervalMs,
+    admit: (registration) => !refused.has(pairKey(registration)),
+  }),
+);
 const { TalkTransport } = talk;
 
 const print = (line: unknown): void => {
@@ -36,6 +46,8 @@ interface Command {
   readonly op: string;
   readonly sessionId?: string;
   readonly name?: string;
+  readonly cwd?: string;
+  readonly instanceId?: string;
   readonly target?: Talk.Target;
   readonly kind?: string;
   readonly body?: Schema.Json;
@@ -61,6 +73,26 @@ async function perform(command: Command): Promise<unknown> {
         ),
       );
     }
+    case "update":
+      return run(
+        TalkTransport.use((transport) =>
+          transport.update(target(command), {
+            name: command.name ?? "peer",
+            cwd: command.cwd ?? process.cwd(),
+          }),
+        ),
+      );
+    case "retain":
+      return run(TalkTransport.use((transport) => transport.retain(target(command))));
+    case "known": {
+      const { instanceId } = command;
+      if (instanceId === undefined) throw new Error("known needs an instanceId");
+      const pair = await run(TalkTransport.use((transport) => transport.known(instanceId)));
+      return pair._tag === "Some" ? pair.value : null;
+    }
+    case "refuse":
+      refused.add(pairKey(target(command)));
+      return null;
     case "withdraw":
       return run(TalkTransport.use((transport) => transport.withdraw(target(command))));
     case "list":
@@ -77,7 +109,16 @@ async function perform(command: Command): Promise<unknown> {
         ),
       );
     case "probe":
-      return run(TalkTransport.use((transport) => transport.probe(target(command))));
+      // A batch of one target: the failure of that target fails the op.
+      return run(
+        TalkTransport.use((transport) =>
+          Effect.flatMap(transport.probeAll([target(command)]), ([result]) =>
+            result === undefined
+              ? Effect.die(new Error("probeAll gave no result"))
+              : Effect.fromResult(result),
+          ),
+        ),
+      );
     case "status":
       return run(TalkTransport.use((transport) => transport.status));
     case "dispose":
@@ -103,6 +144,9 @@ await run(
         Effect.succeed({ echo: body, by: context.registration.sessionId }),
       ),
       transport.handle("wait", () => Effect.never),
+      transport.handle("whoami", (_body, { registration }) =>
+        Effect.succeed({ instanceId: registration.instanceId, sessionId: registration.sessionId }),
+      ),
       transport.handle("die", () => Effect.die("the die kind fails on purpose")),
     ]),
   ),

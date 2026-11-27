@@ -22,7 +22,7 @@ import { Effect, Fiber, Layer, Logger, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { makeClient, processAlive } from "../../../talk/transport/client";
+import { type Client, DIAL_SLOTS, makeClient, processAlive } from "../../../talk/transport/client";
 import {
   type Connection,
   MAX_BUFFERED_BYTES,
@@ -44,8 +44,9 @@ import {
   encodeEntry,
   entryFileName,
 } from "../../../talk/transport/registry";
+import type { Target } from "../../../talk/transport/request";
 import { TalkDpapi, sealEntries } from "../../../talk/transport/sealWindows";
-import { TalkTransport } from "../../../talk/transport/transport";
+import { TRANSPORT_DEFAULTS, TalkTransport } from "../../../talk/transport/transport";
 import { TalkFileError, TalkPosixSystem } from "../../../talk/transport/trustPosix";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
@@ -132,6 +133,208 @@ function rawConnect(endpoint: Endpoint): Promise<RawConnection> {
   socket.once("connect", () => resolve(raw));
   return promise;
 }
+
+/** A talk socket name of the process `processId`: `<pid>-<16 hex>.sock`. */
+const socketName = (processId: number): string => `${processId}-${hex(8)}.sock`;
+
+/**
+ * Leaves a socket file that refuses connections: a Bun child binds it, listens,
+ * and kills itself, so nothing removes the file. Gives the dead process id.
+ */
+function refusingSocket(path: string): number {
+  const child = spawnSync(
+    BUN_RUNTIME,
+    [
+      "-e",
+      'require("node:net").createServer().listen(process.env.TALK_SOCKET, () => process.kill(process.pid, "SIGKILL"))',
+    ],
+    { env: { ...process.env, TALK_SOCKET: path }, encoding: "utf8" },
+  );
+  expect(child.signal).toBe("SIGKILL");
+  expect(existsSync(path)).toBe(true);
+  return child.pid;
+}
+
+/** The open connections of a set of fake listeners, and the most at one time. */
+interface Gauge {
+  open: number;
+  max: number;
+}
+
+/**
+ * The behavior of a fake listener: `answer` holds the secret and answers each
+ * request with its label, `ended` holds the secret and reports the end after
+ * the proof, `bad-proof` answers with a wrong listener proof, `silent` accepts
+ * and never writes, and `hold` accepts until the test calls `release`.
+ */
+type FakeMode = "answer" | "ended" | "bad-proof" | "silent" | "hold";
+
+interface FakeOptions {
+  readonly mode: FakeMode;
+  readonly label?: string;
+  readonly secret?: Buffer;
+  readonly pair?: { readonly instanceId: string; readonly sessionId: string };
+  /** Holds back each challenge until it settles (the gated-challenge fixture). */
+  readonly gate?: Promise<void>;
+  /** Holds back each response until it settles. */
+  readonly respond?: Promise<void>;
+  readonly gauge?: Gauge;
+  /** Receives the label of each hello, in order. */
+  readonly hellos?: Array<string>;
+}
+
+interface FakeListener {
+  readonly server: Server;
+  readonly accepted: () => number;
+  readonly closed: () => number;
+  readonly hellos: () => number;
+  readonly requests: () => number;
+  /** Destroys every open connection. */
+  readonly release: () => void;
+}
+
+async function startFakeListener(path: string, options: FakeOptions): Promise<FakeListener> {
+  let accepted = 0;
+  let closed = 0;
+  let hellos = 0;
+  let requests = 0;
+  const open = new Set<Socket>();
+  const { gauge } = options;
+  const server = createServer((socket) => {
+    accepted += 1;
+    open.add(socket);
+    if (gauge !== undefined) {
+      gauge.open += 1;
+      gauge.max = Math.max(gauge.max, gauge.open);
+    }
+    socket.on("error", () => undefined);
+    socket.on("close", () => {
+      closed += 1;
+      open.delete(socket);
+      if (gauge !== undefined) gauge.open -= 1;
+    });
+    if (options.mode === "silent" || options.mode === "hold") {
+      // Read and drop the input, so the socket sees the end of the connection.
+      socket.resume();
+      return;
+    }
+    const frames: Array<{ readonly type?: string }> = [];
+    let buffered: Buffer = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      const before = frames.length;
+      buffered = takeFrames(Buffer.concat([buffered, chunk]), frames);
+      for (const received of frames.slice(before) as Array<Record<string, unknown>>) {
+        if (received["type"] === "hello") {
+          hellos += 1;
+          options.hellos?.push(options.label ?? path);
+          const clientNonce = Nonce.make(String(received["nonce"]));
+          const listenerNonce = Nonce.make(hex(32));
+          const hmac =
+            options.mode === "bad-proof" || options.secret === undefined || !options.pair
+              ? hex(32)
+              : computeHmac(options.secret, {
+                  role: "listener",
+                  clientNonce,
+                  listenerNonce,
+                  ...options.pair,
+                });
+          void (options.gate ?? Promise.resolve()).then(() =>
+            socket.write(frame({ type: "challenge", nonce: listenerNonce, hmac })),
+          );
+        } else if (received["type"] === "proof") {
+          socket.write(frame({ type: options.mode === "ended" ? "ended" : "ready" }));
+        } else if (received["type"] === "request") {
+          requests += 1;
+          void (options.respond ?? Promise.resolve()).then(() =>
+            socket.write(
+              frame({
+                type: "response",
+                id: received["id"],
+                result: { status: "ok", body: options.label ?? null },
+              }),
+            ),
+          );
+        }
+      }
+    });
+  });
+  const listening = Promise.withResolvers<void>();
+  server.listen({ path }, () => listening.resolve());
+  await listening.promise;
+  return {
+    server,
+    accepted: () => accepted,
+    closed: () => closed,
+    hellos: () => hellos,
+    requests: () => requests,
+    release: () => {
+      for (const socket of open) socket.destroy();
+    },
+  };
+}
+
+/** Writes a POSIX entry file as the registry would. */
+function writePosixEntry(folder: string, entry: RegistryEntry): string {
+  const path = join(folder, entryFileName(entry.instanceId, entry.sessionId));
+  writeFileSync(path, encodeEntry(entry), { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+/** Counts the reads of the socket names in the registry folder. */
+interface SocketReads {
+  count: number;
+}
+
+/**
+ * Runs `body` with an in-process client on the POSIX registry `folder`, with
+ * the default timeouts. With `reads`, it counts each read of the socket names.
+ */
+function withClient<A>(
+  folder: string,
+  body: (client: Client) => Effect.Effect<A, unknown, Scope.Scope>,
+  clock: "live" | "test" = "live",
+  reads?: SocketReads,
+): Promise<A> {
+  const posix = TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer));
+  const registry =
+    reads === undefined
+      ? posix
+      : Layer.effect(
+          TalkRegistry,
+          Effect.gen(function* () {
+            const inner = yield* TalkRegistry;
+            return TalkRegistry.of({
+              ...inner,
+              sockets: Effect.tap(inner.sockets, () =>
+                Effect.sync(() => {
+                  reads.count += 1;
+                }),
+              ),
+            });
+          }),
+        ).pipe(Layer.provide(posix));
+  const layer = clock === "test" ? Layer.merge(registry, TestClock.layer()) : registry;
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* makeClient({
+          requestTimeoutMs: TRANSPORT_DEFAULTS.requestTimeoutMs,
+          probeTimeoutMs: TRANSPORT_DEFAULTS.probeTimeoutMs,
+        });
+        return yield* body(client);
+      }),
+    ).pipe(Effect.provide(layer)),
+  );
+}
+
+/** A probe batch of one target; the failure of that target is the failure. */
+const probeOne = (client: Client, target: Target) =>
+  Effect.flatMap(client.probeAll([target]), ([result]) =>
+    result === undefined
+      ? Effect.die(new Error("probeAll gave no result"))
+      : Effect.fromResult(result),
+  );
 
 // --- Pure parts ----------------------------------------------------------------
 
@@ -597,7 +800,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
     }
   });
 
-  it("keeps a newer kept entry when a late proof of an older attempt arrives", async () => {
+  it("keeps a newer kept entry when a late proof of an older attempt arrives, and sends one body per call", async () => {
     fresh();
     const servers: Array<Server> = [];
     const secret = randomBytes(32);
@@ -611,7 +814,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       // A rebind keeps the start time of a registration and changes only its endpoint.
       const startTime = 1_700_000_000_000;
       const writeEntryAt = (path: string): void => {
-        const entry: RegistryEntry = {
+        writePosixEntry(folder, {
           version: PROTOCOL_VERSION,
           instanceId,
           sessionId,
@@ -621,69 +824,28 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
           endpoint: { kind: "unix", path },
           startTime,
           secret: secret.toString("hex"),
-        };
-        writeFileSync(entryPath, encodeEntry(entry), { mode: 0o600 });
-        chmodSync(entryPath, 0o600);
-      };
-      // A listener that holds the secret; `gate` holds back its challenge.
-      const startFake = async (path: string, label: string, gate: Promise<void>) => {
-        let hellos = 0;
-        const server = createServer((socket) => {
-          socket.on("error", () => undefined);
-          const frames: Array<{ readonly type?: string }> = [];
-          let buffered: Buffer = Buffer.alloc(0);
-          let listenerNonce = Nonce.make(hex(32));
-          let clientNonce = listenerNonce;
-          socket.on("data", (chunk: Buffer) => {
-            const before = frames.length;
-            buffered = takeFrames(Buffer.concat([buffered, chunk]), frames);
-            for (const received of frames.slice(before) as Array<Record<string, unknown>>) {
-              if (received["type"] === "hello") {
-                hellos += 1;
-                clientNonce = Nonce.make(String(received["nonce"]));
-                listenerNonce = Nonce.make(hex(32));
-                void gate.then(() =>
-                  socket.write(
-                    frame({
-                      type: "challenge",
-                      nonce: listenerNonce,
-                      hmac: computeHmac(secret, {
-                        role: "listener",
-                        clientNonce,
-                        listenerNonce,
-                        instanceId,
-                        sessionId,
-                      }),
-                    }),
-                  ),
-                );
-              } else if (received["type"] === "proof") {
-                socket.write(frame({ type: "ready" }));
-              } else if (received["type"] === "request") {
-                socket.write(
-                  frame({
-                    type: "response",
-                    id: received["id"],
-                    result: { status: "ok", body: label },
-                  }),
-                );
-              }
-            }
-          });
         });
-        servers.push(server);
-        const listening = Promise.withResolvers<void>();
-        server.listen({ path }, () => listening.resolve());
-        await listening.promise;
-        return { hellos: () => hellos };
       };
+      // Two sockets of one process id that both hold the secret; the gate holds back the first challenge.
       const gate = Promise.withResolvers<void>();
-      const firstPath = join(folder, `${hex(8)}.sock`);
-      const secondPath = join(folder, `${hex(8)}.sock`);
-      const first = await startFake(firstPath, "first", gate.promise);
-      await startFake(secondPath, "second", Promise.resolve());
+      const hellos: Array<string> = [];
+      const firstPath = join(folder, socketName(process.pid));
+      const secondPath = join(folder, socketName(process.pid));
+      const fake = { secret, pair: target, hellos } as const;
+      const first = await startFakeListener(firstPath, {
+        ...fake,
+        mode: "answer",
+        label: "first",
+        gate: gate.promise,
+      });
+      const second = await startFakeListener(secondPath, {
+        ...fake,
+        mode: "answer",
+        label: "second",
+      });
+      servers.push(first.server, second.server);
       writeEntryAt(firstPath);
-      const results = await Effect.runPromise(
+      const later = await Effect.runPromise(
         Effect.gen(function* () {
           const client = yield* makeClient({ requestTimeoutMs: 5_000, probeTimeoutMs: 500 });
           const early = yield* Effect.forkChild(client.request(target, "echo", null));
@@ -692,20 +854,344 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
           writeEntryAt(secondPath);
           yield* client.list;
           gate.resolve();
-          const earlyResult = yield* Fiber.join(early);
+          // Either socket can win the handshake; the label of the answer does not matter here.
+          yield* Fiber.join(early);
           unlinkSync(entryPath);
-          const laterResult = yield* client.request(target, "echo", null);
-          return [earlyResult, laterResult];
+          const mark = hellos.length;
+          yield* client.request(target, "echo", null);
+          return hellos.slice(mark);
         }).pipe(
           Effect.provide(
             TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer)),
           ),
         ),
       );
-      // The late proof did not roll the kept entry back to the first endpoint.
-      expect(results).toEqual(["first", "second"]);
+      // The late proof did not roll the kept entry back: the later call dials the second endpoint first.
+      expect(later[0]).toBe("second");
+      // One request body per call, whatever the count of routes.
+      expect(first.requests() + second.requests()).toBe(2);
     } finally {
       for (const server of servers) server.close();
+      cleanUp();
+    }
+  });
+});
+
+describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () => {
+  let base = "";
+  let folder = "";
+  const servers: Array<Server> = [];
+  const secret = randomBytes(32);
+  const target = { instanceId: hex(8), sessionId: "route" };
+
+  const fresh = (): void => {
+    base = mkdtempSync(join(tmpdir(), "tl-"));
+    folder = join(base, "reg");
+    mkdirSync(folder, { mode: 0o700 });
+    chmodSync(folder, 0o700);
+  };
+
+  const cleanUp = (): void => {
+    for (const server of servers.splice(0)) server.close();
+    rmSync(base, { recursive: true, force: true });
+  };
+
+  const entryAt = (path: string, pair: typeof target = target): RegistryEntry => ({
+    version: PROTOCOL_VERSION,
+    ...pair,
+    name: pair.sessionId,
+    cwd: base,
+    processId: process.pid,
+    endpoint: { kind: "unix", path },
+    startTime: 1_700_000_000_000,
+    secret: secret.toString("hex"),
+  });
+
+  const fake = async (options: FakeOptions): Promise<{ path: string; fake: FakeListener }> => {
+    const path = join(folder, socketName(process.pid));
+    const started = await startFakeListener(path, { secret, pair: target, ...options });
+    servers.push(started.server);
+    return { path, fake: started };
+  };
+
+  /** Forks `call` and tells whether it ended; the test clock holds its deadline meanwhile. */
+  const track = <A, E>(call: Effect.Effect<A, E>) =>
+    Effect.gen(function* () {
+      const state = { ended: false };
+      const fiber = yield* Effect.forkChild(
+        Effect.ensuring(
+          call,
+          Effect.sync(() => {
+            state.ended = true;
+          }),
+        ),
+      );
+      return { fiber, ended: () => state.ended };
+    });
+
+  /** Runs `call` under the test clock and gives its failure once it ended without a clock step. */
+  const failsAtOnce = <A, E>(call: Effect.Effect<A, E>, what: string) =>
+    Effect.gen(function* () {
+      const running = yield* track(Effect.flip(call));
+      yield* promised(() => waitFor(running.ended, SETTLE_MS, what));
+      return yield* Fiber.join(running.fiber);
+    });
+
+  it("answers a probe whose cached challenge is held 300 ms of the 500 ms deadline beside a same-process socket that refuses", async () => {
+    fresh();
+    try {
+      const gate = Promise.withResolvers<void>();
+      const cached = await fake({ mode: "answer", gate: gate.promise });
+      refusingSocket(join(folder, socketName(process.pid)));
+      writePosixEntry(folder, entryAt(cached.path));
+      await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const probing = yield* track(probeOne(client, target));
+            // The listener holds its challenge while the test clock runs 300 ms of the probe deadline.
+            yield* promised(() =>
+              waitFor(() => cached.fake.hellos() === 1, SETTLE_MS, "the gated hello"),
+            );
+            yield* TestClock.adjust(300);
+            expect(probing.ended()).toBe(false);
+            gate.resolve();
+            yield* Fiber.join(probing.fiber);
+          }),
+        "test",
+      );
+      expect(cached.fake.hellos()).toBe(1);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("reads unreachable before the deadline when every route fails at once, for a request and for a probe", async () => {
+    fresh();
+    try {
+      // The cached socket is missing, the process id is alive, and its other socket refuses.
+      writePosixEntry(folder, entryAt(join(folder, socketName(process.pid))));
+      refusingSocket(join(folder, socketName(process.pid)));
+      // The test clock never moves, so each call ends before its deadline or not at all.
+      const [requested, probed] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const request = yield* failsAtOnce(
+              client.request(target, "echo", null),
+              "the end of the request",
+            );
+            const probe = yield* failsAtOnce(probeOne(client, target), "the end of the probe");
+            return [request, probe] as const;
+          }),
+        "test",
+      );
+      expect(requested.outcome).toBe("unreachable");
+      expect(requested.reason).toMatch(/is in use/);
+      expect(probed.outcome).toBe("unreachable");
+      expect(probed.reason).toMatch(/is in use/);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  for (const variant of [
+    "a cached endpoint with a bad proof",
+    "a refused cached socket whose fresh entry gives a bad proof",
+    "a deleted cached socket whose fresh entry gives a bad proof",
+  ] as const) {
+    for (const call of ["request", "probe"] as const) {
+      it(`reads auth-failed for ${variant} after the process-id dial settles (${call})`, async () => {
+        fresh();
+        try {
+          const bad = await fake({ mode: "bad-proof" });
+          const held = await fake({ mode: "hold" });
+          let cachedPath = bad.path;
+          // The #249 path dials the bad proof; with a fresh entry, the process-id route dials it too.
+          let badDials = 1;
+          if (variant !== "a cached endpoint with a bad proof") {
+            cachedPath = join(folder, socketName(process.pid));
+            if (variant === "a refused cached socket whose fresh entry gives a bad proof") {
+              refusingSocket(cachedPath);
+            }
+            badDials = 2;
+          }
+          writePosixEntry(folder, entryAt(cachedPath));
+          // The test clock holds the deadline, so only the release of the held dial ends the call.
+          const failure = await withClient(
+            folder,
+            (client) =>
+              Effect.gen(function* () {
+                yield* client.list;
+                writePosixEntry(folder, entryAt(bad.path));
+                const running = yield* track(
+                  Effect.flip(
+                    call === "request"
+                      ? Effect.asVoid(client.request(target, "echo", null))
+                      : probeOne(client, target),
+                  ),
+                );
+                yield* promised(() =>
+                  waitFor(
+                    () =>
+                      bad.fake.closed() === badDials &&
+                      held.fake.accepted() === 1 &&
+                      held.fake.closed() === 0,
+                    SETTLE_MS,
+                    "the bad proof beside the held dial",
+                  ),
+                );
+                // The #249 path failed; the call still waits for the process-id dial.
+                expect(running.ended()).toBe(false);
+                held.fake.release();
+                return yield* Fiber.join(running.fiber);
+              }),
+            "test",
+          );
+          expect(failure.outcome).toBe("auth-failed");
+        } finally {
+          cleanUp();
+        }
+      });
+    }
+  }
+
+  it("opens at most 8 connections to one target process while two probes each try five candidate sockets", async () => {
+    fresh();
+    const gauge: Gauge = { open: 0, max: 0 };
+    try {
+      const sockets: Array<{ path: string; fake: FakeListener }> = [];
+      for (let index = 0; index < 5; index += 1)
+        sockets.push(await fake({ mode: "silent", gauge }));
+      const other = { instanceId: hex(8), sessionId: "route-2" };
+      writePosixEntry(folder, entryAt(sockets[0]!.path));
+      writePosixEntry(folder, entryAt(sockets[1]!.path, other));
+      await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            // The test clock holds the deadlines, so the slots stay taken while the test looks.
+            const probes = yield* Effect.forkChild(client.probeAll([target, other]));
+            yield* promised(() =>
+              waitFor(() => gauge.open === DIAL_SLOTS, SETTLE_MS, "eight open connections"),
+            );
+            yield* promised(() => sleep(200));
+            expect(gauge.max).toBe(DIAL_SLOTS);
+            expect(sockets.reduce((sum, item) => sum + item.fake.accepted(), 0)).toBe(DIAL_SLOTS);
+            yield* Fiber.interrupt(probes);
+            yield* promised(() => waitFor(() => gauge.open === 0, SETTLE_MS, "the closes"));
+          }),
+        "test",
+      );
+      expect(gauge.max).toBe(DIAL_SLOTS);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("reads the socket names once for a probe batch, and again for a request alone, which finds a socket that a rebind made", async () => {
+    fresh();
+    const reads: SocketReads = { count: 0 };
+    try {
+      const pairs = [
+        target,
+        { instanceId: hex(8), sessionId: "route-2" },
+        { instanceId: hex(8), sessionId: "route-3" },
+      ];
+      const listeners: Array<{ path: string; fake: FakeListener }> = [];
+      for (const pair of pairs) {
+        const started = await fake({ mode: "answer", pair });
+        listeners.push(started);
+        writePosixEntry(folder, entryAt(started.path, pair));
+      }
+      const [probed, batchReads, answer] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            reads.count = 0;
+            const results = yield* client.probeAll(pairs);
+            const counted = reads.count;
+            // The listener of the target rebinds: its old socket and its entry go away.
+            const old = listeners[0]!;
+            old.fake.server.close();
+            rmSync(old.path, { force: true });
+            rmSync(join(folder, entryFileName(target.instanceId, target.sessionId)));
+            yield* promised(() => fake({ mode: "answer", label: "rebound" }));
+            const body = yield* client.request(target, "echo", null);
+            return [results, counted, body] as const;
+          }),
+        "test",
+        reads,
+      );
+      expect(probed.map((result) => result._tag)).toEqual(["Success", "Success", "Success"]);
+      expect(batchReads).toBe(1);
+      expect(answer).toBe("rebound");
+      expect(reads.count).toBe(2);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("ends the losing routes and their slot waits at the first completed proof, so a probe of the same process gets a slot", async () => {
+    fresh();
+    const gauge: Gauge = { open: 0, max: 0 };
+    try {
+      const challenge = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      // The winner holds its challenge until the other routes fill the slots, then holds its answer.
+      const winner = await fake({
+        mode: "answer",
+        label: "winner",
+        gate: challenge.promise,
+        respond: response.promise,
+        gauge,
+      });
+      // Seven silent sockets take the free slots in the handshake; seven more routes wait for a slot.
+      for (let index = 0; index < 2 * (DIAL_SLOTS - 1); index += 1)
+        await fake({ mode: "silent", gauge });
+      const other = { instanceId: hex(8), sessionId: "route-2" };
+      const second = await fake({ mode: "answer", label: "second", pair: other });
+      writePosixEntry(folder, entryAt(winner.path));
+      writePosixEntry(folder, entryAt(second.path, other));
+      const [probed, answer] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const requesting = yield* track(client.request(target, "echo", null));
+            yield* promised(() =>
+              waitFor(
+                () => gauge.open === DIAL_SLOTS && winner.fake.hellos() === 1,
+                SETTLE_MS,
+                "eight connections in the handshake",
+              ),
+            );
+            challenge.resolve();
+            yield* promised(() =>
+              waitFor(() => winner.fake.requests() === 1, SETTLE_MS, "the request body"),
+            );
+            // The winner holds its answer; the probe of another pair of the process needs a slot.
+            const probing = yield* track(client.probeAll([other]));
+            yield* promised(() => waitFor(probing.ended, SETTLE_MS, "the end of the probe"));
+            const results = yield* Fiber.join(probing.fiber);
+            yield* promised(() =>
+              waitFor(() => gauge.open === 1, SETTLE_MS, "the closes of the losing routes"),
+            );
+            // The route that won still runs.
+            expect(requesting.ended()).toBe(false);
+            response.resolve();
+            return [results, yield* Fiber.join(requesting.fiber)] as const;
+          }),
+        "test",
+      );
+      expect(probed.map((result) => result._tag)).toEqual(["Success"]);
+      expect(answer).toBe("winner");
+      expect(winner.fake.requests()).toBe(1);
+    } finally {
       cleanUp();
     }
   });
@@ -748,7 +1234,12 @@ interface Status {
 }
 
 interface Listing {
-  readonly peers: ReadonlyArray<{ readonly instanceId: string; readonly sessionId: string }>;
+  readonly peers: ReadonlyArray<{
+    readonly instanceId: string;
+    readonly sessionId: string;
+    readonly name: string;
+    readonly cwd: string;
+  }>;
   readonly rejected: ReadonlyArray<{ readonly fileName: string; readonly reason: string }>;
   readonly pruned: ReadonlyArray<string>;
 }
@@ -972,7 +1463,7 @@ describe("talk transport between spawned Bun peers", () => {
       });
       const endpoint: Endpoint = WINDOWS
         ? { kind: "tcp", port: 0 }
-        : { kind: "unix", path: join(folder, `${hex(8)}.sock`) };
+        : { kind: "unix", path: join(folder, socketName(process.pid)) };
       const listening = Promise.withResolvers<void>();
       fake.listen(
         endpoint.kind === "unix" ? { path: endpoint.path } : { host: "127.0.0.1", port: 0 },
@@ -1397,6 +1888,268 @@ describe("talk transport between spawned Bun peers", () => {
       expect(
         await b.call("request", { target: targetOf(own), kind: "echo", body: "again" }),
       ).toEqual({ echo: "again", by: "folder-a" });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "updates the name and folder of a registration under the same identity",
+    async () => {
+      const registration = await a.call<Registration>("register", {
+        sessionId: "update-a",
+        name: "before",
+      });
+      const target = targetOf(registration);
+      await b.call("list");
+      await a.call("update", { target, name: "after", cwd: base });
+      // The entry that B kept before the update still sends.
+      expect(await b.call("request", { target, kind: "echo", body: "kept" })).toEqual({
+        echo: "kept",
+        by: "update-a",
+      });
+      const listing = await b.call<Listing>("list");
+      expect(
+        listing.peers.find((peer) => peer.instanceId === registration.instanceId),
+      ).toMatchObject({ sessionId: "update-a", name: "after", cwd: base });
+      await a.call("withdraw", { target });
+      expect(await a.send("update", { target, name: "late" })).toMatchObject({
+        ok: false,
+        tag: "TalkUpdateError",
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "retains a listed pair that still routes after its entry file is removed, and fails not-found for an unknown pair",
+    async () => {
+      // A long repair interval keeps the entry absent during the send.
+      const slow = await startPeer({ TALK_PEER_REPAIR_MS: "600000" });
+      const registration = await slow.call<Registration>("register", { sessionId: "retained" });
+      const target = targetOf(registration);
+      const listing = await b.call<Listing>("list");
+      expect(listing.peers.map((peer) => peer.instanceId)).toContain(registration.instanceId);
+      // A peer that never listed or reached the pair.
+      const keeper = await startPeer();
+      await keeper.call("retain", { target });
+      unlinkSync(join(folder, registration.fileName));
+      expect(await keeper.call("request", { target, kind: "echo", body: "retained" })).toEqual({
+        echo: "retained",
+        by: "retained",
+      });
+      expect(
+        await keeper.send("retain", {
+          target: { instanceId: "eeeeeeeeeeeeeeee", sessionId: "nobody" },
+        }),
+      ).toMatchObject({ ok: false, outcome: "not-found" });
+      await keeper.stop();
+      await slow.stop();
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "finds the old pair of a session that registered again, whose request reads not-live, and nothing for an id never seen",
+    async () => {
+      const old = await a.call<Registration>("register", { sessionId: "known-a" });
+      await b.call("list");
+      await a.call("withdraw", { target: targetOf(old) });
+      const renewed = await a.call<Registration>("register", { sessionId: "known-a" });
+      expect(renewed.instanceId).not.toBe(old.instanceId);
+      const pair = await b.call("known", { instanceId: old.instanceId });
+      expect(pair).toEqual(targetOf(old));
+      expect(await b.send("request", { target: pair, kind: "echo" })).toMatchObject({
+        ok: false,
+        outcome: "not-live",
+      });
+      expect(await b.call("known", { instanceId: "dddddddddddddddd" })).toBeNull();
+      await a.call("withdraw", { target: targetOf(renewed) });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "withdraws a registration whose admission the hook refuses: a request and a probe read not-live and the listing drops it",
+    async () => {
+      const requested = await a.call<Registration>("register", { sessionId: "refused-r" });
+      const probed = await a.call<Registration>("register", { sessionId: "refused-p" });
+      await b.call("list");
+      for (const registration of [requested, probed]) {
+        await a.call("refuse", { target: targetOf(registration) });
+      }
+      const notLive = { ok: false, outcome: "not-live" };
+      // The first call of each target meets the hook: a request for one, a ping for the other.
+      expect(await b.send("request", { target: targetOf(requested), kind: "echo" })).toMatchObject(
+        notLive,
+      );
+      expect(await b.send("probe", { target: targetOf(requested) })).toMatchObject(notLive);
+      expect(await b.send("probe", { target: targetOf(probed) })).toMatchObject(notLive);
+      expect(await b.send("request", { target: targetOf(probed), kind: "echo" })).toMatchObject(
+        notLive,
+      );
+      const listing = await b.call<Listing>("list");
+      const listed = listing.peers.map((peer) => peer.instanceId);
+      expect(listed).not.toContain(requested.instanceId);
+      expect(listed).not.toContain(probed.instanceId);
+      const registrations = (await status(a)).registrations;
+      for (const registration of [requested, probed]) {
+        expect(
+          registrations.find((item) => item.instanceId === registration.instanceId)?.live,
+        ).toBe(false);
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps two live registrations of one session id apart: each is reachable and withdraws alone",
+    async () => {
+      const first = await a.call<Registration>("register", { sessionId: "twin" });
+      const second = await a.call<Registration>("register", { sessionId: "twin" });
+      expect(second.instanceId).not.toBe(first.instanceId);
+      expect(second.fileName).not.toBe(first.fileName);
+      for (const registration of [first, second]) {
+        expect(await b.call("request", { target: targetOf(registration), kind: "whoami" })).toEqual(
+          targetOf(registration),
+        );
+      }
+      await a.call("withdraw", { target: targetOf(first) });
+      expect(await b.send("request", { target: targetOf(first), kind: "whoami" })).toMatchObject({
+        ok: false,
+        outcome: "not-live",
+      });
+      expect(await b.call("request", { target: targetOf(second), kind: "whoami" })).toEqual(
+        targetOf(second),
+      );
+      expect(existsSync(join(folder, first.fileName))).toBe(false);
+      expect(existsSync(join(folder, second.fileName))).toBe(true);
+      await a.call("withdraw", { target: targetOf(second) });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it.skipIf(WINDOWS)(
+    "reads not-live through the rebind route after the last registration ended and the listener rebound, also beside a silent old socket, until eight probes hold every slot",
+    async () => {
+      const r = await startPeer();
+      const registration = await r.call<Registration>("register", { sessionId: "rebind-x" });
+      const target = targetOf(registration);
+      const oldPath = unixPath((await status(r)).endpoint);
+      await b.call("list");
+      const silentServers: Array<Server> = [];
+      try {
+        await withClient(
+          folder,
+          (client) =>
+            Effect.gen(function* () {
+              yield* client.list;
+              yield* promised(() => r.call("withdraw", { target }));
+              unlinkSync(oldPath);
+              yield* promised(() =>
+                waitFor(
+                  async () => (await status(r)).closedListeners === 1,
+                  3 * REPAIR_MS + SETTLE_MS,
+                  "the rebind",
+                ),
+              );
+              const ended = {
+                ok: false,
+                outcome: "not-live",
+                reason: expect.stringMatching(/ended/),
+              };
+              // B's default request and default probe find the rebound listener by its process id.
+              expect(
+                yield* promised(() => b.send("request", { target, kind: "echo" })),
+              ).toMatchObject(ended);
+              expect(yield* promised(() => b.send("probe", { target }))).toMatchObject(ended);
+              const gauge: Gauge = { open: 0, max: 0 };
+              const silent = yield* promised(() =>
+                startFakeListener(oldPath, { mode: "silent", gauge }),
+              );
+              silentServers.push(silent.server);
+              expect(
+                yield* promised(() => b.send("request", { target, kind: "echo" })),
+              ).toMatchObject(ended);
+              expect(yield* promised(() => b.send("probe", { target }))).toMatchObject(ended);
+              yield* promised(() => waitFor(() => gauge.open === 0, SETTLE_MS, "the closes of B"));
+              // A batch of eight probes of this client keeps every slot on the silent socket; the
+              // test clock holds their deadline while the test looks. The batch reads the socket
+              // names once (on macOS that read waits for an `ls -led` child), so all eight probes
+              // take their slots in the same turn, before the process-id route of any probe can
+              // dial the rebound listener.
+              const before = silent.accepted();
+              const probes = yield* Effect.forkChild(
+                client.probeAll(Array.from({ length: DIAL_SLOTS }, () => target)),
+              );
+              yield* promised(() =>
+                waitFor(() => gauge.open === DIAL_SLOTS, SETTLE_MS, "eight silent dials"),
+              );
+              yield* promised(() => sleep(200));
+              expect(silent.accepted() - before).toBe(DIAL_SLOTS);
+              expect((yield* promised(() => status(r))).unauthenticated).toBe(0);
+              yield* TestClock.adjust(TRANSPORT_DEFAULTS.probeTimeoutMs);
+              const results = yield* Fiber.join(probes);
+              expect(
+                results.map((result) =>
+                  result._tag === "Failure" ? result.failure.outcome : "answered",
+                ),
+              ).toEqual(Array.from({ length: DIAL_SLOTS }, () => "timeout"));
+              // With free slots, the same client gets the proof of the end.
+              expect((yield* Effect.flip(probeOne(client, target))).outcome).toBe("not-live");
+            }),
+          "test",
+        );
+      } finally {
+        for (const server of silentServers) server.close();
+        await r.stop();
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it.skipIf(WINDOWS)(
+    "removes the socket of a killed peer that no entry names, and keeps a refusing socket of a live process or one that an entry names",
+    async () => {
+      const k = await startPeer();
+      const { pid: deadPid } = await k.ready;
+      const registration = await k.call<Registration>("register", { sessionId: "orphan-k" });
+      const orphan = unixPath((await status(k)).endpoint);
+      expect(orphan.slice(folder.length + 1)).toMatch(
+        new RegExp(`^${deadPid}-[0-9a-f]{16}\\.sock$`),
+      );
+      // The withdrawal removes the entry; the listener and its socket stay until the kill.
+      await k.call("withdraw", { target: targetOf(registration) });
+      k.kill();
+      await k.exited;
+      expect(existsSync(orphan)).toBe(true);
+      // A live process between its bind and its listen: the socket refuses, the process id is in use.
+      const starting = join(folder, socketName(process.pid));
+      refusingSocket(starting);
+      // A refusing socket of a dead process id that the entry of a live process names.
+      const named = join(folder, socketName(deadPid));
+      refusingSocket(named);
+      const entryPath = await writeEntry({
+        version: PROTOCOL_VERSION,
+        instanceId: "9999999999999999",
+        sessionId: "names-socket",
+        name: "names-socket",
+        cwd: base,
+        processId: process.pid,
+        endpoint: { kind: "unix", path: named },
+        startTime: Date.now(),
+        secret: hex(32),
+      });
+      try {
+        const listing = await b.call<Listing>("list");
+        expect(existsSync(orphan)).toBe(false);
+        expect(existsSync(starting)).toBe(true);
+        expect(existsSync(named)).toBe(true);
+        expect(listing.peers.map((peer) => peer.sessionId)).toContain("names-socket");
+      } finally {
+        rmSync(entryPath, { force: true });
+        rmSync(starting, { force: true });
+        rmSync(named, { force: true });
+      }
     },
     SPAWN_TIMEOUT_MS,
   );

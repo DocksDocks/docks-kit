@@ -1,9 +1,10 @@
 /**
  * The endpoint of the process listener (#249 E7, #248 D2 POSIX and Windows
- * endpoint). POSIX: a Unix socket with a fresh random name for each bind,
- * directly in the registry folder, checked with `lstat` after the bind. The
- * transport never changes the mode of a socket path. Windows: TCP on
- * 127.0.0.1 with a port that the system picks, and no socket file.
+ * endpoint). POSIX: a Unix socket with a fresh name for each bind, directly in
+ * the registry folder, checked with `lstat` after the bind. The name carries
+ * the process id of its owner and a random part (#250 Step 2). The transport
+ * never changes the mode of a socket path. Windows: TCP on 127.0.0.1 with a
+ * port that the system picks, and no socket file.
  */
 import { randomBytes } from "node:crypto";
 import { type Server, type Socket, createServer } from "node:net";
@@ -12,8 +13,11 @@ import { Effect, Schema } from "effect";
 
 import { type EntryStat, isSameFile, liveView } from "./trustPosix";
 
-/** Socket names that talk owns in the registry folder (E5 Names). */
-export const SOCKET_NAME = /^[0-9a-f]{16}\.sock$/;
+/**
+ * Socket names that talk owns in the registry folder: `<pid>-<16 hex>.sock`,
+ * where `<pid>` is the process id of the owner, without leading zeros.
+ */
+export const SOCKET_NAME = /^([1-9][0-9]{0,9})-[0-9a-f]{16}\.sock$/;
 
 /** The byte count of the random part of a talk name: 16 hex characters. */
 export const NAME_RANDOM_BYTES = 8;
@@ -55,6 +59,17 @@ export class TalkEndpointError extends Schema.TaggedError<
 
 /** A fresh random talk name part: 16 lowercase hex characters. */
 export const randomNameHex = (): string => randomBytes(NAME_RANDOM_BYTES).toString("hex");
+
+/** A fresh socket name of the process `processId`. */
+export const socketFileName = (processId: number): string => `${processId}-${randomNameHex()}.sock`;
+
+/** The owner process id that a talk socket name carries; `undefined` for any other name. */
+export function socketProcessId(name: string): number | undefined {
+  const digits = SOCKET_NAME.exec(name)?.[1];
+  if (digits === undefined) return undefined;
+  const processId = Number(digits);
+  return Number.isSafeInteger(processId) ? processId : undefined;
+}
 
 /** Fails a socket path that does not fit in `sun_path` with its null byte. */
 export function sunPathFault(path: string, platform: NodeJS.Platform): string | undefined {
@@ -143,7 +158,7 @@ export const bindEndpoint = Effect.fn("bindEndpoint")(function* (options: BindOp
     return bound;
   }
   const user = process.getuid?.();
-  const path = posix.join(options.folder, `${randomNameHex()}.sock`);
+  const path = posix.join(options.folder, socketFileName(process.pid));
   if (user === undefined) {
     return yield* new TalkEndpointError({ path, reason: "a Unix socket needs a POSIX user id" });
   }
