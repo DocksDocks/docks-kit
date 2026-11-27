@@ -18,7 +18,7 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Effect, Fiber, Layer, Logger, Predicate, type Scope } from "effect";
+import { Effect, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -592,6 +592,55 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
             const status = yield* listener.status;
             expect(status.lastRepairFailure).toContain(first.fileName);
             expect(status.lastRepairFailure).toContain("the read is denied");
+          }),
+      );
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("rebinds in the same pass when the folder goes away and comes back while the pass publishes", async () => {
+    fresh();
+    let armed = false;
+    try {
+      await withListener(
+        folder,
+        (real) => ({
+          ...real,
+          // After the pass found the folder and the socket intact, another process removes the
+          // folder, which takes the socket and the entry, and creates the folder again.
+          check: (published) =>
+            Effect.suspend(() => {
+              if (armed) {
+                armed = false;
+                rmSync(folder, { recursive: true, force: true });
+                mkdirSync(folder, { mode: 0o700 });
+                chmodSync(folder, 0o700);
+              }
+              return real.check(published);
+            }),
+        }),
+        (listener, registry) =>
+          Effect.gen(function* () {
+            const registration = yield* register(listener, "gone");
+            const before = yield* listener.status;
+            armed = true;
+            yield* TestClock.adjust(REPAIR_MS);
+            yield* statusUntil(
+              listener,
+              (status) => status.repairPasses > before.repairPasses,
+              "the repair pass",
+            );
+            const after = yield* listener.status;
+            expect(armed).toBe(false);
+            // The pass did not leave an entry that names the removed socket.
+            expect(after.endpoint).not.toEqual(before.endpoint);
+            expect(after.closedListeners).toBe(before.closedListeners + 1);
+            expect(after.registrations.every((served) => !served.stale)).toBe(true);
+            const entry = yield* registry.read(registration.fileName);
+            const named = Option.getOrUndefined(entry)?.endpoint;
+            expect(named).toEqual(after.endpoint);
+            expect(named?.kind === "unix" && existsSync(named.path)).toBe(true);
           }),
       );
     } finally {

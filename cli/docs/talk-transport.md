@@ -287,9 +287,14 @@ Every 60 s, the listener checks each of its entries on its own: a failure of
 one entry is logged, and the pass goes on with the others. It publishes a
 missing or changed entry again and retries a failed publication on the next
 pass. When the registry folder is missing, it creates the folder again; on
-POSIX it also binds a new socket. On POSIX, every 6 hours it refreshes the
-times of its entry files through the descriptors that it kept, and logs each
-failure with the path and the reason.
+POSIX it also binds a new socket, and it binds one when its socket path is
+missing or holds another file. After it publishes, the pass checks the
+socket once more. When the socket went away during the pass, for example
+because another process removed the folder and created it again, the pass
+binds a new socket and publishes the entries again at once. So the entries
+do not name the removed socket until the next pass. On POSIX, every 6 hours it
+refreshes the times of its entry files through the descriptors that it
+kept, and logs each failure with the path and the reason.
 
 ## Known limits
 
