@@ -269,22 +269,40 @@ const tagOf = (value: unknown): unknown =>
   Predicate.hasProperty(value, "_tag") ? value._tag : undefined;
 
 /**
- * The host UI of one view (round 8): each node with `onKey` gets the key
- * while the view is open. A settled view that omp still shows takes each
- * key: `escape` and `alt+t` end the flow, and every other key does nothing,
- * so no key reaches the composer before the next talk view mounts.
+ * The host UI of one view (round 8, round 9): each node with `onKey`,
+ * `onEdit`, or `onPaste` gets its input while the view is open. A settled
+ * view that omp still shows consumes every key: `escape` and `alt+t` end
+ * the flow, and every other key does nothing, so no key reaches the
+ * composer before the next talk view mounts. A settled text field also
+ * consumes each paste, so no paste reaches its widget, and it ignores each
+ * late edit, also an edit that Tern reports to it. So its text stays the
+ * text that the view settled with.
  */
-const settledKeys = (ui: HostUi, isOpen: () => boolean, end: () => void): HostUi => ({
+const settledInput = (ui: HostUi, isOpen: () => boolean, end: () => void): HostUi => ({
   ...ui,
   jsx: (kind, props, key) => {
     const onKey = props["onKey"];
-    if (!Predicate.isFunction(onKey)) return ui.jsx(kind, props, key);
-    const guarded = (event: ViewKey): boolean => {
-      if (isOpen()) return Reflect.apply(onKey, undefined, [event]) === true;
-      if (event.kind !== "release" && (event.id === CLOSE_KEY || event.id === TALK_SHORTCUT)) end();
-      return true;
-    };
-    return ui.jsx(kind, { ...props, onKey: guarded }, key);
+    const onEdit = props["onEdit"];
+    const onPaste = props["onPaste"];
+    const guarded: Record<string, unknown> = { ...props };
+    if (Predicate.isFunction(onKey))
+      guarded["onKey"] = (event: ViewKey): boolean => {
+        if (isOpen()) return Reflect.apply(onKey, undefined, [event]) === true;
+        if (event.kind !== "release" && (event.id === CLOSE_KEY || event.id === TALK_SHORTCUT))
+          end();
+        return true;
+      };
+    if (Predicate.isFunction(onEdit))
+      guarded["onEdit"] = (edit: unknown): void => {
+        if (isOpen()) Reflect.apply(onEdit, undefined, [edit]);
+      };
+    // A text field gets a paste handler, so a held field takes no paste; an open one gives it to its widget.
+    if (Predicate.isFunction(onEdit) || Predicate.isFunction(onPaste))
+      guarded["onPaste"] = (paste: unknown): boolean => {
+        if (!isOpen()) return true;
+        return Predicate.isFunction(onPaste) && Reflect.apply(onPaste, undefined, [paste]) === true;
+      };
+    return ui.jsx(kind, guarded, key);
   },
 });
 
@@ -340,8 +358,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
    * A choice that is not `ended` leaves the view shown and focused until the
    * factory of the next view of the flow runs, in the microtasks after the
    * key: a key that omp dispatches before them still reaches a talk view,
-   * never the composer. A settled view takes no key: `escape` and `alt+t`
-   * end the flow, and every other key does nothing. The outgoing view closes
+   * never the composer. A settled view consumes every key: `escape` and
+   * `alt+t` end the flow, and every other key does nothing. A settled text
+   * field consumes each paste and ignores each late edit. The outgoing view closes
    * inside the next factory, before omp opens the next overlay, because omp
    * gives the focus back to the node that was focused when an overlay
    * opened (`overlays.ts` v19.2.1:63-79); a closed talk view must not be that
@@ -395,7 +414,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           // omp can run the factory after the flow ended; the view then closes at once.
           if (!live(flow)) finish(ended);
           const node = build(
-            settledKeys(
+            settledInput(
               ui,
               () => open,
               () => {

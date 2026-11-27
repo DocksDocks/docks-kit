@@ -110,6 +110,18 @@ export const press = (node: FakeNode, id: string, kind: KeyKind = "press"): unkn
 export const pressRaw = (node: FakeNode, id: string, raw: string): unknown =>
   fire(node, "onKey", key(id, "press", false, raw));
 
+/** An edit event that adds `text` at the end of a text field, as Tern reports a typed text. */
+export const appendText = (node: FakeNode, text: string): void => {
+  const before = String(prop(node, "text"));
+  fire(node, "onEdit", {
+    from: before.length,
+    to: before.length,
+    text,
+    cursor: before.length + text.length,
+    len: before.length,
+  });
+};
+
 export interface Item {
   readonly id: string;
   readonly label: string;
@@ -172,7 +184,10 @@ export const codeOf = (node: FakeNode): { readonly instanceId: string; readonly 
 export interface View {
   readonly node: FakeNode;
   readonly options: unknown;
+  /** The view called `done`. */
   readonly closed: boolean;
+  /** The overlay is still open: neither `done` nor a host close removed it. */
+  readonly shown: boolean;
   readonly result: unknown;
   /** omp closes the overlay without `done`, as no omp 19.2.1 path does but a later one can. */
   readonly hostClose: () => void;
@@ -182,32 +197,59 @@ export const FULL_SCREEN = { overlay: true, fullscreen: true };
 /** The compose view: an overlay docked at the bottom. */
 export const DOCKED = { overlay: true, fullscreen: false };
 
-/** A fake TUI `ctx.ui`: it mounts each view at once and records each call by method name. */
+/**
+ * A fake TUI `ctx.ui`: it mounts each view at once and records each call by
+ * method name. It also routes input as omp does: an overlay takes the focus
+ * when it opens, after its factory ran, and remembers the node that was
+ * focused then; when the overlay closes, through `done` or through its host
+ * handle, the focus goes back to that node, or to the composer of omp when
+ * that node is gone (`cli/docs/talk-ui.md`, "Flows").
+ */
 export class FakeTui {
   size = { columns: 100, rows: 30 };
   readonly views: Array<View> = [];
   readonly calls: Array<string> = [];
   readonly notices: Array<{ readonly text: string; readonly level: string }> = [];
+  /** The focused view; undefined when the composer of omp has the focus. */
+  focused: View | undefined;
+  /** Each key id and each paste (`paste:<text>`) that reached the composer of omp. */
+  readonly composerInput: Array<string> = [];
+  /** The node that was focused when each view opened. */
+  readonly #restore = new Map<View, View | undefined>();
+
+  /** Moves the focus off `view` when it closes: to the node that was focused when it opened, while that node is shown. */
+  readonly #blur = (view: View): void => {
+    if (this.focused !== view) return;
+    let next = this.#restore.get(view);
+    while (next !== undefined && !next.shown) next = this.#restore.get(next);
+    this.focused = next;
+  };
+
   readonly ui: FlowUi = {
     custom: (factory, options) => {
       this.calls.push("custom");
       const { promise, resolve } = Promise.withResolvers<unknown>();
       const state = { closed: false, hostClosed: false, result: undefined as unknown };
+      // The view exists once the factory returned; a `done` inside the factory moves no focus.
+      const mounted: { view?: View } = {};
       const node = factory({ size: () => this.size }, {}, {}, (value) => {
         if (state.closed) throw new Error("done called twice");
         state.closed = true;
         state.result = value;
+        if (mounted.view !== undefined) this.#blur(mounted.view);
         resolve(value);
       });
       if (!isFakeNode(node)) throw new Error("the factory gave no node");
+      const hostClose = (): void => {
+        state.hostClosed = true;
+        if (mounted.view !== undefined) this.#blur(mounted.view);
+      };
       // omp gives the overlay handle once the overlay is open (`ExtensionCustomOptions` v19.2.1).
       options.onHandle({
         get closed() {
           return state.closed || state.hostClosed;
         },
-        close: () => {
-          state.hostClosed = true;
-        },
+        close: hostClose,
       });
       const view: View = {
         node,
@@ -215,14 +257,21 @@ export class FakeTui {
         get closed() {
           return state.closed;
         },
+        get shown() {
+          return !state.closed && !state.hostClosed;
+        },
         get result() {
           return state.result;
         },
-        hostClose: () => {
-          state.hostClosed = true;
-        },
+        hostClose,
       };
+      mounted.view = view;
       this.views.push(view);
+      // omp mounts no view whose `done` ran in its factory; an open overlay takes the focus.
+      if (view.shown) {
+        this.#restore.set(view, this.focused);
+        this.focused = view;
+      }
       return promise;
     },
     notify: (text, level) => {
@@ -236,6 +285,37 @@ export class FakeTui {
     const view = this.views.at(-1);
     if (view === undefined || view.closed) throw new Error("no open view");
     return view;
+  }
+
+  /** A key from the terminal: omp gives it to the focused view, or to the composer. */
+  key(id: string, kind: KeyKind = "press"): unknown {
+    const view = this.focused;
+    if (view === undefined) {
+      this.composerInput.push(id);
+      return false;
+    }
+    return fire(view.node, "onKey", key(id, kind));
+  }
+
+  /**
+   * A bracketed paste: omp offers it to `onPaste` of the focused view; when
+   * no handler takes it, the `input` or `editor` widget inserts it at the
+   * caret and reports the edit.
+   */
+  paste(text: string): void {
+    const view = this.focused;
+    if (view === undefined) {
+      this.composerInput.push(`paste:${text}`);
+      return;
+    }
+    const { node } = view;
+    if (Predicate.isFunction(node.props["onPaste"]) && fire(node, "onPaste", { text }) === true)
+      return;
+    // The `input` and `editor` widgets of pi-tui insert a paste that no handler took (`term/widgets/input.ts`, `editor.ts`).
+    if (node.kind !== "input" && node.kind !== "editor") return;
+    const before = String(prop(node, "text"));
+    const at = Number(prop(node, "cursor"));
+    fire(node, "onEdit", { from: at, to: at, text, cursor: at + text.length, len: before.length });
   }
 }
 

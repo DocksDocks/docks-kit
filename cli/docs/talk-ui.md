@@ -137,17 +137,24 @@ closed the overlay without `done`, the next check of the flow (the 1 s
 repair timer of a main binding) ends the view as a cancel.
 
 When a key in a view leads to the next talk view (Enter or `h` in the list,
-Enter in compose, `ctrl+s` in the review, a code letter or `escape` in the
-confirm view, the end of a waiting view), the view settles but stays shown
-and focused until the factory of the next view runs. omp mounts an overlay a
-microtask after `ctx.ui.custom`, so a key that omp dispatched in between
-would otherwise reach the composer. A settled view takes every key: `escape`
-and `alt+t` end the flow at once, and every other key does nothing. The
-settled view closes inside the factory of the next view, before omp opens
-the next overlay, because omp gives the focus back to the node that was
-focused when an overlay opened. A key that ends the flow (`escape` in the
-list, compose, the review, or a waiting view; `alt+t` in any view) aborts
-the flow signal before the view closes, so a pending step stops at once.
+Enter in compose, `ctrl+s` in the review, the last correct code letter or
+`escape` in the confirm view), or a waiting view ends with a result that
+leads to the next talk view (the side-turn waiting view with a draft, the
+resize view with the fresh rows), the view settles but stays shown and
+focused until the factory of the next view runs. The first correct code
+letter only updates the typed letters, and the send waiting view ends the
+flow. omp mounts an overlay a microtask after `ctx.ui.custom`, so a key
+that omp dispatched in between would otherwise reach the composer. A
+settled view consumes every key: `escape` and `alt+t` end the flow at once,
+and every other key does nothing. A settled compose field or review field
+also consumes each paste and ignores each late edit, also an edit that Tern
+reports to it, so the text that the confirm view shows and that the flow
+sends is the text at the key. The settled view closes inside the factory of
+the next view, before omp opens the next overlay, because omp gives the
+focus back to the node that was focused when an overlay opened. A key that
+ends the flow (`escape` in the list, compose, the review, or a waiting
+view; `alt+t` in any view) aborts the flow signal before the view closes,
+so a pending step stops at once.
 
 The command handler awaits its flow, because omp awaits a command handler
 without a deadline. The shortcut handler starts its flow and returns, because
@@ -235,9 +242,13 @@ view in place of the list:
   v19.2.1:24-27), so the request is the middle row of the screen, and the
   only row of a one-row pane. On each draw, it shows the longest of these
   cues that fits the width from `ui.size()`. Each cue is whole: no word is
-  cut. A pane narrower than 4 columns shows no cue: an empty row. Enlarge
-  it. The cue follows the current size first: the progress text below shows
-  only while the list fits.
+  cut. A pane narrower than 4 columns shows `⤢` (U+2922), the expand symbol
+  of omp (`cmd.expand` in pi-tui `src/theme/data/symbols.json` v19.2.1). Its
+  East Asian Width is neutral (`2900..297F ; N` in `EastAsianWidth.txt`
+  17.0.0), so it takes one cell also in a terminal that draws ambiguous
+  characters wide. A pane without a column shows no cue. The cue follows
+  the current size first: the progress text below shows only while the list
+  fits.
 
 ```text
 talk: enlarge the pane to see the session list
@@ -245,6 +256,7 @@ talk: enlarge the pane
 enlarge the pane
 enlarge
 grow
+⤢
 ```
 
 - When the list fits again, the resize view stays open and focused, shows

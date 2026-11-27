@@ -137,7 +137,11 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 /**
  * The texts of the resize view, longest first (G3): the view shows the
  * longest one that fits the width, so one screen row holds a whole cue and
- * no word is cut. A pane narrower than 4 cells shows no cue.
+ * no word is cut. A pane narrower than 4 cells shows `⤢` (U+2922), the
+ * expand symbol of omp (`cmd.expand` in pi-tui `src/theme/data/symbols.json`
+ * v19.2.1). Its East Asian Width is neutral (`2900..297F ; N` in
+ * `EastAsianWidth.txt` 17.0.0), so it takes one cell also where a terminal
+ * draws ambiguous characters wide.
  */
 export const RESIZE_TEXTS = [
   "talk: enlarge the pane to see the session list",
@@ -145,6 +149,7 @@ export const RESIZE_TEXTS = [
   "enlarge the pane",
   "enlarge",
   "grow",
+  "⤢",
 ] as const;
 const LIST_EMPTY = "No live talk sessions.";
 
@@ -340,7 +345,7 @@ export const pendingView = <R>(
 /** The text of the resize view while it lists the registry again. */
 export const LISTING_TEXT = "talk: listing sessions";
 
-/** The resize text for `columns` cells: the longest whole cue that fits; none below one cell. */
+/** The resize text for `columns` cells: the longest whole cue that fits; none without a cell. */
 export const resizeText = (ui: HostUi, columns: number | undefined): string => {
   const width = Math.max(0, columns ?? 0);
   return RESIZE_TEXTS.find((text) => ui.visibleWidth(text) <= width) ?? "";

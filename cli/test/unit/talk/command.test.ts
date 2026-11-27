@@ -6,6 +6,7 @@ import {
   ID_A,
   ID_B,
   ID_C,
+  appendText,
   codeOf,
   composeTo,
   confirmTo,
@@ -313,6 +314,7 @@ describe("list view (G3)", () => {
     "enlarge the pane",
     "enlarge",
     "grow",
+    "\u2922",
   ];
 
   it.each([
@@ -331,13 +333,48 @@ describe("list view (G3)", () => {
     expect([...shown].length).toBeLessThanOrEqual(columns);
   });
 
+  /**
+   * The East Asian Width (UAX #11) of the non-ASCII cue characters, from
+   * `EastAsianWidth-17.0.0.txt`: `2900..297F ; N` holds `⤢` (U+2922), and
+   * `2190..2194 ; A` holds `↔` (U+2194), the arrow that round 8 rejected.
+   */
+  const EAST_ASIAN_WIDTH: Record<string, "N" | "A"> = { "\u2922": "N", "\u2194": "A" };
+  const PRINTABLE_ASCII = /^[\x20-\x7e]$/u;
+
+  /**
+   * The cells of `text` by the rules of pi-tui `text/width.ts` v19.2.1
+   * (`Bun.stringWidth` with `ambiguousIsNarrow`): one cell for a narrow or
+   * neutral character, and two for an ambiguous one when the terminal draws
+   * ambiguous characters wide.
+   */
+  const paintedWidth = (text: string, ambiguousWide: boolean): number =>
+    [...text].reduce((cells, character) => {
+      if (PRINTABLE_ASCII.test(character)) return cells + 1;
+      const width = EAST_ASIAN_WIDTH[character];
+      if (width === undefined) throw new Error(`no width data for ${character}`);
+      return cells + (width === "A" && ambiguousWide ? 2 : 1);
+    }, 0);
+
   it.each([3, 1])(
-    "shows no cue in a pane %i columns wide, narrower than the shortest whole cue",
+    "shows omp's expand symbol in a pane %i columns wide, narrower than the shortest word cue, in one cell also where ambiguous characters are wide",
     async (columns) => {
       const ui = await loadUi();
-      expect(resizeText(ui, columns)).toBe("");
+      const shown = resizeText(ui, columns);
+      // `cmd.expand` of pi-tui `src/theme/data/symbols.json` v19.2.1.
+      expect(shown).toBe("\u2922");
+      expect(paintedWidth(shown, false)).toBe(1);
+      expect(paintedWidth(shown, true)).toBe(1);
+      expect(paintedWidth(shown, true)).toBeLessThanOrEqual(columns);
+      // The width rules tell the ambiguous arrow apart: it takes two cells there.
+      expect(paintedWidth("\u2194", true)).toBe(2);
     },
   );
+
+  it("shows no cue in a pane without a column", async () => {
+    const ui = await loadUi();
+    expect(resizeText(ui, 0)).toBe("");
+    expect(resizeText(ui, undefined)).toBe("");
+  });
 
   /** Shrinks the pane below the open list; the list ends and the resize view mounts. */
   const shrink = async (h: Harness): Promise<FakeNode> => {
@@ -424,9 +461,9 @@ describe("list view (G3)", () => {
     // The view stays open and focused while the rows are pending.
     expect(h.tui.top.node).toBe(resize);
     expect(prop(resize, "text")).toBe(LISTING_TEXT);
-    // A shrink during the listing: the size decides first, so the view shows the cue, here none.
+    // A shrink during the listing: the size decides first, so the view shows the cue.
     h.tui.size = { columns: 1, rows: 1 };
-    expect(prop(resize, "text")).toBe("");
+    expect(prop(resize, "text")).toBe("\u2922");
     h.tui.size = { columns: 100, rows: 30 };
     expect(prop(resize, "text")).toBe(LISTING_TEXT);
     const life = h.services.lives.at(-1);
@@ -958,7 +995,7 @@ describe("flow slot (G3)", () => {
 describe("a buffered escape right after a view-changing key (round 8)", () => {
   const GAMMA = { instanceId: ID_C, sessionId: "session-gamma", name: "gamma", cwd: "/g" };
 
-  /** One transition: the flow, the outgoing view, and the key that leads to the next talk view. */
+  /** One transition: the flow, the outgoing view, and the input that leads to the next talk view. */
   interface Transition {
     readonly flow: Promise<void>;
     readonly view: FakeNode;
@@ -981,7 +1018,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
         const flow = h.run();
         await flush();
         const view = h.tui.top.node;
-        return { flow, view, trigger: () => press(view, "h") };
+        return { flow, view, trigger: () => h.tui.key("h") };
       },
     ],
     [
@@ -990,7 +1027,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
         const flow = h.run();
         await flush();
         const view = await composeTo(h, ID_B, "hello");
-        return { flow, view, trigger: () => press(view, "enter") };
+        return { flow, view, trigger: () => h.tui.key("enter") };
       },
     ],
     [
@@ -1000,8 +1037,8 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
         await flush();
         const view = await confirmTo(h, ID_B, "hello");
         const { code } = codeOf(view);
-        press(view, code.charAt(0));
-        return { flow, view, trigger: () => press(view, code.charAt(1)) };
+        h.tui.key(code.charAt(0));
+        return { flow, view, trigger: () => h.tui.key(code.charAt(1)) };
       },
     ],
     [
@@ -1010,7 +1047,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
         const flow = h.run();
         await flush();
         const view = await confirmTo(h, ID_B, "hello");
-        return { flow, view, trigger: () => press(view, "escape") };
+        return { flow, view, trigger: () => h.tui.key("escape") };
       },
     ],
     [
@@ -1021,7 +1058,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
         await flush();
         const view = h.tui.top.node;
         expect(view.kind).toBe("editor");
-        return { flow, view, trigger: () => press(view, "ctrl+s") };
+        return { flow, view, trigger: () => h.tui.key("ctrl+s") };
       },
     ],
   ])(
@@ -1029,22 +1066,46 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
     async (_name, open) => {
       const h = await harness();
       const { flow, view, trigger } = await open(h);
-      const outgoing = h.tui.views.find((candidate) => candidate.node === view);
+      expect(h.tui.focused?.node).toBe(view);
       const signal = h.services.lives[0]?.signal;
       const mounted = h.tui.views.length;
       const notices = h.tui.notices.length;
       trigger();
-      // No microtask ran: omp still shows the outgoing view, so the next key goes to it.
-      expect(outgoing?.closed).toBe(false);
-      expect(press(view, "escape")).toBe(true);
+      // No microtask ran: omp routes the next key to its focused node, which must be the outgoing view.
+      const consumed = h.tui.key("escape");
+      expect(h.tui.composerInput).toEqual([]);
+      expect(consumed).toBe(true);
       expect(signal?.aborted).toBe(true);
       await flow;
       await flush();
-      // The flow ended before the next talk view mounted; nothing went out.
+      // The flow ended before the next talk view mounted; nothing went out, and the composer has the focus again.
       expect(h.tui.views).toHaveLength(mounted);
       expect(h.tui.views.every((candidate) => candidate.closed)).toBe(true);
+      expect(h.tui.focused).toBeUndefined();
       expect(h.services.sends).toEqual([]);
       expect(h.tui.notices).toHaveLength(notices);
     },
   );
+
+  it("keeps the text at enter in compose: a paste and an edit after the key change neither the held view nor the send (round 9)", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const compose = await composeTo(h, ID_B, "hello");
+    // The open field takes a paste.
+    h.tui.paste(" there");
+    expect(prop(compose, "text")).toBe("hello there");
+    h.tui.key("enter");
+    // omp routes a paste of the same input read to the held view, and Tern can report an edit to it.
+    h.tui.paste(" pasted");
+    appendText(compose, " typed");
+    expect(prop(compose, "text")).toBe("hello there");
+    expect(h.tui.composerInput).toEqual([]);
+    await flush();
+    const confirm = h.tui.top.node;
+    expect(linesOf(confirm)).toContain("Text: hello there");
+    typeCode(confirm, codeOf(confirm).code);
+    await flow;
+    expect(h.services.sends.map((sent) => sent.text)).toEqual(["hello there"]);
+  });
 });

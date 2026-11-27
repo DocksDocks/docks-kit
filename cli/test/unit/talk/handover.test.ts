@@ -7,6 +7,7 @@ import {
   type Harness,
   ID_B,
   ID_C,
+  appendText,
   codeOf,
   fire,
   flush,
@@ -186,6 +187,37 @@ describe("/talk handover <target> (G2, G6)", () => {
     press(review, "escape");
     await flow;
     expect(h.services.sends).toEqual([]);
+  });
+
+  it("keeps the text at ctrl+s: a paste and an edit after the key change neither the held review, the review after escape, nor the send (round 9)", async () => {
+    const h = await harness();
+    const { flow } = await handoverToGamma(h);
+    const review = reviewOf(h);
+    replaceText(review, "reviewed");
+    // The open field takes a paste at the caret.
+    h.tui.paste(" text");
+    expect(prop(review, "text")).toBe("reviewed text");
+    h.tui.key("ctrl+s");
+    // omp routes a paste of the same input read to the held review, and Tern can report an edit to it.
+    h.tui.paste(" pasted");
+    appendText(review, " typed");
+    expect(prop(review, "text")).toBe("reviewed text");
+    expect(h.tui.composerInput).toEqual([]);
+    await flush();
+    // escape in the confirm view returns to the review with the text at ctrl+s.
+    h.tui.key("escape");
+    await flush();
+    expect(prop(reviewOf(h), "text")).toBe("reviewed text");
+    h.tui.key("ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    expect(linesOf(confirm)).toContain("Text: reviewed text");
+    typeCode(confirm, codeOf(confirm).code);
+    await flow;
+    expect(h.services.sends).toEqual([
+      { pair: GAMMA_PAIR, text: "reviewed text", kind: "handover" },
+    ]);
+    expect(h.tui.composerInput).toEqual([]);
   });
 
   it("does not approve while no editable row fits the screen (C4)", async () => {
