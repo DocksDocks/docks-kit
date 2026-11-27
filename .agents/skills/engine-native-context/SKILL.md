@@ -16,7 +16,7 @@ metadata:
     - path: cli/src/engine-native/jq.ts
       lines: "1-38"
     - path: cli/src/engine-native/parseHelp.ts
-      lines: "1-26"
+      lines: "1-25"
     - path: cli/src/engine-native/os/targets.ts
       lines: "1-64"
     - path: cli/test/unit/engine.test.ts
@@ -39,7 +39,7 @@ metadata:
       lines: "1-18"
     - path: cli/test/lib/goldenProveRed.ts
       lines: "1-63"
-  updated: "2026-11-19"
+  updated: "2026-11-27"
 ---
 
 # EngineNative Golden Contract
@@ -106,6 +106,33 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
   snapshot does not depend on the recording host.
 - Stubs record child-process argv (`goldenResources.ts` stub runner,
   `GOLDEN_ARGV_LOG`), so command shape is part of the contract.
+- A mutation case of `goldenMutationCatalog.ts` can set `env` (extra
+  environment of the run, such as `OMP_PROFILE`) and `seed` (files that it
+  writes below HOME before the run). The driver then compares the sorted entry
+  list, name by name, and the raw bytes of each seeded file (`goldenSnapshot.ts
+  seededTreeProblems`) without the line-ending normalization of the snapshot.
+  A changed byte, a missing seeded file, or a new entry, such as a lock file,
+  fails the case. The check proves that the final names and bytes stayed the
+  same, not that no write happened: a rewrite with the same bytes passes.
+- `goldenResources.ts ompStubBody(npm, profiles)` answers `plugin list --json`
+  with the store that the environment of the omp child selects (`OMP_PROFILE`,
+  else `PI_PROFILE`), so a profile case gives the default store and the named
+  profile distinct rows, and a sync that drops the profile fails the case.
+- `golden-mutation.ts` snapshots each case with `goldenSnapshot.ts
+  snapshotTreeResult`. An entry that it cannot read, such as a deployed file
+  without read permission, fails that case with a problem line, and the
+  matrix goes on. The case then has no golden: the driver compares and records
+  no partial snapshot, and `--update-goldens` writes nothing. The checks that
+  read the tree again (`seededTreeProblems` and the kit plugin checks of a
+  cutover case) also turn a read error into a problem line of the case, not a
+  throw. Each run home, also of the channel checks, goes through
+  `goldenExecution.ts cleanupProblems` and `goldenResources.ts removeTree`,
+  which repairs folder permissions only after a removal error that a missing
+  folder permission can cause (`EACCES`, `EPERM`, or `ENOTEMPTY`, which macOS
+  reports for a folder that it cannot list) and then
+  tries once more: a home that stays fails its case or the channel check, and
+  the case keeps its result. The exit sweep (`removeTemporaryDirs`) prints
+  each temporary folder that stays and goes on with the next.
 
 ## JSON Helpers
 

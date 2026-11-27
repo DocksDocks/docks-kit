@@ -1,9 +1,15 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { snapshotTree } from "../lib/goldenSnapshot";
+import {
+  seededTreeProblems,
+  snapshotTree,
+  snapshotTreeResult,
+  writeSeededTree,
+  type SeededTree,
+} from "../lib/goldenSnapshot";
 
 function withSnapshotRoot(run: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "golden-snapshot-test-"));
@@ -13,6 +19,150 @@ function withSnapshotRoot(run: (root: string) => void): void {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+const SEED: SeededTree = {
+  root: ".pi/agent/intercom",
+  files: { "config.json": '{\r\n  "user": true\r\n}\r\n', "notes/marker": "kept\n" },
+};
+
+describe("snapshotTreeResult", () => {
+  it("gives the whole snapshot of a readable tree", () => {
+    withSnapshotRoot((root) => {
+      mkdirSync(join(root, "plugin"));
+      writeFileSync(join(root, "plugin", "talk.js"), "bundle\n");
+
+      expect(snapshotTreeResult(root)).toEqual({ kind: "snapshot", tree: snapshotTree(root) });
+    });
+  });
+
+  // A permission does not stop root, and Windows ignores the POSIX mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "gives a problem and no partial snapshot when a file cannot be read",
+    () => {
+      withSnapshotRoot((root) => {
+        writeFileSync(join(root, "a-readable"), "kept\n");
+        writeFileSync(join(root, "b-unreadable"), "secret\n");
+        chmodSync(join(root, "b-unreadable"), 0o000);
+
+        // The whole result: a failure holds no tree, so no partial snapshot leaks out.
+        expect(snapshotTreeResult(root)).toEqual({
+          kind: "failed",
+          problem: expect.stringMatching(/^ {2}the snapshot of HOME cannot be read: .*EACCES/),
+        });
+      });
+    },
+  );
+});
+
+describe("seededTreeProblems", () => {
+  it("finds no problem when the seeded folder keeps its bytes and entries", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+
+      expect(seededTreeProblems(root, SEED)).toEqual([]);
+    });
+  });
+
+  // A permission does not stop root, and Windows ignores the POSIX mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a seeded file that cannot be read as a problem, without a throw",
+    () => {
+      withSnapshotRoot((root) => {
+        writeSeededTree(root, SEED);
+        chmodSync(join(root, ".pi", "agent", "intercom", "config.json"), 0o000);
+
+        expect(seededTreeProblems(root, SEED)).toEqual([
+          expect.stringMatching(
+            /^ {2}seeded file \.pi\/agent\/intercom\/config\.json cannot be read: .*EACCES/,
+          ),
+        ]);
+      });
+    },
+  );
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a seeded folder that cannot be listed as a problem, without a throw",
+    () => {
+      withSnapshotRoot((root) => {
+        writeSeededTree(root, SEED);
+        const notes = join(root, ".pi", "agent", "intercom", "notes");
+        chmodSync(notes, 0o000);
+        try {
+          expect(seededTreeProblems(root, SEED)).toEqual([
+            expect.stringMatching(
+              /^ {2}seeded folder \.pi\/agent\/intercom entries cannot be read: .*EACCES/,
+            ),
+            expect.stringMatching(
+              /^ {2}seeded file \.pi\/agent\/intercom\/notes\/marker cannot be read: .*EACCES/,
+            ),
+          ]);
+        } finally {
+          // The cleanup must list the folder.
+          chmodSync(notes, 0o700);
+        }
+      });
+    },
+  );
+
+  it("compares raw bytes, so a CRLF to LF rewrite is a problem", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      writeFileSync(
+        join(root, ".pi", "agent", "intercom", "config.json"),
+        '{\n  "user": true\n}\n',
+      );
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        "  seeded file .pi/agent/intercom/config.json changed its bytes",
+      ]);
+    });
+  });
+
+  it("reports a new entry, such as a sync lock file, and a missing entry", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      const folder = join(root, ".pi", "agent", "intercom");
+      writeFileSync(join(folder, ".docks-kit-sync-lock.db"), "");
+      rmSync(join(folder, "notes", "marker"));
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        '  seeded folder .pi/agent/intercom entries differ: expected ["config.json","notes","notes/marker"] actual [".docks-kit-sync-lock.db","config.json","notes"]',
+        "  seeded file .pi/agent/intercom/notes/marker is missing",
+      ]);
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "reports each missing file when one name with a line break joins like two expected names",
+    () => {
+      withSnapshotRoot((root) => {
+        const seed: SeededTree = { root: "seeded", files: { a: "first\n", b: "second\n" } };
+        writeSeededTree(root, seed);
+        const folder = join(root, "seeded");
+        rmSync(join(folder, "a"));
+        rmSync(join(folder, "b"));
+        writeFileSync(join(folder, "a\nb"), "joined\n");
+
+        expect(seededTreeProblems(root, seed)).toEqual([
+          '  seeded folder seeded entries differ: expected ["a","b"] actual ["a\\nb"]',
+          "  seeded file seeded/a is missing",
+          "  seeded file seeded/b is missing",
+        ]);
+      });
+    },
+  );
+
+  it("reports a seeded folder that the run removed", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      rmSync(join(root, ".pi"), { recursive: true });
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        "  seeded folder .pi/agent/intercom is missing",
+      ]);
+    });
+  });
+});
 
 describe("snapshotTree", () => {
   it("hashes binary CRLF bytes without text normalization", () => {

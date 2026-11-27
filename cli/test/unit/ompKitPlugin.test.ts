@@ -49,7 +49,6 @@ function testCtx(dryRun = false, stdout: Array<string> = [], stderr: Array<strin
     home,
     dryRun,
     verbose: false,
-    skipPluginRefresh: false,
     nextStepTriggers: {
       ompRestart: false,
     },
@@ -79,6 +78,7 @@ describe("omp kit plugin files", () => {
       "./extensions/hygiene.ts",
       "./extensions/verify-gate.ts",
       "./extensions/context-tree-nudge.ts",
+      "./extensions/talk.js",
     ]);
     // Each extension entry imports its core by a relative path, so the core must deploy beside it.
     for (const file of ["verify-gate-core.ts", "context-tree-core.ts"]) {

@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const ownerUid = process.getuid?.() ?? -1;
   const entries: Array<{ name: string; isDirectory: () => boolean }> = [];
-  const stats = new Map<string, { uid: number; mtimeMs: number }>();
+  const stats = new Map<
+    string,
+    { uid: number; mtimeMs: number; mode?: number; isDirectory?: () => boolean }
+  >();
   const ownerFiles = new Map<string, string>();
   const lstatSync = vi.fn((path: string) => {
     const stat = stats.get(path);
@@ -22,7 +25,9 @@ const mocks = vi.hoisted(() => {
   const readdirSync = vi.fn(() => entries);
   const rmSync = vi.fn();
   const writeFileSync = vi.fn();
+  const chmodSync = vi.fn();
   return {
+    chmodSync,
     entries,
     lstatSync,
     mkdtempSync,
@@ -40,6 +45,7 @@ vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof FsModule>("node:fs");
   return {
     ...actual,
+    chmodSync: mocks.chmodSync,
     lstatSync: mocks.lstatSync,
     mkdtempSync: mocks.mkdtempSync,
     readFileSync: mocks.readFileSync,
@@ -56,6 +62,8 @@ vi.mock("node:os", async () => {
 import {
   childEnv,
   cleanupTemporaryDirs,
+  removeTemporaryDirs,
+  removeTree,
   makeStubDir,
   sweepStaleTemporaryDirs,
   temporaryDir,
@@ -219,6 +227,71 @@ describe("golden temporary resources", () => {
     expect(mocks.rmSync).toHaveBeenCalledWith(path, { recursive: true, force: true });
     expect(mocks.rmSync).toHaveBeenCalledWith(`${path}.owner-pid`, { force: true });
   });
+
+  it("reports each temporary folder that it cannot remove and goes on with the next", () => {
+    const stuck = temporaryDir("golden-home-stuck-");
+    const next = temporaryDir("golden-stubs-next-");
+    mocks.rmSync.mockImplementation((path) => {
+      if (path === stuck) throw Object.assign(new Error("removal denied"), { code: "EPERM" });
+    });
+
+    const problems = removeTemporaryDirs();
+
+    expect(problems).toEqual([
+      `golden: temporary folder ${stuck} cannot be removed: removal denied`,
+    ]);
+    // The marker of a folder that stays lets a later stale sweep find its owner.
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(`${stuck}.owner-pid`, expect.anything());
+    expect(mocks.rmSync).toHaveBeenCalledWith(next, { recursive: true, force: true });
+    expect(mocks.rmSync).toHaveBeenCalledWith(`${next}.owner-pid`, { force: true });
+  });
+
+  // Windows takes no permission repair, so only POSIX reaches the `lstat` guard.
+  it.skipIf(process.platform === "win32")(
+    "changes no permission and does not descend when lstat shows no folder",
+    () => {
+      const link = "/golden-test-tmp/golden-home-link";
+      mocks.stats.set(link, {
+        uid: mocks.ownerUid,
+        mtimeMs: NOW_MS,
+        mode: 0,
+        isDirectory: () => false,
+      });
+      mocks.rmSync.mockImplementation(() => {
+        throw Object.assign(new Error("removal denied"), { code: "EACCES" });
+      });
+
+      expect(removeTree(link)).toBe("removal denied");
+      expect(mocks.lstatSync).toHaveBeenCalledWith(link);
+      expect(mocks.chmodSync).not.toHaveBeenCalled();
+      expect(mocks.readdirSync).not.toHaveBeenCalled();
+    },
+  );
+
+  // macOS reports ENOTEMPTY when a folder below holds entries that it cannot list.
+  it.skipIf(process.platform === "win32")(
+    "repairs folder permissions and tries once more after ENOTEMPTY",
+    () => {
+      const home = "/golden-test-tmp/golden-home-locked";
+      mocks.stats.set(home, {
+        uid: mocks.ownerUid,
+        mtimeMs: NOW_MS,
+        mode: 0o040000,
+        isDirectory: () => true,
+      });
+      let removals = 0;
+      mocks.rmSync.mockImplementation(() => {
+        removals += 1;
+        if (removals === 1) {
+          throw Object.assign(new Error("Directory not empty"), { code: "ENOTEMPTY" });
+        }
+      });
+
+      expect(removeTree(home)).toBeUndefined();
+      expect(mocks.chmodSync).toHaveBeenCalledWith(home, 0o040700);
+      expect(removals).toBe(2);
+    },
+  );
 
   it("skips foreign directories and continues after a removal failure", () => {
     const deadPid = 41_003;

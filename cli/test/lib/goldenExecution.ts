@@ -19,8 +19,15 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { hostOs } from "../../src/engine-native/os";
 
 import { BUN_RUNTIME, cliEntry } from "./cliEntry";
-import { FIXTURES_DIR, REPO_DIR, childHostId, readStubHost, temporaryDir } from "./goldenResources";
-import { normalizeOutput } from "./goldenSnapshot";
+import {
+  FIXTURES_DIR,
+  REPO_DIR,
+  childHostId,
+  readStubHost,
+  removeTree,
+  temporaryDir,
+} from "./goldenResources";
+import { normalizeOutput, writeSeededTree, type SeededTree } from "./goldenSnapshot";
 
 const BUN_INSTALL_CACHE_DIR = temporaryDir("golden-bun-cache-");
 const BUN_RUNTIME_TRANSPILER_CACHE_PATH = temporaryDir("golden-bun-transpiler-");
@@ -101,6 +108,8 @@ interface RunOpts {
   readonly nativeHost?: boolean;
   /** Working directory of the child; the repository root by default. */
   readonly cwd?: string;
+  /** Files that `runEngine` writes below HOME before the run, with their exact bytes. */
+  readonly seed?: SeededTree;
 }
 
 function childArgv(args: ReadonlyArray<string>, opts: RunOpts): Array<string> {
@@ -171,6 +180,7 @@ export function runEngine(
 ): EngineRun {
   requirePairedStubHost(stubDir, opts);
   const home = materializeHome("native", fixture, opts.reuseHome);
+  if (opts.seed !== undefined) writeSeededTree(home, opts.seed);
   const argvLog = join(home, ".golden-argv.log");
   writeFileSync(argvLog, "");
 
@@ -279,8 +289,26 @@ export function readArgvLog(run: EngineRun): string {
   return log.replaceAll(run.home, "<HOME>").replaceAll(run.home.replaceAll("\\", "/"), "<HOME>");
 }
 
-export function cleanup(runs: Array<EngineRun>): void {
-  for (const run of runs) rmSync(run.home, { recursive: true, force: true });
+/**
+ * Remove the home of each run with `goldenResources.ts removeTree`, which
+ * repairs folder permissions after a removal error that a missing folder
+ * permission can cause. Returns one problem line for each home that stays, so
+ * a case keeps its result and reports the problem; it never throws.
+ */
+export function cleanupProblems(runs: ReadonlyArray<Pick<EngineRun, "home">>): Array<string> {
+  const problems: Array<string> = [];
+  for (const run of runs) {
+    const problem = removeTree(run.home);
+    if (problem !== undefined)
+      problems.push(`  the run home ${run.home} cannot be removed: ${problem}`);
+  }
+  return problems;
+}
+
+/** `cleanupProblems`, for a caller without a case result: a problem throws. */
+export function cleanup(runs: ReadonlyArray<Pick<EngineRun, "home">>): void {
+  const problems = cleanupProblems(runs);
+  if (problems.length > 0) throw new Error(problems.join("\n"));
 }
 
 export function checkedSpawnExitCode(

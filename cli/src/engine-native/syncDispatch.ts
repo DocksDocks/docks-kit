@@ -44,13 +44,6 @@ function syncLockWaitMs(err: ErrorSink): number {
 }
 
 /**
- * The tokens that skip the sync lock. `-h` and `--help` make `parseArgs`
- * print the usage or an error and exit before the sync writes a file. A
- * `--dry-run` sync writes no kit file.
- */
-const UNLOCKED_TOKENS: Record<string, true> = { "--dry-run": true, "-h": true, "--help": true };
-
-/**
  * Run `body` under each lock of `paths`, taken in that order. When another
  * sync keeps a lock past the wait bound, print the held line and return 1
  * without a call to `body`. Each taken lock goes when the run ends, also when
@@ -89,16 +82,12 @@ async function withKitLocks(
 
 /**
  * Run `body` under the sync lock `syncLockPath(ctx.home)`. Two syncs of the
- * same home meet at this lock. A dry run takes no lock: `args` holds one of
- * `UNLOCKED_TOKENS`, or `ctx.dryRun` is true. `makeCtx` sets `ctx.dryRun`
- * from the `DRY_RUN` env global only on the channel that reads env globals.
+ * same home meet at this lock. A dry run takes no lock: `--dry-run` or the
+ * `DRY_RUN` env global sets `ctx.dryRun`. `makeCtx` reads the env global only
+ * on the channel that reads env globals.
  */
-async function withSyncLock(
-  ctx: Ctx,
-  args: ReadonlyArray<string>,
-  body: () => Promise<number>,
-): Promise<number> {
-  if (ctx.dryRun || args.some((arg) => Object.hasOwn(UNLOCKED_TOKENS, arg))) return await body();
+async function withSyncLock(ctx: Ctx, body: () => Promise<number>): Promise<number> {
+  if (ctx.dryRun) return await body();
   return await withKitLocks(ctx.services.logger.err, [syncLockPath(ctx.home)], true, body);
 }
 
@@ -160,22 +149,24 @@ export async function withHomeAndFolderLocks(
 }
 
 /**
- * Run a sync. The sync lock comes first, then the folder locks of the omp
- * folders, which `runSync` resolves after `parseArgs` reads the flags.
+ * Run a sync. `parseArgs` reads the flags first, so an unknown argument exits
+ * 2 and `-h` or `--help` exits 0 before any lock or write, and `--dry-run`
+ * sets `ctx.dryRun` before the lock check. The sync lock comes next, then the
+ * folder locks of the omp folders that `runSync` resolves.
  */
 export async function engineSync(ctx: Ctx, args: ReadonlyArray<string>): Promise<number> {
-  return await withSyncLock(ctx, args, () => runSync(ctx, args));
+  parseArgs(ctx, args);
+  return await withSyncLock(ctx, () => runSync(ctx));
 }
 
-async function runSync(ctx: Ctx, args: ReadonlyArray<string>): Promise<number> {
-  parseArgs(ctx, args);
+async function runSync(ctx: Ctx): Promise<number> {
   // The folders that hold omp files. A writing sync creates its folders
   // anyway, so `withFolderLocks` creates each missing one under the locks of
   // its ancestors in the set. The omp folders are resolved once, here: the
   // omp pipeline and its omp children use these paths, so a data root that
   // appears after the locks cannot move them.
   const omp = ompWriteFolders(ctx);
-  const folders = [omp.paths.agentDir, omp.intercomDir, omp.paths.dataRoot];
+  const folders = [omp.paths.agentDir, omp.paths.dataRoot];
   return await withFolderLocks(ctx, folders, () => runPipeline(ctx, omp));
 }
 

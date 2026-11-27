@@ -39,12 +39,6 @@ const dryRun = Flag.Boolean("dry-run").pipe(
   Flag.withDescription("Preview without applying"),
   Flag.withDefault(false),
 );
-const skipPluginRefresh = Flag.Boolean("skip-plugin-refresh").pipe(
-  Flag.withDescription(
-    "Install missing plugins but skip refresh-only updates for existing plugins",
-  ),
-  Flag.withDefault(false),
-);
 const verbose = Flag.Boolean("verbose").pipe(
   Flag.withAlias("v"),
   Flag.withDescription("Also print no-op confirmations (already in sync, up to date, left as-is)"),
@@ -55,14 +49,12 @@ export const syncCommand = Command.make(
   "sync",
   {
     dryRun,
-    skipPluginRefresh,
     verbose,
   },
   (config) =>
     Effect.gen(function* () {
       const args: Array<string> = ["sync"];
       if (config.dryRun) args.push("--dry-run");
-      if (config.skipPluginRefresh) args.push("--skip-plugin-refresh");
       if (config.verbose) args.push("--verbose");
 
       // Not on --dry-run: the nudge's git fetch writes FETCH_HEAD/remote

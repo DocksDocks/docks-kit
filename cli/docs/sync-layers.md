@@ -8,9 +8,9 @@ that points into one of those folders makes omp's files go there. omp uses
 does not move the agent folder, and only after the omp folder under it
 exists. Sync also writes the kit plugin to `~/.docks-kit/omp-plugin`.
 
-## omp (→ resolved agent dir, intercom root)
+## omp (→ resolved agent dir)
 
-AGENTS.md, mcp.json, and intercom config.json are whole-file deploys.
+AGENTS.md and mcp.json are whole-file deploys.
 config.yml and models.yml are deep-merged (SoT keys win, mapping nodes merge,
 deployed-only keys survive; config.yml also drops stale slash-bearing
 `retry.fallbackChains` wildcards). A SoT list replaces the deployed list, except
@@ -27,8 +27,8 @@ ship, `providers.webSearchOrder` at any value, and the retired
 it still matches the shipped block.
 Directories are mode 0700 and files mode 0600. Then the plugin pass reads the
 inventory from `omp plugin list --json`, tries to retire the former marketplace
-plugins (user-scope installs only; see below), installs `pi-intercom` at its
-`SoT/toolchain.json` pin, and links the kit plugin `docks-kit-omp`.
+plugins (user-scope installs only; see below), and links the kit plugin
+`docks-kit-omp`.
 
 The kit plugin now ships the docks and plan-lifecycle skills, the
 `code-reviewer` and `plan-reviewer` agents, and the `verify-gate` and
@@ -50,23 +50,46 @@ tries again. Otherwise:
 - A failed uninstall or removal goes to the failure ledger with the manual
   command, for example
   `omp plugin operation failed for docks@docks: <detail>; run manually: omp plugin uninstall --scope user docks@docks`.
-- When the inventory cannot be read, the sync warns
-  `omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; pi-intercom and the kit plugin take the full refresh path`.
+- When the inventory cannot be read (omp exits non-zero or prints no valid
+  inventory), the sync warns
+  `omp plugin inventory unavailable — the pi-intercom check and the retirement of the docks marketplace plugins are skipped until the next sync; sync runs omp plugin link for the kit plugin`.
+  No inventory row shows that the kit plugin link is current, so the sync
+  runs `omp plugin link` for it. Without Git, the warning is
+  `omp plugin inventory unavailable — the pi-intercom check is skipped until the next sync; without git, sync runs no omp plugin change`,
+  and the sync runs no link. In both cases the summary shows
+  `omp plugins: unknown (plugin inventory unavailable)`, unless the link
+  succeeded.
 - The sync removes the folder `~/.cache/docks-kit/omp-plugin-upgrades/` of the
   retired plugin upgrade log when it exists.
 
-`--skip-plugin-refresh` does not skip the retirement or the kit plugin link. It
-only keeps a present `pi-intercom` at its installed version. A repeat run after
-a successful retirement runs no uninstall and no removal.
+A repeat run after a successful retirement runs no uninstall and no removal.
+
+Sync no longer installs, updates, or configures pi-intercom. The `talk` tool
+of the kit plugin replaces it. While the inventory lists `pi-intercom`, each
+real sync prints one notice, for example
+`Notice: the omp plugin store <data root>/plugins lists pi-intercom, version 0.19.0. docks-kit no longer installs or updates pi-intercom. The talk tool of the kit plugin replaces it. pi-intercom 0.19.0 from npm does not load on omp 19.2 or later.`
+The notice reads `unknown version` when the row has no version, as for a
+linked package, or a version that is not safe to print. It gives no removal
+command. Sync does not change the pi-intercom package, its old
+`intercom/config.json`, or its state folder. A dry run and a run without omp
+print no notice.
+
+Only the omp plugin commands need Git: the uninstalls, the marketplace
+removal, and the kit plugin link. Without Git, a real sync still deploys the
+kit plugin files (`syncKitPlugin`), so a kit plugin that omp already links
+loads the new files after a restart. It runs `omp plugin list --json`, prints
+the notice when it applies, counts the kit plugin that the inventory lists in
+the summary, and runs no other omp plugin command. omp can copy its legacy
+marketplace registry into the active data root during that command, as it
+does on any plugin command.
 
 After a plugin operation, the sync prints one line that names each operation,
 for example
-`omp plugins synced: docks@docks uninstalled, plan-lifecycle@docks uninstalled, docks marketplace removed, pi-intercom 0.19.0 (new), docks-kit-omp linked`.
+`omp plugins synced: docks@docks uninstalled, plan-lifecycle@docks uninstalled, docks marketplace removed, docks-kit-omp linked`.
 Each uninstall sets the restart next step
 `Restart omp to load any refreshed plugins, skills, or tools.`, because the
-retired plugins ship extensions, and omp loads extensions only at startup. An
-npm install, a link, and a changed kit plugin file or omp config file also set
-it.
+retired plugins ship extensions, and omp loads extensions only at startup. A
+link and a changed kit plugin file or omp config file also set it.
 
 A dry run invokes no omp subcommand. It prints
 `[dry-run] omp plugin uninstall --scope user docks@docks` and the same line
@@ -82,10 +105,7 @@ directory is `<config root>/agent`, where the config root is
 directory never moves under XDG. Only the data root that holds
 `marketplaces.json` does: on Linux and macOS, with no agent-dir override
 active, an existing `$XDG_DATA_HOME/omp` (or `$XDG_DATA_HOME/omp/profiles/<name>`
-for a named profile) is adopted. Under a named profile, the intercom file goes
-into `<agent directory>/intercom`. Otherwise it goes into
-`$PI_CODING_AGENT_DIR/intercom` when that variable is set, else
-`~/.pi/agent/intercom`.
+for a named profile) is adopted.
 
 ## Additive by default
 

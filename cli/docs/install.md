@@ -129,10 +129,9 @@ worktree and an upstream; `git pull --ff-only`, then re-runs
 `package.json`); a kit home under `node_modules` is a global package
 (`bun add -g --no-cache docks-kit@latest` / `npm install -g --prefer-online docks-kit@latest`,
 so a package cache from before a release cannot keep the old version). The chained sync is a
-plain flag-less `docks-kit sync`. It also refreshes plugins, even when the kit
-is already current: it moves `pi-intercom` to its pinned version. Pass
-`--no-sync`, then run `docks-kit sync --skip-plugin-refresh` to keep a present
-`pi-intercom` at its installed version.
+plain flag-less `docks-kit sync`. It runs also when the kit is already
+current, so it repairs drift of the deployed files and of the kit plugin link.
+Pass `--no-sync` to skip it.
 Every `docks-kit sync` except `--dry-run` also does a best-effort behind-upstream
 check and nudges when the checkout is stale (silent offline / detached / no git).
 

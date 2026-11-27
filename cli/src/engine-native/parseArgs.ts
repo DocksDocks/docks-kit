@@ -15,9 +15,6 @@ export function parseArgs(ctx: Ctx, args: ReadonlyArray<string>): void {
       case "--dry-run":
         ctx.dryRun = true;
         continue;
-      case "--skip-plugin-refresh":
-        ctx.skipPluginRefresh = true;
-        continue;
       case "--verbose":
         ctx.verbose = true;
         continue;

@@ -19,7 +19,6 @@ export function printUsage(ctx: Ctx): void {
   echo("");
   echo("Global flags");
   echo("  --dry-run         preview without applying");
-  echo("  --skip-plugin-refresh  install missing plugins but skip refresh-only updates");
   echo(
     "  --verbose         also print no-op confirmations (already in sync, up to date, left as-is)",
   );

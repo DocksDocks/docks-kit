@@ -1,6 +1,6 @@
 ---
 name: toolchain-context
-description: "Use when modifying cli/src/commands/toolchain.ts MANAGED; cli/src/engine-native/modes.ts modeToolchain; cli/src/engine-native/toolchain.ts report, installedVersion, belowFloor, latestUpstream, or outdatedReport; cli/src/engine-native/bun.ts bunBootstrap; SoT/toolchain.json tool entries, verified pins, or upstream fields; or the Bun managed install. Not for the pi-intercom install pass (use omp-sync-context)."
+description: "Use when modifying cli/src/commands/toolchain.ts MANAGED; cli/src/engine-native/modes.ts modeToolchain; cli/src/engine-native/toolchain.ts report, installedVersion, belowFloor, latestUpstream, or outdatedReport; cli/src/engine-native/bun.ts bunBootstrap; SoT/toolchain.json tool entries, verified pins, or upstream fields; or the Bun managed install. Not for the omp plugin pass (use omp-sync-context)."
 user-invocable: false
 metadata:
   pattern: tool-wrapper
@@ -10,7 +10,7 @@ metadata:
     - path: cli/src/engine-native/modes.ts
       lines: "1-67"
     - path: cli/src/engine-native/toolchain.ts
-      lines: "1-253"
+      lines: "1-237"
     - path: cli/src/engine-native/bun.ts
       lines: "1-120"
     - path: cli/src/engine-native/deps.ts
@@ -18,12 +18,12 @@ metadata:
     - path: cli/src/engine-native/kitDb.ts
       lines: "1-240"
     - path: cli/src/engine-native/ompSync.ts
-      lines: "1-146"
+      lines: "1-122"
     - path: cli/src/engine-native/sharedTypes.d.ts
       lines: "1-23"
     - path: SoT/toolchain.json
-      lines: "1-18"
-  updated: "2026-11-19"
+      lines: "1-15"
+  updated: "2026-11-27"
 ---
 
 # Toolchain Verified-Version Floors
@@ -48,7 +48,7 @@ the exact `verified` pin from `SoT/toolchain.json`. The exemptions and their
 reasons live in that file's `$comment` (supply-chain stance). Any new install
 surface, a new marketplace or plugin source included, needs a manifest pin first.
 verify: `grep -rn '"verified")' cli/src/engine-native` lists every `verified`
-read; each install site (`bun.ts`, `ompPlugins.ts`) must
+read; each install site (`bun.ts`) must
 appear there. `deps.ts` also appears: its Bun install hint prints the same pin
 and installs nothing.
 verify: `bunx vitest run cli/test/unit/deps.test.ts -t "pinned download-then-run Bun hint"`.
@@ -56,9 +56,8 @@ verify: `bunx vitest run cli/test/unit/deps.test.ts -t "pinned download-then-run
 
 ## Manifest Split
 
-- `kind: check/managed/pin` describes whether the tool is reported, managed by
-  the kit, or a version pin for a package installed through another tool
-  (`omp install`, named by the required `via` field). `check` rows such as jq and curl are report-only;
+- `kind: check/managed` describes whether the tool is only reported or
+  managed by the kit. `check` rows such as jq and curl are report-only;
   consumers decide whether a missing optional tool prevents an operation.
 - `policy: present` installs a missing managed tool and leaves a present tool
   alone.
@@ -93,9 +92,10 @@ verify: `bunx vitest run cli/test/unit/toolchain.test.ts -t "engine toolchain ve
 2. `latestUpstream` reads the kit cache (`kitDb.ts readCache`, key
    `upstream:<tool>`, max age `toolchain.ts UPSTREAM_CACHE_MS`) unless
    `--refresh` is set.
-3. On a miss it reads the npm registry `latest` version, or the GitHub latest
-   release tag with `tagPrefix` stripped (a tag without that prefix fails the
-   lookup). `GITHUB_TOKEN` or `GH_TOKEN` adds a bearer token.
+3. On a miss it reads the GitHub latest release tag of `upstream.github` with
+   `tagPrefix` stripped (a tag without that prefix fails the lookup). GitHub
+   is the only upstream source. `GITHUB_TOKEN` or `GH_TOKEN` adds a bearer
+   token.
 4. Only a successful lookup is cached. A failure prints
    `lookup failed: <reason>` in the row, and the command still exits 0.
 5. `isNewer(latest, verified)` sets `newer`; anything else is `current`.
@@ -128,7 +128,7 @@ verify: `grep -rn 'bunBootstrap(' cli/src/engine-native` lists the callers;
   Unprobed: no test fails on a new `modeToolchain` case that `MANAGED` lacks.
   Compare both lists by hand (verify: `grep -n "MANAGED = " cli/src/commands/toolchain.ts`
   and `grep -nE 'case "|managed tools only' cli/src/engine-native/modes.ts`).
-- Installer downloads and pinned npm and `omp install` packages are supply-chain
+- Installer downloads and pinned packages are supply-chain
   sensitive. Bump `verified` only after testing the release.
 - The public CLI reaches Bun bootstrap only after the supported-host check
   (`engine.ts requireSupportedHost`).

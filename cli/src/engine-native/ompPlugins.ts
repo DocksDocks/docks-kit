@@ -1,7 +1,7 @@
 /**
  * EngineNative omp plugin pass: the retirement of the docks marketplace
- * plugins, the pinned pi-intercom npm plugin, and the link of the kit plugin
- * that `ompKitPlugin.ts syncKitPlugin` writes. Split from ompSync.ts; the
+ * plugins, the link of the kit plugin that `ompKitPlugin.ts syncKitPlugin`
+ * writes, and the pi-intercom notice. Split from ompSync.ts; the
  * orchestration still lives there.
  *
  * The kit plugin now ships the content of the retired `docks@docks` and
@@ -9,6 +9,10 @@
  * user-scope installs, warns about their project-scope installs, and then
  * removes the `docks` marketplace. A second sync after a successful
  * retirement runs no omp mutation for it.
+ *
+ * Sync no longer installs, updates, or configures pi-intercom; the `talk`
+ * tool of the kit plugin replaces it. While the inventory of the store lists
+ * pi-intercom, each real sync prints one notice and changes nothing for it.
  */
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 
@@ -20,7 +24,6 @@ import { spawnOmp } from "./ompChild";
 import { KIT_PLUGIN_NAME, kitPluginDir } from "./ompKitPlugin";
 import type { OmpPaths } from "./ompPaths";
 import { kitCacheDir } from "./scratch";
-import { field } from "./toolchain";
 
 /** The marketplace plugins whose content the kit plugin now ships. */
 const RETIRED_PLUGIN_IDS = ["docks@docks", "plan-lifecycle@docks"] as const;
@@ -32,7 +35,8 @@ const RETIRED_MARKETPLACE_LABEL = `${RETIRED_MARKETPLACE} marketplace`;
 // -------------------------------------------------------------- plugins ----
 
 interface InstalledNpmPlugin {
-  readonly version: string;
+  /** The `version` string of the row; omp lists a local link without one. */
+  readonly version: string | undefined;
   /** The `node_modules` entry of the plugin, a symbolic link for a linked plugin. */
   readonly path: string | undefined;
 }
@@ -54,16 +58,6 @@ interface InstalledPlugins {
 
 /** One successful plugin operation, named in the sync summary line. */
 type PluginOperation =
-  | {
-      readonly kind: "npm";
-      readonly id: string;
-      /**
-       * Whether the inventory listed the plugin before the operation, or
-       * undefined when that inventory could not be read.
-       */
-      readonly present: boolean | undefined;
-      readonly before: string | undefined;
-    }
   | { readonly kind: "link"; readonly id: string }
   | { readonly kind: "uninstall"; readonly id: string }
   | { readonly kind: "marketplaceRemove" };
@@ -96,22 +90,41 @@ async function installedPluginsFromCli(paths: OmpPaths): Promise<InstalledPlugin
 
   const npm = new Map<string, InstalledNpmPlugin>();
   for (const row of value["npm"]) {
-    if (!isObject(row) || typeof row["name"] !== "string" || typeof row["version"] !== "string")
-      continue;
+    if (!isObject(row) || typeof row["name"] !== "string") continue;
+    const version = typeof row["version"] === "string" ? row["version"] : undefined;
     const path = typeof row["path"] === "string" ? row["path"] : undefined;
-    npm.set(row["name"], { version: row["version"], path });
+    npm.set(row["name"], { version, path });
   }
   return { marketplace, npm };
 }
 
+/** The npm package that sync installed and configured before the `talk` tool replaced it. */
+const PI_INTERCOM = "pi-intercom";
+/** A version that the notice prints as it is: 1 to 64 characters, none of them a control or a space. */
+const NOTICE_VERSION = /^[0-9A-Za-z.+-]{1,64}$/;
+/** Control characters and line breaks, which a one-line terminal text must not hold. */
+const TERMINAL_UNSAFE = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
+
 /**
- * Names one operation. For an npm operation, `after` is the inventory read
- * after all operations; when it does not give a version, only the id remains.
+ * The notice for a store whose inventory lists pi-intercom. `store` is the
+ * plugin store folder; `version` is the `version` of the inventory row. The
+ * store path loses its control characters and line breaks, and a version
+ * outside `NOTICE_VERSION` reads as `unknown version`, so the notice stays one
+ * line of terminal-safe text. The notice gives no removal command: omp
+ * resolves a name at removal time, and no record shows who installed the
+ * package.
  */
-function describeOperation(
-  operation: PluginOperation,
-  after: InstalledPlugins | undefined,
-): string {
+export function piIntercomNotice(store: string, version: string | undefined): string {
+  const safeStore = store.replace(TERMINAL_UNSAFE, "");
+  const installed =
+    version !== undefined && NOTICE_VERSION.test(version)
+      ? `version ${version}`
+      : "unknown version";
+  return `Notice: the omp plugin store ${safeStore} lists ${PI_INTERCOM}, ${installed}. docks-kit no longer installs or updates ${PI_INTERCOM}. The talk tool of the kit plugin replaces it. ${PI_INTERCOM} 0.19.0 from npm does not load on omp 19.2 or later.`;
+}
+
+/** Names one operation. */
+function describeOperation(operation: PluginOperation): string {
   switch (operation.kind) {
     case "link":
       return `${operation.id} linked`;
@@ -119,14 +132,6 @@ function describeOperation(
       return `${operation.id} uninstalled`;
     case "marketplaceRemove":
       return `${RETIRED_MARKETPLACE_LABEL} removed`;
-    case "npm": {
-      const version = after?.npm.get(operation.id)?.version;
-      if (version === undefined) return operation.id;
-      if (operation.present === false) return `${operation.id} ${version} (new)`;
-      if (operation.before === undefined) return `${operation.id} ${version}`;
-      if (operation.before === version) return `${operation.id} ${version} (current)`;
-      return `${operation.id} ${operation.before} -> ${version}`;
-    }
   }
 }
 
@@ -274,8 +279,31 @@ async function retireMarketplacePlugins(
   return operations;
 }
 
-/** Run the plugin pass. `paths` are the omp paths that the sync locked. */
-export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
+/**
+ * The warning of an unavailable inventory when git is present. The pass then
+ * runs `omp plugin link` for the kit plugin, because no inventory row shows
+ * that the link is current.
+ */
+const INVENTORY_UNAVAILABLE =
+  "omp plugin inventory unavailable — the pi-intercom check and the retirement of the docks marketplace plugins are skipped until the next sync; sync runs omp plugin link for the kit plugin";
+/** The warning of an unavailable inventory when git is missing. The pass then changes no plugin. */
+const INVENTORY_UNAVAILABLE_NO_GIT =
+  "omp plugin inventory unavailable — the pi-intercom check is skipped until the next sync; without git, sync runs no omp plugin change";
+
+/**
+ * Run the plugin pass. `paths` are the omp paths that the sync locked.
+ * Returns the number of installed kit plugins, or undefined when the pass
+ * could not read the inventory and linked no kit plugin.
+ *
+ * Only the omp plugin commands (uninstall, marketplace removal, link) need
+ * git. Without git, a real run reads the inventory, warns when it is
+ * unavailable, prints the pi-intercom notice, counts the kit plugin that the
+ * inventory lists, and runs no plugin command. omp itself can copy its legacy
+ * marketplace registry into the active data root during that read, as it
+ * does on any plugin command. A dry run and a run without omp spawn no omp
+ * command and print no notice.
+ */
+export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number | undefined> {
   const { change, clearProgress, echo, progress, verbose, warn } = ctx.services.logger;
 
   if (!ctx.dryRun) removeUpgradeLog(ctx);
@@ -286,20 +314,19 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
       ctx.services.logger,
       "deployed omp config only — plugin pass skipped; re-run sync after installing",
     );
-    return 0;
+    return undefined;
   }
-  if (ctx.services.deps.probe("git").state === "missing") {
+  const gitMissing = ctx.services.deps.probe("git").state === "missing";
+  if (gitMissing) {
     ctx.services.deps.warnMissing(
       "git",
       ctx.services.logger,
-      "omp plugin pass skipped; re-run sync after installing",
+      "omp plugin changes skipped; re-run sync after installing",
     );
-    return 0;
   }
 
-  const piIntercomPin = field("pi-intercom", "verified");
-
   if (ctx.dryRun) {
+    if (gitMissing) return undefined;
     // A dry run reads no inventory, so it previews the uninstall of each retired id.
     for (const pluginId of RETIRED_PLUGIN_IDS) {
       echo(`[dry-run] omp plugin uninstall --scope user ${pluginId}`);
@@ -310,59 +337,30 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
     } else if (registry.kind === "listed") {
       echo(`[dry-run] omp plugin marketplace remove ${RETIRED_MARKETPLACE}`);
     }
-    if (piIntercomPin === "") {
-      warn(
-        "pi-intercom install skipped because SoT/toolchain.json has no verified pi-intercom pin",
-      );
-    } else {
-      echo(`[dry-run] omp install pi-intercom@${piIntercomPin}`);
-    }
     echo(`[dry-run] omp plugin link ${kitPluginDir(ctx.home)}`);
-    return 0;
+    return undefined;
   }
 
   progress("Checking installed omp plugins...");
   const installed = await installedPluginsFromCli(paths);
   clearProgress();
 
-  const operations: Array<PluginOperation> = [];
   if (installed === undefined) {
-    warn(
-      "omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; pi-intercom and the kit plugin take the full refresh path",
-    );
+    warn(gitMissing ? INVENTORY_UNAVAILABLE_NO_GIT : INVENTORY_UNAVAILABLE);
   } else {
-    operations.push(...(await retireMarketplacePlugins(ctx, paths, installed)));
-  }
-
-  let pluginsInstalled =
-    installed === undefined
-      ? 0
-      : (piIntercomPin !== "" && installed.npm.has("pi-intercom") ? 1 : 0) +
-        (installed.npm.has(KIT_PLUGIN_NAME) ? 1 : 0);
-
-  if (piIntercomPin === "") {
-    warn("pi-intercom install skipped because SoT/toolchain.json has no verified pi-intercom pin");
-  } else {
-    const installedVersion = installed?.npm.get("pi-intercom")?.version;
-    const present = installedVersion !== undefined;
-    if (installedVersion === piIntercomPin) {
-      verbose(`omp npm plugin pi-intercom already installed at ${piIntercomPin}`);
-    } else if (present && ctx.skipPluginRefresh === true) {
-      verbose("omp npm plugin pi-intercom already installed; refresh-only update skipped");
-    } else {
-      const args = present
-        ? ["install", "--force", `pi-intercom@${piIntercomPin}`]
-        : ["install", `pi-intercom@${piIntercomPin}`];
-      if (await runPluginCommand(ctx, paths, "pi-intercom", args)) {
-        operations.push({
-          kind: "npm",
-          id: "pi-intercom",
-          present: installed === undefined ? undefined : present,
-          before: installedVersion,
-        });
-        if (!present) pluginsInstalled++;
-      }
+    const piIntercom = installed.npm.get(PI_INTERCOM);
+    if (piIntercom !== undefined) {
+      echo(piIntercomNotice(p(paths.dataRoot, "plugins"), piIntercom.version));
     }
+  }
+  // The kit plugin count that the inventory shows: undefined when the inventory is unavailable.
+  let pluginsInstalled: number | undefined;
+  if (installed !== undefined) pluginsInstalled = installed.npm.has(KIT_PLUGIN_NAME) ? 1 : 0;
+  if (gitMissing) return pluginsInstalled;
+
+  const operations: Array<PluginOperation> = [];
+  if (installed !== undefined) {
+    operations.push(...(await retireMarketplacePlugins(ctx, paths, installed)));
   }
 
   // The kit plugin is linked when omp's entry resolves to the kit directory.
@@ -374,7 +372,7 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
     verbose(`omp kit plugin ${KIT_PLUGIN_NAME} already linked`);
   } else if (await runPluginCommand(ctx, paths, KIT_PLUGIN_NAME, ["plugin", "link", kitDir])) {
     operations.push({ kind: "link", id: KIT_PLUGIN_NAME });
-    if (installed?.npm.has(KIT_PLUGIN_NAME) !== true) pluginsInstalled++;
+    pluginsInstalled = 1;
   }
 
   if (operations.length === 0) {
@@ -382,18 +380,9 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
     return pluginsInstalled;
   }
 
-  // Only an npm operation names a version, so only then a second inventory
-  // read gives the versions that the operations left.
-  let after: InstalledPlugins | undefined;
-  if (operations.some((operation) => operation.kind === "npm")) {
-    progress("Reading omp plugin versions...");
-    after = await installedPluginsFromCli(paths);
-    clearProgress();
-  }
-  const items = operations.map((operation) => describeOperation(operation, after));
-  change(`omp plugins synced: ${items.join(", ")}`);
-  // An install, a link, or an uninstall changes the plugins that omp loads.
-  // A marketplace removal alone changes no loaded plugin.
+  change(`omp plugins synced: ${operations.map(describeOperation).join(", ")}`);
+  // A link or an uninstall changes the plugins that omp loads. A marketplace
+  // removal alone changes no loaded plugin.
   if (operations.some((operation) => operation.kind !== "marketplaceRemove")) {
     ctx.nextStepTriggers.ompRestart = true;
   }

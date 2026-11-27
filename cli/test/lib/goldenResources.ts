@@ -156,19 +156,108 @@ export function registeredTemporaryDirs(): ReadonlyArray<string> {
 }
 
 /**
- * Keep TEMP_DIRS path strings after deletion for snapshot normalization.
- * Cleanup removes each sibling owner marker after its directory.
+ * True for the error codes of a removal that a missing folder permission can
+ * block: `EACCES` and `EPERM`, and `ENOTEMPTY`, which macOS reports when a
+ * folder below holds entries that it cannot list.
  */
-export function cleanupTemporaryDirs(): void {
-  for (const dir of TEMP_DIRS) {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(`${dir}${OWNER_PID_SUFFIX}`, { force: true });
+function mayNeedPermissionRepair(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EPERM" || code === "ENOTEMPTY";
+}
+
+/**
+ * Give the owner read, write, and search permission on `folder` and on each
+ * folder below it, so a recursive removal can list them. Only folders get a
+ * stat; a path that `lstat` does not show as a folder, such as a symbolic
+ * link, keeps its mode and is not entered.
+ */
+function restoreFolderPermissions(folder: string): void {
+  const stat = lstatSync(folder);
+  if (!stat.isDirectory()) return;
+  if ((stat.mode & 0o700) !== 0o700) chmodSync(folder, stat.mode | 0o700);
+  for (const entry of readdirSync(folder, { withFileTypes: true })) {
+    if (entry.isDirectory()) restoreFolderPermissions(join(folder, entry.name));
   }
+}
+
+/**
+ * Remove `path` and everything below it. A sync can leave a nonempty folder
+ * at mode 000: after a removal error that a missing folder permission can
+ * cause on POSIX, this gives the folders below `path` their owner permissions
+ * and tries once more. Returns the message of the last failed removal when
+ * `path` stays, else undefined; it never throws.
+ */
+export function removeTree(path: string): string | undefined {
+  try {
+    rmSync(path, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    if (process.platform === "win32" || !mayNeedPermissionRepair(error)) return errorMessage(error);
+  }
+  try {
+    restoreFolderPermissions(path);
+  } catch {
+    // The second removal reports what still blocks it.
+  }
+  try {
+    rmSync(path, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+/** The message of a thrown value, for a problem line. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Remove each registered temporary folder and its owner marker, and return
+ * one problem line for each folder that stays; it never throws, so one
+ * folder that stays does not keep the next ones. A folder that stays keeps
+ * its marker, so a later stale sweep can find its owner. TEMP_DIRS keeps the
+ * path strings for snapshot normalization.
+ */
+export function removeTemporaryDirs(): Array<string> {
+  const problems: Array<string> = [];
+  for (const dir of TEMP_DIRS) {
+    const problem = removeTree(dir);
+    if (problem === undefined) {
+      problems.push(...removeOwnerMarker(dir));
+    } else {
+      problems.push(`golden: temporary folder ${dir} cannot be removed: ${problem}`);
+    }
+  }
+  return problems;
+}
+
+/** `removeTemporaryDirs` for a test hook: after every removal, a folder that stays throws. */
+export function cleanupTemporaryDirs(): void {
+  const problems = removeTemporaryDirs();
+  if (problems.length > 0) throw new Error(problems.join("\n"));
+}
+
+/** Remove the owner marker of `dir`; a problem line when it stays. */
+function removeOwnerMarker(dir: string): Array<string> {
+  try {
+    rmSync(`${dir}${OWNER_PID_SUFFIX}`, { force: true });
+    return [];
+  } catch (error) {
+    return [
+      `golden: owner marker ${dir}${OWNER_PID_SUFFIX} cannot be removed: ${errorMessage(error)}`,
+    ];
+  }
+}
+
+/** Run the exit sweep and print each folder that stays. */
+function reportTemporaryDirCleanup(): void {
+  for (const problem of removeTemporaryDirs()) console.error(problem);
 }
 
 function handleSigint(): void {
   try {
-    cleanupTemporaryDirs();
+    reportTemporaryDirCleanup();
   } finally {
     process.off("SIGINT", handleSigint);
     process.kill(process.pid, "SIGINT");
@@ -177,7 +266,7 @@ function handleSigint(): void {
 
 function handleSigterm(): void {
   try {
-    cleanupTemporaryDirs();
+    reportTemporaryDirCleanup();
   } finally {
     process.off("SIGTERM", handleSigterm);
     process.kill(process.pid, "SIGTERM");
@@ -185,9 +274,34 @@ function handleSigterm(): void {
 }
 
 sweepStaleTemporaryDirs();
-process.on("exit", cleanupTemporaryDirs);
+process.on("exit", reportTemporaryDirCleanup);
 process.on("SIGINT", handleSigint);
 process.on("SIGTERM", handleSigterm);
+
+/** The npm rows of one omp plugin store in a stub inventory. */
+type StubNpmRows = ReadonlyArray<Readonly<Record<string, string>>>;
+
+/**
+ * The stub omp body: it prints the omp version and answers each
+ * `plugin list --json` with no marketplace row and the npm rows of the store
+ * that its environment selects, as omp does: `OMP_PROFILE`, else
+ * `PI_PROFILE`. `npm` holds the rows of the default store, `profiles` the rows
+ * of each named profile; a profile without an entry answers no npm row. Every
+ * other omp command succeeds without output.
+ */
+export function ompStubBody(
+  npm: StubNpmRows = [],
+  profiles: Readonly<Record<string, StubNpmRows>> = {},
+): string {
+  const stores = { "": npm, ...profiles };
+  return `if (args[0] === "--version") {
+  console.log("omp/19.2.1")
+} else if (args[0] === "plugin" && args[1] === "list") {
+  const stores = ${JSON.stringify(stores)}
+  const profile = process.env["OMP_PROFILE"] ?? process.env["PI_PROFILE"] ?? ""
+  console.log(JSON.stringify({ npm: Object.hasOwn(stores, profile) ? stores[profile] : [], marketplace: [] }))
+}`;
+}
 
 /**
  * Canned stub behavior. Each stub appends "<name>\t<args>" to
@@ -201,14 +315,11 @@ const STUB_BODIES: Record<string, string> = {
   // machine's host versions.
   git: `if (args[0] === "--version") console.log("git version 2.43.0")`,
   jq: `if (args[0] === "--version") console.log("jq-1.7.1")`,
-  // The inventory stays empty on every call, so a replay row pins the install
-  // path rather than the already-installed path; ompSync's present-detection
-  // is covered by cli/test/unit/ompPluginInventory.test.ts instead.
-  omp: `if (args[0] === "--version") {
-  console.log("omp/19.2.1")
-} else if (args[0] === "plugin" && args[1] === "list") {
-  console.log('{"npm":[],"marketplace":[]}')
-}`,
+  // The inventory stays empty on every call, so a replay row pins the link
+  // path rather than the already-linked path; ompSync's present-detection
+  // is covered by cli/test/unit/ompPluginInventory.test.ts instead. A case
+  // that needs inventory rows overrides this body with `ompStubBody(rows)`.
+  omp: ompStubBody(),
   npm: `if (args[0] === "view") console.log("0.0.1")`,
   bun: `if (args[0] === "--version") console.log("1.4.5")`,
   curl: ``,

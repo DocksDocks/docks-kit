@@ -7,7 +7,6 @@ const FIXED_PAYLOAD_PATHS = [
   "SoT/toolchain.json",
   "SoT/.omp/AGENTS.md",
   "SoT/.omp/config.yml",
-  "SoT/.omp/intercom.json",
   "SoT/.omp/mcp.json",
   "SoT/.omp/models.yml",
 ] as const;

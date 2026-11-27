@@ -13,7 +13,6 @@
  * `ompRemovals.ts`. This module keeps the orchestration plus the summary
  * surface.
  */
-import { isAbsolute, resolve } from "node:path";
 
 import { bunBootstrap } from "./bun";
 import { p } from "./exec";
@@ -27,7 +26,8 @@ import { syncPlugins } from "./ompPlugins";
 import { syncOmpModelRemovals, syncOmpRemovals } from "./ompRemovals";
 
 export interface OmpState {
-  readonly pluginsInstalled: number;
+  /** The installed kit plugins, or undefined when the plugin pass could not read the inventory. */
+  readonly pluginsInstalled: number | undefined;
   /** The omp agent folder that the sync wrote. */
   readonly agentDir: string;
 }
@@ -35,15 +35,12 @@ export interface OmpState {
 /** The omp folders that a sync writes. */
 export interface OmpWriteFolders {
   readonly paths: OmpPaths;
-  /** The folder of the pi-intercom `config.json`. */
-  readonly intercomDir: string;
 }
 
 /**
- * Resolve the omp paths and the intercom folder of this run. `runSync` calls
- * it once, takes a folder lock in each folder, and gives the result to
- * `ompSync`. A second resolution could pick an XDG data root that another
- * sync created after the locks.
+ * Resolve the omp paths of this run. `runSync` calls it once, takes a folder
+ * lock in each folder, and gives the result to `ompSync`. A second resolution
+ * could pick an XDG data root that another sync created after the locks.
  */
 export function ompWriteFolders(ctx: Ctx): OmpWriteFolders {
   const paths = ompPaths({
@@ -51,26 +48,14 @@ export function ompWriteFolders(ctx: Ctx): OmpWriteFolders {
     env: process.env,
     platform: ctx.services.platform.raw(),
   });
-  // omp exports PI_CODING_AGENT_DIR as the agent directory of a named profile,
-  // and pi-intercom reads the trimmed value. Without a profile, the kit uses
-  // the PI_CODING_AGENT_DIR value when it is set, else ~/.pi/agent.
-  const intercomRootSetting = process.env["PI_CODING_AGENT_DIR"]?.trim();
-  const intercomRoot =
-    paths.profile !== undefined
-      ? paths.agentDir
-      : intercomRootSetting !== undefined && intercomRootSetting !== ""
-        ? isAbsolute(intercomRootSetting)
-          ? intercomRootSetting
-          : resolve(process.cwd(), intercomRootSetting)
-        : p(ctx.home, ".pi", "agent");
-  return { paths, intercomDir: p(intercomRoot, "intercom") };
+  return { paths };
 }
 
 /** Run the omp pipeline in `folders`, the folders that `runSync` resolved and locked. */
 export async function ompSync(ctx: Ctx, folders: OmpWriteFolders): Promise<OmpState> {
   await bunBootstrap(ctx, ctx.services);
 
-  const { paths, intercomDir } = folders;
+  const { paths } = folders;
   const agentDir = paths.agentDir;
   if (!ctx.dryRun) ensureDirectory(agentDir);
 
@@ -96,15 +81,8 @@ export async function ompSync(ctx: Ctx, folders: OmpWriteFolders): Promise<OmpSt
   const modelsBackedUp = syncMergedYaml(ctx, "SoT/.omp/models.yml", modelsFile, mergeOmpModels);
   syncOmpModelRemovals(ctx, modelsFile, modelsBackedUp);
 
-  if (!ctx.dryRun) ensureDirectory(intercomDir);
-  syncWholeFile(
-    ctx,
-    "SoT/.omp/intercom.json",
-    p(intercomDir, "config.json"),
-    "omp intercom configuration already in sync",
-    "omp intercom configuration synced",
-  );
-  // The plugin pass links this directory, so the files must exist first.
+  // The plugin pass links this directory, so the files must exist first. The
+  // files deploy also without git: git gates only the omp plugin commands.
   syncKitPlugin(ctx);
 
   const pluginsInstalled = await syncPlugins(ctx, paths);
@@ -133,7 +111,12 @@ export async function ompSync(ctx: Ctx, folders: OmpWriteFolders): Promise<OmpSt
 export function ompSummary(ctx: Ctx, state: OmpState): void {
   const { echo } = ctx.services.logger;
   echo(`omp:      ${state.agentDir}`);
-  if (!ctx.dryRun) echo(`omp plugins: ${state.pluginsInstalled} installed`);
+  if (ctx.dryRun) return;
+  echo(
+    state.pluginsInstalled === undefined
+      ? "omp plugins: unknown (plugin inventory unavailable)"
+      : `omp plugins: ${state.pluginsInstalled} installed`,
+  );
 }
 
 /** The omp next steps. */

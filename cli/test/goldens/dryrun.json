@@ -4,13 +4,13 @@
       "command": ["sync", "--dry-run"],
       "exitCode": 0,
       "fixture": "home-drift",
-      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] cp embedded:SoT/.omp/intercom.json -> <HOME>/.pi/agent/intercom/config.json\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp install pi-intercom@0.19.0\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
+      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
     },
     "cli=engine fixture=home-fresh cmd=sync --dry-run": {
       "command": ["sync", "--dry-run"],
       "exitCode": 0,
       "fixture": "home-fresh",
-      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] cp embedded:SoT/.omp/intercom.json -> <HOME>/.pi/agent/intercom/config.json\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp install pi-intercom@0.19.0\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
+      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
     },
     "cli=public fixture=home-fresh cmd=": {
       "command": [],
@@ -52,13 +52,13 @@
       "command": ["sync", "--dry-run"],
       "exitCode": 0,
       "fixture": "home-fresh",
-      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] cp embedded:SoT/.omp/intercom.json -> <HOME>/.pi/agent/intercom/config.json\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp install pi-intercom@0.19.0\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
+      "output": "[dry-run] cp embedded:SoT/.omp/AGENTS.md -> <HOME>/.omp/agent/AGENTS.md\n[dry-run] cp embedded:SoT/.omp/mcp.json -> <HOME>/.omp/agent/mcp.json\n[dry-run] cp embedded:SoT/.omp/config.yml -> <HOME>/.omp/agent/config.yml\n[dry-run] cp embedded:SoT/.omp/models.yml -> <HOME>/.omp/agent/models.yml\n[dry-run] sync embedded:SoT/.omp/plugin/ -> <HOME>/.docks-kit/omp-plugin\n[dry-run] omp plugin uninstall --scope user docks@docks\n[dry-run] omp plugin uninstall --scope user plan-lifecycle@docks\n[dry-run] omp plugin link <HOME>/.docks-kit/omp-plugin\n\n--- Sync complete ---\nRepo:     <REPO>\nomp:      <HOME>/.omp/agent\n"
     },
     "cli=public fixture=home-fresh cmd=toolchain check": {
       "command": ["toolchain", "check"],
       "exitCode": 0,
       "fixture": "home-fresh",
-      "output": "TOOL                         KIND      INSTALLED      FLOOR     VERIFIED  STATUS\nbun                          managed   1.4.5          1.4.5     1.4.5     ok\ncurl                         check     ?              -         -         unknown\ngit                          check     2.43.0         -         -         ok\njq                           check     1.7.1          -         -         ok\nnpm                          check     ?              -         -         unknown\nomp                          check     19.2.1         19.2.1    19.2.1    ok\npi-intercom                  pin       (omp install)  -         0.19.0    pinned\n"
+      "output": "TOOL                         KIND      INSTALLED      FLOOR     VERIFIED  STATUS\nbun                          managed   1.4.5          1.4.5     1.4.5     ok\ncurl                         check     ?              -         -         unknown\ngit                          check     2.43.0         -         -         ok\njq                           check     1.7.1          -         -         ok\nnpm                          check     ?              -         -         unknown\nomp                          check     19.2.1         19.2.1    19.2.1    ok\n"
     },
     "cli=public fixture=home-fresh cmd=update --help": {
       "command": ["update", "--help"],

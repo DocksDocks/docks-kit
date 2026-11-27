@@ -11,24 +11,26 @@
  *   bun cli/test/golden-mutation.ts
  *   bun cli/test/golden-mutation.ts --prove-red
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { isObject, parseJson } from "../src/engine-native/jq";
 import { hostOs } from "../src/engine-native/os";
 import { banner, labelSelected, parseArgs } from "./lib/goldenCli";
 import {
-  cleanup,
+  cleanupProblems,
   readArgvLog,
   runEngine,
   runEngineSplit,
   runPublicCli,
 } from "./lib/goldenExecution";
-import { MATRIX, REPLAYS } from "./lib/goldenMutationCatalog";
+import { MATRIX, REPLAYS, type MutationMatrixCase } from "./lib/goldenMutationCatalog";
 import { REPO_DIR, makeStubDir } from "./lib/goldenResources";
 import {
   diffText,
   diffTrees,
-  snapshotTree,
+  seededTreeProblems,
+  snapshotTreeResult,
   stableStringify,
   type TreeSnapshot,
 } from "./lib/goldenSnapshot";
@@ -69,28 +71,141 @@ function matrixLabel(
   return `fixture=${fixture} cmd=${cmd.join(" ")}${stubPart}${variantPart}`;
 }
 
+/**
+ * A matrix or replay run: its golden, and the problems of its direct case
+ * checks (snapshot, seed, and notice). `golden` is undefined when the snapshot
+ * of HOME failed: the case then fails, and no partial snapshot is compared or
+ * recorded.
+ */
+interface MatrixRun {
+  readonly golden: MutationCaseGolden | undefined;
+  readonly problems: ReadonlyArray<string>;
+}
+
+/** The facts of a run that the case checks read besides the tree. */
+type RunFacts = Pick<MutationCaseGolden, "exitCode" | "argvLog" | "output">;
+
+/** The golden of `run`, or the snapshot problem that leaves it without one. */
+function caseGolden(
+  cmd: ReadonlyArray<string>,
+  home: string,
+  facts: RunFacts,
+): { readonly golden: MutationCaseGolden | undefined; readonly problems: Array<string> } {
+  const snapshot = snapshotTreeResult(home);
+  if (snapshot.kind === "failed") return { golden: undefined, problems: [snapshot.problem] };
+  return { golden: { command: [...cmd], ...facts, tree: snapshot.tree }, problems: [] };
+}
+
 function runCase(
-  command: ReadonlyArray<string>,
-  fixture: string,
+  row: MutationMatrixCase,
   stubDir: string,
-  maskTools: ReadonlyArray<string> = [],
-): MutationCaseGolden {
-  const run = runEngine(command, fixture, stubDir, { maskTools });
+  maskTools: ReadonlyArray<string>,
+): MatrixRun {
+  const run = runEngine(row.cmd, row.fixture, stubDir, {
+    maskTools,
+    ...(row.env !== undefined ? { env: row.env } : {}),
+    ...(row.seed !== undefined ? { seed: row.seed } : {}),
+  });
+  let result: MatrixRun;
   try {
-    return {
-      command: [...command],
+    const facts: RunFacts = {
       exitCode: run.exitCode,
-      tree: snapshotTree(run.home),
       argvLog: readArgvLog(run),
       output: run.output,
     };
-  } finally {
-    cleanup([run]);
+    const { golden, problems } = caseGolden(row.cmd, run.home, facts);
+    problems.push(
+      ...(row.seed !== undefined ? seededTreeProblems(run.home, row.seed) : []),
+      ...(row.piIntercomNotice !== undefined
+        ? piIntercomProblems(run.home, facts, row.piIntercomNotice)
+        : []),
+    );
+    result = { golden, problems };
+  } catch (error) {
+    // A harness error ends the matrix; the home goes first.
+    cleanupProblems([run]);
+    throw error;
+  }
+  // A home that cannot be removed fails the case, which keeps its result.
+  return { golden: result.golden, problems: [...result.problems, ...cleanupProblems([run])] };
+}
+
+/**
+ * The checks of a pi-intercom cutover case: sync exits 0, runs no install or
+ * uninstall of pi-intercom, prints `notice` exactly once and no other notice
+ * or removal command, and deploys the kit plugin with `talk.js` (the bytes of
+ * the SoT copy) in its manifest and with the `talk` skill.
+ */
+function piIntercomProblems(home: string, facts: RunFacts, notice: string): Array<string> {
+  const problems: Array<string> = [];
+  if (facts.exitCode !== 0) problems.push(`  exit code ${facts.exitCode}, expected 0`);
+  const changes = facts.argvLog
+    .split("\n")
+    .filter((line) => line.includes("pi-intercom") && /\b(?:install|uninstall)\b/.test(line));
+  if (changes.length > 0) problems.push(`  argv log changes pi-intercom: ${changes.join(" | ")}`);
+  const lines = facts.output.split("\n");
+  const notices = lines.filter((line) => line.includes("Notice:"));
+  if (notices.length !== 1 || notices[0] !== notice) {
+    problems.push(`  expected the notice once: ${notice}; got: ${notices.join(" | ") || "none"}`);
+  }
+  const removals = lines.filter((line) => /\b(?:uninstall|remove)\b.*pi-intercom/.test(line));
+  if (removals.length > 0) problems.push(`  output names a removal: ${removals.join(" | ")}`);
+
+  const plugin = join(home, ".docks-kit", "omp-plugin");
+  const manifestBytes = deployedBytes(join(plugin, "package.json"), "package.json", problems);
+  if (manifestBytes !== undefined) {
+    const manifest = parseJson(manifestBytes.toString("utf8"));
+    const omp = manifest !== undefined && isObject(manifest) ? manifest["omp"] : undefined;
+    const extensions = omp !== undefined && isObject(omp) ? omp["extensions"] : undefined;
+    if (!Array.isArray(extensions) || !extensions.includes("./extensions/talk.js")) {
+      problems.push("  the deployed kit plugin manifest does not list ./extensions/talk.js");
+    }
+  }
+  const shipped = readFileSync(join(REPO_DIR, "SoT", ".omp", "plugin", "extensions", "talk.js"));
+  const deployed = deployedBytes(
+    join(plugin, "extensions", "talk.js"),
+    "extensions/talk.js",
+    problems,
+  );
+  if (deployed !== undefined && !deployed.equals(shipped)) {
+    problems.push(
+      "  the deployed extensions/talk.js differs from SoT/.omp/plugin/extensions/talk.js",
+    );
+  }
+  if (!existsSync(join(plugin, "skills", "talk", "SKILL.md"))) {
+    problems.push("  the deployed kit plugin has no skills/talk/SKILL.md");
+  }
+  return problems;
+}
+
+/**
+ * The bytes of the deployed kit plugin file `path`, or undefined after a
+ * problem that names `name`: the file is missing, is not a regular file, or
+ * cannot be read. A problem fails the case, and the matrix goes on.
+ */
+function deployedBytes(path: string, name: string, problems: Array<string>): Buffer | undefined {
+  try {
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat === undefined) {
+      problems.push(`  the deployed kit plugin has no ${name}`);
+      return undefined;
+    }
+    if (!stat.isFile()) {
+      problems.push(`  the deployed kit plugin ${name} is not a regular file`);
+      return undefined;
+    }
+    return readFileSync(path);
+  } catch (error) {
+    problems.push(
+      `  the deployed kit plugin ${name} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
   }
 }
 
-function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCaseGolden {
+function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MatrixRun {
   const first = runEngine(cmd, fixture, defaultStubs);
+  let result: MatrixRun;
   try {
     if (first.exitCode !== 0) {
       throw new Error(
@@ -101,16 +216,18 @@ function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCas
       throw new Error(`first replay for '${cmd.join(" ")}' produced no sync completion summary`);
     }
     const second = runEngine(cmd, fixture, defaultStubs, { reuseHome: first.home });
-    return {
-      command: [...cmd],
+    result = caseGolden(cmd, second.home, {
       exitCode: second.exitCode,
-      tree: snapshotTree(second.home),
       argvLog: readArgvLog(second),
       output: second.output,
-    };
-  } finally {
-    cleanup([first]);
+    });
+  } catch (error) {
+    // A harness error ends the matrix; the shared home goes first.
+    cleanupProblems([first]);
+    throw error;
   }
+  // The second run reuses the home of the first, so one removal covers both.
+  return { golden: result.golden, problems: [...result.problems, ...cleanupProblems([first])] };
 }
 
 /**
@@ -187,7 +304,7 @@ function channelInvariantProblems(): Array<string> {
     }
     if (bare.stdout !== "")
       problems.push(`  modifiers: public ${label} wrote error data to stdout`);
-    rmSync(bare.home, { recursive: true, force: true });
+    problems.push(...cleanupProblems([bare]));
   }
 
   // Before this guard, an invocation that read as a dry run performed a real mutating sync.
@@ -201,7 +318,7 @@ function channelInvariantProblems(): Array<string> {
   if (booleanWithValue.stdout !== "") {
     problems.push("  modifiers: public --dry-run=false wrote error data to stdout");
   }
-  rmSync(booleanWithValue.home, { recursive: true, force: true });
+  problems.push(...cleanupProblems([booleanWithValue]));
 
   // The kit refuses these flags outright so Effect 4 cannot negate a declared boolean into a real mutating sync.
   for (const flag of ["--no-dry-run", "--no-verbose"] as const) {
@@ -211,7 +328,7 @@ function channelInvariantProblems(): Array<string> {
     }
     if (bare.stdout !== "")
       problems.push(`  modifiers: public negated ${flag} wrote error data to stdout`);
-    rmSync(bare.home, { recursive: true, force: true });
+    problems.push(...cleanupProblems([bare]));
   }
 
   // Verbosity contract: default second run is quiet about the status quo;
@@ -249,11 +366,8 @@ function channelInvariantProblems(): Array<string> {
     }
   }
 
-  rmSync(syncSplit.home, { recursive: true, force: true });
-  rmSync(warnSplit.home, { recursive: true, force: true });
-  rmSync(drySplit.home, { recursive: true, force: true });
-  rmSync(second.home, { recursive: true, force: true }); // first/second/secondVerbose share one home
-  rmSync(pubFirst.home, { recursive: true, force: true }); // all public forwarding legs reuse this home
+  // first/second/secondVerbose share one home, and all public forwarding legs reuse pubFirst's.
+  problems.push(...cleanupProblems([syncSplit, warnSplit, drySplit, second, pubFirst]));
   return problems;
 }
 
@@ -274,13 +388,27 @@ function collectCases(): {
   selectedChecks: number;
 } {
   const cases: Record<string, MutationCaseGolden> = {};
+  // Labels, also of a case whose snapshot failed and that `cases` lacks.
+  const labels = new Set<string>();
   let invariantFailures = 0;
   let selectedChecks = 0;
 
-  for (const { fixture, cmd, stubs, variant } of MATRIX) {
+  /** Keeps the golden of `run`, and prints its problems as one case failure. */
+  const record = (label: string, run: MatrixRun): void => {
+    if (run.golden !== undefined) cases[label] = run.golden;
+    if (run.problems.length > 0) {
+      invariantFailures++;
+      banner(`CASE CHECK FAILURE ${label}`);
+      for (const problem of run.problems) console.log(problem);
+    }
+  };
+
+  for (const row of MATRIX) {
+    const { fixture, cmd, stubs, variant } = row;
     const label = matrixLabel(fixture, cmd, stubs, variant);
-    if (label in cases)
+    if (labels.has(label))
       throw new Error(`duplicate matrix label ${label} — add a variant to disambiguate`);
+    labels.add(label);
     if (!labelSelected(label, options.filter)) continue;
     selectedChecks++;
     const stubDir = stubs !== undefined ? makeStubDir(stubs) : defaultStubs;
@@ -290,15 +418,16 @@ function collectCases(): {
             .filter(([, body]) => body === null)
             .map(([name]) => name)
         : [];
-    cases[label] = runCase(cmd, fixture, stubDir, maskTools);
+    record(label, runCase(row, stubDir, maskTools));
   }
 
   for (const { fixture, cmd } of REPLAYS) {
     const label = `fixture=${fixture} cmd=${cmd.join(" ")} replay=2nd`;
-    if (label in cases) throw new Error(`duplicate replay label ${label}`);
+    if (labels.has(label)) throw new Error(`duplicate replay label ${label}`);
+    labels.add(label);
     if (!labelSelected(label, options.filter)) continue;
     selectedChecks++;
-    cases[label] = runReplayCase(fixture, cmd);
+    record(label, runReplayCase(fixture, cmd));
   }
 
   if (labelSelected("channel-invariants", options.filter)) {
@@ -320,15 +449,15 @@ if (options.updateGoldens) {
     console.error("GOLDEN_FILTER matched no cases");
     process.exit(2);
   }
-  if (options.filter !== undefined && Object.keys(selectedCases).length === 0) {
-    console.error("GOLDEN_FILTER selected no snapshot cases");
-    process.exit(2);
-  }
   if (invariantFailures > 0) {
     console.error(
       `\ngolden-mutation: ${invariantFailures} invariant failure(s); goldens not updated`,
     );
     process.exit(1);
+  }
+  if (options.filter !== undefined && Object.keys(selectedCases).length === 0) {
+    console.error("GOLDEN_FILTER selected no snapshot cases");
+    process.exit(2);
   }
 
   const cases =

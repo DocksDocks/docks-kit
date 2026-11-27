@@ -89,11 +89,6 @@ export async function report(ctx: Ctx): Promise<void> {
     const floor = field(tool, "floor");
     const verified = field(tool, "verified");
     const dash = (v: string): string => (v !== "" ? v : "-");
-    if (kind === "pin") {
-      const via = field(tool, "via");
-      echo(row([tool, kind, `(${via})`, dash(floor), dash(verified), "pinned"]));
-      continue;
-    }
     let installed: string;
     let status: string;
     const toolId = tool as ToolId;
@@ -133,8 +128,7 @@ function upstreamSpec(tool: string): JsonObject | undefined {
 }
 
 function upstreamLabel(spec: JsonObject): string {
-  const { npm, github } = spec;
-  if (typeof npm === "string") return `npm ${npm}`;
+  const { github } = spec;
   return typeof github === "string" ? `github ${github}` : "-";
 }
 
@@ -156,17 +150,7 @@ async function lookupUpstream(
   fetchImpl: FetchLike,
   env: NodeJS.ProcessEnv,
 ): Promise<UpstreamResult> {
-  const { npm, github, tagPrefix } = spec;
-  if (typeof npm === "string") {
-    const result = await fetchJson(fetchImpl, `https://registry.npmjs.org/${npm}/latest`, {
-      Accept: "application/json",
-    });
-    if (!result.ok) return result;
-    const version = result.body["version"];
-    return typeof version === "string" && version !== ""
-      ? { ok: true, version }
-      : { ok: false, reason: "invalid response" };
-  }
+  const { github, tagPrefix } = spec;
   if (typeof github === "string") {
     const headers: Record<string, string> = {
       Accept: "application/vnd.github+json",

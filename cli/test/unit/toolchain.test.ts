@@ -37,6 +37,7 @@ describe("toolchain report", () => {
         expect(omp).toMatch(
           new RegExp(`^omp\\s+check\\s+\\?\\s+${floor}\\s+${verified}\\s+unknown$`),
         );
+        expect(run.stdout).not.toMatch(/^pi-intercom\s/m);
       } finally {
         rmSync(run.home, { recursive: true, force: true });
       }

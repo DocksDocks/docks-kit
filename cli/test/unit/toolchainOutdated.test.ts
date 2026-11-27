@@ -59,11 +59,9 @@ describe("toolchain outdated", () => {
     expect(result).toEqual({ ok: false, reason: "unexpected tag v1.4.3" });
   });
 
-  it("reports a failed lookup in the row and still exits 0", async () => {
-    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
-      String(url).startsWith("https://api.github.com/")
-        ? jsonResponse({ message: "rate limited" }, 403)
-        : jsonResponse({ version: "0.0.1", versions: { "6.0.3": {} } }),
+  it("reports a failed lookup in the row, reads only GitHub, and still exits 0", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request) =>
+      jsonResponse({ message: "rate limited" }, 403),
     );
     const stdout: Array<string> = [];
 
@@ -80,6 +78,9 @@ describe("toolchain outdated", () => {
       /^omp\s+check\s+\S+\s+-\s+lookup failed: HTTP 403 github can1357\/oh-my-pi$/m,
     );
     expect(output).toContain("Report only: update a verified pin after testing that release");
+    const urls = fetchImpl.mock.calls.map(([url]) => String(url));
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls.filter((url) => !url.startsWith("https://api.github.com/repos/"))).toEqual([]);
   });
 
   it("distinguishes a newer release from a release matching the verified pin", async () => {
@@ -94,9 +95,7 @@ describe("toolchain outdated", () => {
         return jsonResponse({ tag_name: `bun-v${bunNewer}` });
       if (address.includes("/repos/can1357/oh-my-pi/"))
         return jsonResponse({ tag_name: `v${verifiedVersion("omp")}` });
-      if (address === "https://registry.npmjs.org/typescript")
-        return jsonResponse({ versions: { "6.0.3": {} } });
-      return jsonResponse({ version: "0.0.1" });
+      throw new Error(`unexpected upstream ${address}`);
     };
     const stdout: Array<string> = [];
 
@@ -111,21 +110,22 @@ describe("toolchain outdated", () => {
         "m",
       ),
     );
+    expect(output).not.toMatch(/^pi-intercom\s/m);
   });
 
   it("uses cached success within 24 h but refreshes on request", async () => {
     const fetchImpl = vi
-      .fn(async () => jsonResponse({ version: "1.7.0" }))
-      .mockResolvedValueOnce(jsonResponse({ version: "1.7.0" }))
-      .mockResolvedValueOnce(jsonResponse({ version: "1.8.0" }));
+      .fn(async () => jsonResponse({ tag_name: "v1.7.0" }))
+      .mockResolvedValueOnce(jsonResponse({ tag_name: "v1.7.0" }))
+      .mockResolvedValueOnce(jsonResponse({ tag_name: "v1.8.0" }));
 
-    const first = await latestUpstream("pi-intercom", {
+    const first = await latestUpstream("omp", {
       home,
       refresh: false,
       now: NOW,
       fetchImpl,
     });
-    const cached = await latestUpstream("pi-intercom", {
+    const cached = await latestUpstream("omp", {
       home,
       refresh: false,
       now: NOW + 23 * 3600_000,
@@ -135,7 +135,7 @@ describe("toolchain outdated", () => {
     expect(cached).toEqual(first);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 
-    const refreshed = await latestUpstream("pi-intercom", {
+    const refreshed = await latestUpstream("omp", {
       home,
       refresh: true,
       now: NOW + 23 * 3600_000,
@@ -147,16 +147,16 @@ describe("toolchain outdated", () => {
 
   it("retries a transport failure rather than caching it", async () => {
     const fetchImpl = vi
-      .fn(async () => jsonResponse({ version: "1.7.0" }))
+      .fn(async () => jsonResponse({ tag_name: "v1.7.0" }))
       .mockRejectedValueOnce(new Error("network unavailable"));
 
-    const failed = await latestUpstream("pi-intercom", {
+    const failed = await latestUpstream("omp", {
       home,
       refresh: false,
       now: NOW,
       fetchImpl,
     });
-    const recovered = await latestUpstream("pi-intercom", {
+    const recovered = await latestUpstream("omp", {
       home,
       refresh: false,
       now: NOW,

@@ -4,6 +4,7 @@
  * home folder. Codex left in 0.23.0 (#181), Claude Code in the same release
  * (#182), and universal skills, the sync targets, `--prune`, and the
  * `harnesses` and `skills` commands left in 0.24.0 (#183).
+ * `--skip-plugin-refresh` left in 0.30.0 (#252).
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -71,10 +72,24 @@ describe("names removed by the omp-only cutover", () => {
         "--agents",
         "--omp",
         "--remove-plugins",
+        "--skip-plugin-refresh",
       ]) {
         const result = run(["sync", "--dry-run", flag]);
         expect(result.status, flag).toBe(2);
         expect(result.stderr, flag).toContain(`unknown flag ${flag} for 'sync'`);
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses --skip-plugin-refresh on a writing sync before it writes an omp or kit file",
+    () => {
+      const result = run(["sync", "--skip-plugin-refresh"]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("unknown flag --skip-plugin-refresh for 'sync'");
+      for (const folder of [".omp", ".pi", ".docks-kit", join(".cache", "docks-kit")]) {
+        expect(existsSync(join(home, folder)), folder).toBe(false);
       }
     },
     SPAWN_TIMEOUT_MS,

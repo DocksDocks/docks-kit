@@ -1,14 +1,75 @@
-import { writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { checkedSpawnExitCode, runEngine } from "../lib/goldenExecution";
+import {
+  checkedSpawnExitCode,
+  cleanup,
+  cleanupProblems,
+  runEngine,
+  type EngineRun,
+} from "../lib/goldenExecution";
 import {
   childHostId,
   cleanupTemporaryDirs,
   makeStubDir,
   readStubHost,
 } from "../lib/goldenResources";
+
+describe("run home cleanup", () => {
+  /**
+   * A run home whose nonempty folders a sync left at mode 000, as `run`
+   * gets it. The `finally` gives the folders back their mode when a removal
+   * failed, so a failed test leaves no folder that a later removal cannot list.
+   */
+  function withLockedHome(run: (home: EngineRun) => void): void {
+    const home = mkdtempSync(join(tmpdir(), "golden-cleanup-test-"));
+    const outer = join(home, "locked", "outer");
+    const inner = join(outer, "inner");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(outer, "file.json"), "{}\n");
+    writeFileSync(join(inner, "marker"), "kept\n");
+    chmodSync(inner, 0o000);
+    chmodSync(outer, 0o000);
+    try {
+      run({ home } as EngineRun);
+    } finally {
+      if (existsSync(home)) {
+        chmodSync(outer, 0o700);
+        chmodSync(inner, 0o700);
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // A permission does not stop root, and Windows ignores the POSIX mode.
+  const lockable = process.platform !== "win32" && process.getuid?.() !== 0;
+
+  it.skipIf(!lockable)(
+    "removes a home with nonempty folders at mode 000 and reports no problem",
+    () => {
+      withLockedHome((run) => {
+        expect(cleanupProblems([run])).toEqual([]);
+        expect(existsSync(run.home)).toBe(false);
+      });
+    },
+  );
+
+  it.skipIf(!lockable)("lets cleanup remove such a home without a throw", () => {
+    withLockedHome((run) => {
+      cleanup([run]);
+      expect(existsSync(run.home)).toBe(false);
+    });
+  });
+
+  it("reports a home that cannot be removed as a problem line, without a throw", () => {
+    // A NUL byte makes every file system call fail at once.
+    expect(cleanupProblems([{ home: join(tmpdir(), "golden\0cleanup") } as EngineRun])).toEqual([
+      expect.stringMatching(/^ {2}the run home .* cannot be removed: /),
+    ]);
+  });
+});
 
 describe("checkedSpawnExitCode", () => {
   it("classifies an ETIMEDOUT spawn error before a numeric status", () => {

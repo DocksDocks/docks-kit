@@ -1148,6 +1148,9 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     label: TALK_TOOL_LABEL,
     description: TALK_TOOL_DESCRIPTION,
     parameters: talkParameters(api.Type),
+    // An ask waits up to 10 minutes. omp mounts a tool without a load mode
+    // under Bash, whose background deadline can end that wait.
+    loadMode: "essential",
     execute: async (
       _toolCallId: unknown,
       params: unknown,

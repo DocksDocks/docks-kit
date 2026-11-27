@@ -9,7 +9,7 @@
  *   bun cli/test/golden-dryrun.ts
  *   bun cli/test/golden-dryrun.ts --prove-red
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { hostOs } from "../src/engine-native/os";
@@ -91,7 +91,7 @@ function runCase(fixture: string, cmd: ReadonlyArray<string>, usePublic = false)
         output: `${run.stdout}${run.stderr}`,
       };
     } finally {
-      rmSync(run.home, { recursive: true, force: true });
+      cleanup([run]);
     }
   }
 

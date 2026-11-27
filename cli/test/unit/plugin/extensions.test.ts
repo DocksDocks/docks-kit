@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +48,13 @@ function expectFailure(failures: ReadonlyArray<string>, entry: string, detail: s
 describe("kit plugin extensions", () => {
   it("imports each live manifest extension with a default function export", async () => {
     expect(await checkExtensions(REPO_ROOT)).toEqual([]);
+  });
+
+  it("lists the generated talk bundle in the live manifest", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(REPO_ROOT, config.pluginDir, "package.json"), "utf8"),
+    ) as { readonly omp: { readonly extensions: ReadonlyArray<string> } };
+    expect(manifest.omp.extensions).toContain("./extensions/talk.js");
   });
 
   it("passes a file entry and a folder entry with a default function export", async () => {

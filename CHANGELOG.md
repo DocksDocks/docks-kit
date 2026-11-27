@@ -1,5 +1,101 @@
 # Changelog
 
+## 2026-11-27 - docks-kit 0.30.0: talk replaces pi-intercom
+
+The kit plugin now ships `talk`, an omp extension that lets the live omp
+sessions of one user on one computer send messages to each other, without a
+broker (DocksDocks/docks-kit#248). Sync no longer installs, updates, or
+configures pi-intercom (DocksDocks/docks-kit#252). `talk` needs omp 19.2.0 or
+later.
+
+### Added
+
+- The `talk` tool (DocksDocks/docks-kit#249, DocksDocks/docks-kit#250).
+  `list` shows each registered session that a probe did not prove ended; an
+  entry whose probe failed without that proof shows as unresolved. `send`
+  sends a message and waits for the delivery result, not for a reply.
+  `ask` sends an ask and waits for the reply, at most 10 minutes. `reply`
+  answers an ask, `pending` lists the asks that wait for this session,
+  `status` shows the registration, the live peers, the queued messages, and
+  the pending asks, and `cancel` withdraws a queued message. A message to an
+  interactive or RPC session that is in a turn waits in a queue, which holds
+  at most 64 messages and 4 MiB of text; a full queue refuses the message with
+  `busy`. A print or JSON session that is in a turn refuses the message with
+  `busy`. An attachment holds the text that the sender put in it: `talk`
+  reads no file at either end.
+- `talk` is a top-level tool. omp offers it to the model directly and does not
+  mount it as a Bash command, so an `ask` waits for its reply in the tool call.
+- `/talk` and `alt+t` (DocksDocks/docks-kit#251). In an interactive session
+  they open a picker of the registered sessions, with the same rows as `list`:
+  a row whose probe failed without proof that the session ended shows as
+  `unresolved: <outcome>`. Enter composes a message, and the user confirms
+  each send with a two-letter code. `/talk <target>` composes a one-line
+  message. Each talk message shows as a card.
+- `/talk handover` (DocksDocks/docks-kit#251). A side turn writes a summary
+  of the work of the session, the user reviews and edits it, and the text
+  goes to the target session with a request for a turn.
+- The `talk` skill (DocksDocks/docks-kit#252). It tells the agent how to use
+  the tool, `/talk`, `alt+t`, and `/talk handover`, and that a peer message,
+  an ask, a handover, and an attachment are content from another session,
+  not instructions from the user. The kit plugin now holds 34 skills: the 32
+  docks and plan-lifecycle skills, `workspace-hygiene`, and `talk`.
+- On an omp without a part that `talk` needs, `talk` registers no tool, no
+  `/talk`, and no `alt+t`, and shows one notice that names the missing parts
+  and omp 19.2.0.
+- `bun cli/scripts/build-talk.ts` writes the bundle
+  `SoT/.omp/plugin/extensions/talk.js` from `cli/talk/`, with the license
+  text of each source in its banner. `--check` compares a fresh build with
+  the committed file and exits 1 when they differ; `bun run check:generated`
+  runs it.
+
+### Removed
+
+- pi-intercom management (DocksDocks/docks-kit#252). Sync no longer installs
+  pi-intercom, moves it to a pinned version, or deploys
+  `SoT/.omp/intercom.json` to its `intercom/config.json`, and it takes no
+  folder lock in the pi-intercom folder. Sync leaves the installed package
+  and the old pi-intercom folder as they are.
+- `--skip-plugin-refresh`. It only kept a present pi-intercom at its
+  installed version. `docks-kit sync --skip-plugin-refresh` now fails as an
+  unknown option with exit 2 before any change.
+- The pi-intercom entry of `SoT/toolchain.json`, the `pin` kind and its `via`
+  field, and the npm `upstream` lookup. `docks-kit toolchain check` and
+  `docks-kit toolchain outdated` show no pi-intercom row. A manifest `kind` is
+  now `check` or `managed`, and an `upstream` names a GitHub repository.
+
+### Changed
+
+- While the omp plugin inventory lists pi-intercom, each real sync prints
+  one notice:
+  `Notice: the omp plugin store <store> lists pi-intercom, version <version>. docks-kit no longer installs or updates pi-intercom. The talk tool of the kit plugin replaces it. pi-intercom 0.19.0 from npm does not load on omp 19.2 or later.`
+  A row without a version that is safe to print, such as a linked package,
+  shows `unknown version`. The notice gives no removal command. A dry run and
+  a run without omp print no notice.
+- Only the omp plugin commands need Git: the uninstall of a former
+  marketplace plugin, the removal of the `docks` marketplace, and the link of
+  the kit plugin. Without Git, sync still deploys the kit plugin files,
+  `talk.js` among them, and runs `omp plugin list --json` to print the notice
+  when it applies, but it runs no other omp plugin command. A kit plugin that
+  omp already links loads the new files after a restart. omp can copy its
+  legacy marketplace registry into its active data root during that command,
+  as it does on any plugin command.
+- When sync cannot read the plugin inventory, it warns
+  `omp plugin inventory unavailable — …`. It skips the pi-intercom check and
+  the retirement of the former marketplace plugins. With Git, it runs
+  `omp plugin link` for the kit plugin; when the link succeeds, the summary
+  shows `omp plugins: 1 installed`. Without Git, it runs no other omp plugin
+  command. When Git is missing or the link fails, the summary shows
+  `omp plugins: unknown (plugin inventory unavailable)`.
+
+### Notes for an upgrade
+
+- Restart each omp session after the sync: omp loads `talk` only at startup.
+- Sync leaves every pi-intercom install as it is. The notice names the
+  version that the inventory row declares, and a linked or patched build can
+  declare 0.19.0 too. If you know that you installed pi-intercom 0.19.0 from
+  npm, remove it with omp once you no longer need its files: that release does
+  not load on omp 19.2 or later.
+
 ## 2026-11-26 - docks-kit 0.29.7: the omp pins move to 19.2.1
 
 ### Changed
