@@ -11,9 +11,10 @@
  *   bun cli/test/golden-mutation.ts
  *   bun cli/test/golden-mutation.ts --prove-red
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { isObject, parseJson } from "../src/engine-native/jq";
 import { hostOs } from "../src/engine-native/os";
 import { banner, labelSelected, parseArgs } from "./lib/goldenCli";
 import {
@@ -23,11 +24,12 @@ import {
   runEngineSplit,
   runPublicCli,
 } from "./lib/goldenExecution";
-import { MATRIX, REPLAYS } from "./lib/goldenMutationCatalog";
+import { MATRIX, REPLAYS, type MutationMatrixCase } from "./lib/goldenMutationCatalog";
 import { REPO_DIR, makeStubDir } from "./lib/goldenResources";
 import {
   diffText,
   diffTrees,
+  seededTreeProblems,
   snapshotTree,
   stableStringify,
   type TreeSnapshot,
@@ -69,24 +71,85 @@ function matrixLabel(
   return `fixture=${fixture} cmd=${cmd.join(" ")}${stubPart}${variantPart}`;
 }
 
+/** A matrix run: its golden, and the problems of its direct case checks (seed and notice). */
+interface MatrixRun {
+  readonly golden: MutationCaseGolden;
+  readonly problems: ReadonlyArray<string>;
+}
+
 function runCase(
-  command: ReadonlyArray<string>,
-  fixture: string,
+  row: MutationMatrixCase,
   stubDir: string,
-  maskTools: ReadonlyArray<string> = [],
-): MutationCaseGolden {
-  const run = runEngine(command, fixture, stubDir, { maskTools });
+  maskTools: ReadonlyArray<string>,
+): MatrixRun {
+  const run = runEngine(row.cmd, row.fixture, stubDir, {
+    maskTools,
+    ...(row.env !== undefined ? { env: row.env } : {}),
+    ...(row.seed !== undefined ? { seed: row.seed } : {}),
+  });
   try {
-    return {
-      command: [...command],
+    const golden: MutationCaseGolden = {
+      command: [...row.cmd],
       exitCode: run.exitCode,
       tree: snapshotTree(run.home),
       argvLog: readArgvLog(run),
       output: run.output,
     };
+    const problems = [
+      ...(row.seed !== undefined ? seededTreeProblems(run.home, row.seed) : []),
+      ...(row.piIntercomNotice !== undefined
+        ? piIntercomProblems(run.home, golden, row.piIntercomNotice)
+        : []),
+    ];
+    return { golden, problems };
   } finally {
     cleanup([run]);
   }
+}
+
+/**
+ * The checks of a pi-intercom cutover case: sync exits 0, runs no install or
+ * uninstall of pi-intercom, prints `notice` exactly once and no other notice
+ * or removal command, and deploys the kit plugin with `talk.js` (the bytes of
+ * the SoT copy) in its manifest and with the `talk` skill.
+ */
+function piIntercomProblems(
+  home: string,
+  golden: MutationCaseGolden,
+  notice: string,
+): Array<string> {
+  const problems: Array<string> = [];
+  if (golden.exitCode !== 0) problems.push(`  exit code ${golden.exitCode}, expected 0`);
+  const changes = golden.argvLog
+    .split("\n")
+    .filter((line) => line.includes("pi-intercom") && /\b(?:install|uninstall)\b/.test(line));
+  if (changes.length > 0) problems.push(`  argv log changes pi-intercom: ${changes.join(" | ")}`);
+  const lines = golden.output.split("\n");
+  const notices = lines.filter((line) => line.includes("Notice:"));
+  if (notices.length !== 1 || notices[0] !== notice) {
+    problems.push(`  expected the notice once: ${notice}; got: ${notices.join(" | ") || "none"}`);
+  }
+  const removals = lines.filter((line) => /\b(?:uninstall|remove)\b.*pi-intercom/.test(line));
+  if (removals.length > 0) problems.push(`  output names a removal: ${removals.join(" | ")}`);
+
+  const plugin = join(home, ".docks-kit", "omp-plugin");
+  const manifest = parseJson(readFileSync(join(plugin, "package.json"), "utf8"));
+  const omp = manifest !== undefined && isObject(manifest) ? manifest["omp"] : undefined;
+  const extensions = omp !== undefined && isObject(omp) ? omp["extensions"] : undefined;
+  if (!Array.isArray(extensions) || !extensions.includes("./extensions/talk.js")) {
+    problems.push("  the deployed kit plugin manifest does not list ./extensions/talk.js");
+  }
+  const shipped = readFileSync(join(REPO_DIR, "SoT", ".omp", "plugin", "extensions", "talk.js"));
+  const deployed = join(plugin, "extensions", "talk.js");
+  if (!existsSync(deployed) || !readFileSync(deployed).equals(shipped)) {
+    problems.push(
+      "  the deployed extensions/talk.js differs from SoT/.omp/plugin/extensions/talk.js",
+    );
+  }
+  if (!existsSync(join(plugin, "skills", "talk", "SKILL.md"))) {
+    problems.push("  the deployed kit plugin has no skills/talk/SKILL.md");
+  }
+  return problems;
 }
 
 function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCaseGolden {
@@ -277,7 +340,8 @@ function collectCases(): {
   let invariantFailures = 0;
   let selectedChecks = 0;
 
-  for (const { fixture, cmd, stubs, variant } of MATRIX) {
+  for (const row of MATRIX) {
+    const { fixture, cmd, stubs, variant } = row;
     const label = matrixLabel(fixture, cmd, stubs, variant);
     if (label in cases)
       throw new Error(`duplicate matrix label ${label} — add a variant to disambiguate`);
@@ -290,7 +354,13 @@ function collectCases(): {
             .filter(([, body]) => body === null)
             .map(([name]) => name)
         : [];
-    cases[label] = runCase(cmd, fixture, stubDir, maskTools);
+    const { golden, problems } = runCase(row, stubDir, maskTools);
+    cases[label] = golden;
+    if (problems.length > 0) {
+      invariantFailures++;
+      banner(`CASE CHECK FAILURE ${label}`);
+      for (const problem of problems) console.log(problem);
+    }
   }
 
   for (const { fixture, cmd } of REPLAYS) {

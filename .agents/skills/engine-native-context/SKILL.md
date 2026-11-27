@@ -16,7 +16,7 @@ metadata:
     - path: cli/src/engine-native/jq.ts
       lines: "1-38"
     - path: cli/src/engine-native/parseHelp.ts
-      lines: "1-26"
+      lines: "1-25"
     - path: cli/src/engine-native/os/targets.ts
       lines: "1-64"
     - path: cli/test/unit/engine.test.ts

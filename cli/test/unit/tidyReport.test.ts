@@ -38,8 +38,8 @@ const ROWS: ReadonlyArray<ProcessRow> = [
   row({
     pid: 102,
     comm: "bun",
-    args: "bun /home/u/.omp/plugins/node_modules/pi-intercom/broker/broker.ts",
-    cwd: "/home/u/.omp/plugins/node_modules/pi-intercom",
+    args: "bun /home/u/.omp/plugins/node_modules/example-plugin/server/server.ts",
+    cwd: "/home/u/.omp/plugins/node_modules/example-plugin",
   }),
   row({
     pid: 103,

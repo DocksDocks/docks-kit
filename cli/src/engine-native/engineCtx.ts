@@ -14,7 +14,6 @@ export interface Ctx {
   readonly home: string;
   dryRun: boolean;
   verbose: boolean;
-  skipPluginRefresh?: boolean;
   /** Injected capability seam (logger/deps/platform) — see services.ts. */
   readonly services: EngineServices;
   terminalLease?: TerminalLease;
@@ -50,7 +49,6 @@ export function makeCtx(services: EngineServices, options: CtxOptions): Ctx {
     home,
     dryRun: globals["DRY_RUN"] === "1",
     verbose: globals["DOCKS_KIT_VERBOSE"] === "1",
-    skipPluginRefresh: false,
     services,
     nextStepTriggers: {
       ompRestart: false,

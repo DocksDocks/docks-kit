@@ -1,11 +1,13 @@
 /**
  * `omp plugin list --json` keys marketplace rows on a composite `id`
- * ("<plugin>@<marketplace>") with a `scope`, and npm rows on `name` plus
- * `version`. The marketplace rows drive the retirement of the old docks
- * marketplace plugins: the sync uninstalls each user-scope row, warns about
- * each project-scope row, and then removes the `docks` marketplace. The npm
- * rows drive the pi-intercom install and the kit plugin link: the kit links
- * its directory unless the kit plugin entry already resolves to it.
+ * ("<plugin>@<marketplace>") with a `scope`, and npm rows on `name`, with an
+ * optional `version` and `path`. The marketplace rows drive the retirement of
+ * the old docks marketplace plugins: the sync uninstalls each user-scope row,
+ * warns about each project-scope row, and then removes the `docks`
+ * marketplace. The npm rows drive the kit plugin link (the kit links its
+ * directory unless the kit plugin entry already resolves to it) and the
+ * pi-intercom notice: sync no longer installs, updates, or configures
+ * pi-intercom, and it prints one notice while the store lists it.
  */
 import {
   chmodSync,
@@ -13,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -41,7 +44,7 @@ vi.mock("../../src/engine-native/bun", () => ({
 }));
 
 import type { Ctx } from "../../src/engine-native";
-import { syncPlugins } from "../../src/engine-native/ompPlugins";
+import { piIntercomNotice, syncPlugins } from "../../src/engine-native/ompPlugins";
 import {
   ompNextSteps,
   ompSync,
@@ -54,7 +57,14 @@ import {
   makePlatform,
 } from "../../src/engine-native/services";
 
-const PIN = "0.13.0";
+/** The fixed part of the pi-intercom notice, after the store and the version. */
+const NOTICE_TAIL =
+  "docks-kit no longer installs or updates pi-intercom. The talk tool of the kit plugin replaces it. pi-intercom 0.19.0 from npm does not load on omp 19.2 or later.";
+
+/** The notice for `store`, with `version` as `version <v>` or `unknown version`. */
+function expectedNotice(store: string, version: string): string {
+  return `Notice: the omp plugin store ${store} lists pi-intercom, ${version}. ${NOTICE_TAIL}`;
+}
 const roots: Array<string> = [];
 /**
  * `ompSync` resolves its deploy roots from `process.env`, so an ambient
@@ -82,17 +92,19 @@ const REMOVE_MARKETPLACE = "plugin marketplace remove docks";
 const RESTART_NEXT_STEP = "Restart omp to load any refreshed plugins, skills, or tools.";
 
 /**
- * An inventory whose npm rows hold pi-intercom at the pin and the kit plugin
- * linked to the kit directory under `root`, with the given marketplace rows.
+ * An inventory whose npm rows hold the kit plugin linked to the kit
+ * directory under `root` and the given extra rows, with the given
+ * marketplace rows.
  */
-function inventory(root: string, marketplace: ReadonlyArray<object> = []): string {
+function inventory(
+  root: string,
+  marketplace: ReadonlyArray<object> = [],
+  npm: ReadonlyArray<object> = [],
+): string {
   const kitDir = join(root, ".docks-kit", "omp-plugin");
   mkdirSync(kitDir, { recursive: true });
   return JSON.stringify({
-    npm: [
-      { name: "pi-intercom", version: PIN },
-      { name: "docks-kit-omp", version: "0.0.0", path: kitDir },
-    ],
+    npm: [...npm, { name: "docks-kit-omp", version: "0.0.0", path: kitDir }],
     marketplace,
   });
 }
@@ -133,7 +145,6 @@ function useXdgDataRoot(root: string): string {
 function makeCtx(
   root: string,
   options: {
-    skipPluginRefresh?: boolean;
     missingTool?: "omp" | "git";
     dryRun?: boolean;
     output?: Array<string>;
@@ -156,7 +167,6 @@ function makeCtx(
     home: root,
     dryRun: options.dryRun ?? false,
     verbose: false,
-    skipPluginRefresh: options.skipPluginRefresh ?? false,
     services,
     nextStepTriggers: { ompRestart: false },
     failures: [],
@@ -231,8 +241,7 @@ describe("omp plugin inventory", () => {
       if (path === "SoT/.omp/mcp.json") return "{}\n";
       if (path === "SoT/.omp/models.yml") return "providers: {}\n";
       if (path === "SoT/.omp/config.yml") return "theme: dark\n";
-      if (path === "SoT/.omp/intercom.json") return "{}\n";
-      if (path === "SoT/toolchain.json") return `{"tools":{"pi-intercom":{"verified":"${PIN}"}}}`;
+      if (path === "SoT/toolchain.json") return '{"tools":{}}';
       throw new Error(`Unexpected payload: ${path}`);
     });
     mocks.spawnProcess.mockReset();
@@ -248,19 +257,16 @@ describe("omp plugin inventory", () => {
   });
 
   describe("retirement of the docks marketplace plugins", () => {
-    it.each([
-      ["a sync", false],
-      ["a sync with --skip-plugin-refresh", true],
-    ])("uninstalls each user-scope retired plugin in %s", async (_name, skipPluginRefresh) => {
+    it("uninstalls each user-scope retired plugin", async () => {
       const root = makeRoot();
       respondWithInventory(inventory(root, [DOCKS_USER_ROW, PLAN_USER_ROW]));
       const output: Array<string> = [];
-      const ctx = makeCtx(root, { skipPluginRefresh, output });
+      const ctx = makeCtx(root, { output });
 
       const installed = await syncOmpPlugins(ctx);
 
       expect(ompCommands()).toEqual(["plugin list --json", UNINSTALL_DOCKS, UNINSTALL_PLAN]);
-      expect(installed).toBe(2);
+      expect(installed).toBe(1);
       expect(pluginSummary(output)).toBe(
         "omp plugins synced: docks@docks uninstalled, plan-lifecycle@docks uninstalled",
       );
@@ -460,14 +466,9 @@ describe("omp plugin inventory", () => {
 
       await syncOmpPlugins(ctx);
 
-      expect(ompCommands()).toEqual([
-        "plugin list --json",
-        `install pi-intercom@${PIN}`,
-        kitLink(root),
-        "plugin list --json",
-      ]);
+      expect(ompCommands()).toEqual(["plugin list --json", kitLink(root)]);
       expect(messageLines(output, "omp plugin inventory")).toEqual([
-        "omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; pi-intercom and the kit plugin take the full refresh path",
+        "omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; the kit plugin takes the full refresh path",
       ]);
       expect(ctx.failures).toEqual([]);
     });
@@ -556,7 +557,6 @@ describe("omp plugin inventory", () => {
           `[dry-run] omp ${UNINSTALL_DOCKS}`,
           `[dry-run] omp ${UNINSTALL_PLAN}`,
           ...(removal ? [`[dry-run] omp ${REMOVE_MARKETPLACE}`] : []),
-          `[dry-run] omp install pi-intercom@${PIN}`,
           `[dry-run] omp ${kitLink(root)}`,
         ]);
         expect(ompCommands()).toEqual([]);
@@ -564,102 +564,49 @@ describe("omp plugin inventory", () => {
     );
   });
 
-  it("names the version of a new pi-intercom install and the kit plugin link", async () => {
+  it("counts no plugin when the kit plugin link fails", async () => {
     const root = makeRoot();
-    respondWithInventory([INVENTORY_EMPTY, inventory(root)]);
-    const output: Array<string> = [];
-
-    const state = await syncOmp(makeCtx(root, { output }));
-
-    expect(ompCommands()).toEqual([
-      "plugin list --json",
-      `install pi-intercom@${PIN}`,
-      kitLink(root),
-      "plugin list --json",
-    ]);
-    expect(state.pluginsInstalled).toBe(2);
-    expect(pluginSummary(output)).toBe(
-      `omp plugins synced: pi-intercom ${PIN} (new), docks-kit-omp linked`,
-    );
-  });
-
-  it("counts only successful installs when a plugin command fails", async () => {
-    respondWithInventory(INVENTORY_EMPTY, `install pi-intercom@${PIN}`);
-    const root = makeRoot();
+    respondWithInventory(INVENTORY_EMPTY, kitLink(root));
     const ctx = makeCtx(root);
 
     const state = await syncOmp(ctx);
 
-    expect(ompCommands()).toEqual([
-      "plugin list --json",
-      `install pi-intercom@${PIN}`,
-      kitLink(root),
-    ]);
-    expect(state.pluginsInstalled).toBe(1);
+    expect(ompCommands()).toEqual(["plugin list --json", kitLink(root)]);
+    expect(state.pluginsInstalled).toBe(0);
     expect(ctx.failures).toEqual([
-      `omp plugin operation failed for pi-intercom: stub omp operation failure; run manually: omp install pi-intercom@${PIN}`,
+      `omp plugin operation failed for docks-kit-omp: stub omp operation failure; run manually: omp ${kitLink(root)}`,
     ]);
   });
 
-  it("reinstalls pi-intercom with --force when the installed version misses the pin", async () => {
-    respondWithInventory(
-      JSON.stringify({ npm: [{ name: "pi-intercom", version: "0.9.0" }], marketplace: [] }),
-    );
-    const root = makeRoot();
-    const state = await syncOmp(makeCtx(root));
-
-    expect(ompCommands()).toEqual([
-      "plugin list --json",
-      `install --force pi-intercom@${PIN}`,
-      kitLink(root),
-      "plugin list --json",
-    ]);
-    expect(state.pluginsInstalled).toBe(2);
-  });
-
-  it("skips the pi-intercom refresh under --skip-plugin-refresh", async () => {
+  it("keeps a versionless npm row: a kit plugin link without a version needs no new link", async () => {
     const root = makeRoot();
     const kitDir = join(root, ".docks-kit", "omp-plugin");
     mkdirSync(kitDir, { recursive: true });
     respondWithInventory(
-      JSON.stringify({
-        npm: [
-          { name: "pi-intercom", version: "0.9.0" },
-          { name: "docks-kit-omp", version: "0.0.0", path: kitDir },
-        ],
-        marketplace: [],
-      }),
+      JSON.stringify({ npm: [{ name: "docks-kit-omp", path: kitDir }], marketplace: [] }),
     );
-    const state = await syncOmp(makeCtx(root, { skipPluginRefresh: true }));
+    const output: Array<string> = [];
+
+    const installed = await syncOmpPlugins(makeCtx(root, { output }));
 
     expect(ompCommands()).toEqual(["plugin list --json"]);
-    expect(state.pluginsInstalled).toBe(2);
+    expect(installed).toBe(1);
+    expect(pluginSummary(output)).toBeUndefined();
   });
 
-  it("still installs a missing pi-intercom under --skip-plugin-refresh", async () => {
-    respondWithInventory(INVENTORY_EMPTY);
-    const root = makeRoot();
-    const state = await syncOmp(makeCtx(root, { skipPluginRefresh: true }));
-
-    expect(ompCommands()).toEqual([
-      "plugin list --json",
-      `install pi-intercom@${PIN}`,
-      kitLink(root),
-      "plugin list --json",
-    ]);
-    expect(state.pluginsInstalled).toBe(2);
-  });
-
-  it("deploys config without spawning omp plugins when git is unavailable", async () => {
-    respondWithInventory(INVENTORY_EMPTY);
+  it("reads only the inventory and changes no plugin when git is unavailable", async () => {
     const root = makeRoot();
     writeRegistry(join(root, ".omp"), ["docks"]);
-    const ctx = makeCtx(root, { missingTool: "git" });
+    // Every plugin change would run with git: two uninstalls, the marketplace removal, the link.
+    respondWithInventory(JSON.stringify({ npm: [], marketplace: [DOCKS_USER_ROW, PLAN_USER_ROW] }));
+    const output: Array<string> = [];
+    const ctx = makeCtx(root, { missingTool: "git", output });
 
     const state = await syncOmp(ctx);
 
     expect(readFileSync(join(root, ".omp", "agent", "config.yml"), "utf8")).toBe("theme: dark\n");
-    expect(ompCommands()).toEqual([]);
+    expect(ompCommands()).toEqual(["plugin list --json"]);
+    expect(messageLines(output, "git not installed")).toHaveLength(1);
     expect(state.pluginsInstalled).toBe(0);
     expect(ctx.failures).toEqual([]);
   });
@@ -678,42 +625,38 @@ describe("omp plugin inventory", () => {
     expect(ompCommands()).toEqual([]);
   });
 
-  it("deploys the intercom configuration into the agent directory of a named profile", async () => {
-    respondWithInventory(INVENTORY_EMPTY);
-    const root = makeRoot();
-    process.env["OMP_PROFILE"] = "work";
+  it.each([
+    ["the default profile", undefined, [".pi", "agent", "intercom"]],
+    ["a named profile", "work", [".omp", "profiles", "work", "agent", "intercom"]],
+  ])(
+    "leaves the pi-intercom state folder of %s unchanged and writes no pi-intercom configuration",
+    async (_name, profile, folder) => {
+      const root = makeRoot();
+      if (profile !== undefined) process.env["OMP_PROFILE"] = profile;
+      const state = join(root, ...folder);
+      mkdirSync(state, { recursive: true });
+      writeFileSync(join(state, "config.json"), '{\r\n  "user": true\r\n}\r\n');
+      writeFileSync(join(state, "marker"), "kept\n");
+      respondWithInventory(inventory(root));
 
-    await syncOmp(makeCtx(root, { missingTool: "omp" }));
+      await syncOmp(makeCtx(root));
 
-    expect(
-      readFileSync(
-        join(root, ".omp", "profiles", "work", "agent", "intercom", "config.json"),
-        "utf8",
-      ),
-    ).toBe("{}\n");
-    expect(existsSync(join(root, ".pi", "agent", "intercom"))).toBe(false);
-  });
+      expect(readdirSync(state).sort()).toEqual(["config.json", "marker"]);
+      expect(readFileSync(join(state, "config.json"), "utf8")).toBe('{\r\n  "user": true\r\n}\r\n');
+      expect(readFileSync(join(state, "marker"), "utf8")).toBe("kept\n");
+      const other = profile === undefined ? [".omp", "agent", "intercom"] : [".pi"];
+      expect(existsSync(join(root, ...other))).toBe(false);
+    },
+  );
 
-  it("keeps only the ids in the summary when the inventory cannot be read", async () => {
+  it("keeps only the id in the summary when the inventory cannot be read", async () => {
     respondWithInventory("not json");
     const root = makeRoot();
     const output: Array<string> = [];
     const state = await syncOmp(makeCtx(root, { output }));
 
-    expect(state.pluginsInstalled).toBe(2);
-    expect(pluginSummary(output)).toBe("omp plugins synced: pi-intercom, docks-kit-omp linked");
-  });
-
-  it("shows versions without (new) when only the second inventory read succeeds", async () => {
-    const root = makeRoot();
-    respondWithInventory(["not json", inventory(root)]);
-    const output: Array<string> = [];
-    await syncOmp(makeCtx(root, { output }));
-
-    // The first read failed, so the sync cannot know whether a plugin was new.
-    expect(pluginSummary(output)).toBe(
-      `omp plugins synced: pi-intercom ${PIN}, docks-kit-omp linked`,
-    );
+    expect(state.pluginsInstalled).toBe(1);
+    expect(pluginSummary(output)).toBe("omp plugins synced: docks-kit-omp linked");
   });
 
   it("links the kit plugin again when omp's entry resolves elsewhere", async () => {
@@ -722,20 +665,17 @@ describe("omp plugin inventory", () => {
     mkdirSync(elsewhere);
     respondWithInventory(
       JSON.stringify({
-        npm: [
-          { name: "pi-intercom", version: PIN },
-          { name: "docks-kit-omp", version: "0.0.0", path: elsewhere },
-        ],
+        npm: [{ name: "docks-kit-omp", version: "0.0.0", path: elsewhere }],
         marketplace: [],
       }),
     );
     const output: Array<string> = [];
-    const ctx = makeCtx(root, { skipPluginRefresh: true, output });
+    const ctx = makeCtx(root, { output });
     const state = await syncOmpPlugins(ctx);
 
     // A link names no version, so no second inventory read runs.
     expect(ompCommands()).toEqual(["plugin list --json", kitLink(root)]);
-    expect(state).toBe(2);
+    expect(state).toBe(1);
     expect(pluginSummary(output)).toBe("omp plugins synced: docks-kit-omp linked");
     expect(ctx.nextStepTriggers.ompRestart).toBe(true);
   });
@@ -749,5 +689,170 @@ describe("omp plugin inventory", () => {
     const lines = output.join("").split("\n");
     expect(lines).toContain(`[dry-run] omp plugin link ${root}/.docks-kit/omp-plugin`);
     expect(ompCommands()).toEqual([]);
+  });
+
+  describe("pi-intercom notice", () => {
+    /** The omp plugin store of the default profile under `root`, as the engine names it. */
+    function store(root: string): string {
+      return `${root}/.omp/plugins`;
+    }
+
+    /** Each output line that starts the notice, from `Notice:` to the line end. */
+    function notices(output: ReadonlyArray<string>): Array<string> {
+      return messageLines(output, "Notice:");
+    }
+
+    /** The output text and the omp argv, both free of every pi-intercom change. */
+    function expectNoPiIntercomChange(output: ReadonlyArray<string>): void {
+      expect(ompCommands().filter((command) => command.includes("pi-intercom"))).toEqual([]);
+      expect(output.join("")).not.toMatch(/(uninstall|remove)[^\n]*pi-intercom/);
+    }
+
+    it("names the store and the version of a registry install, once, and changes nothing", async () => {
+      const root = makeRoot();
+      const row = {
+        name: "pi-intercom",
+        version: "0.19.0",
+        path: `${store(root)}/node_modules/pi-intercom`,
+      };
+      respondWithInventory(inventory(root, [], [row]));
+      const output: Array<string> = [];
+      const ctx = makeCtx(root, { output });
+
+      const installed = await syncOmpPlugins(ctx);
+
+      expect(ompCommands()).toEqual(["plugin list --json"]);
+      expect(notices(output)).toEqual([expectedNotice(store(root), "version 0.19.0")]);
+      // Informational: no warning tag, no failure, no restart advice.
+      expect(output.join("")).not.toMatch(/\[warn\][^\n]*Notice:/);
+      expect(ctx.failures).toEqual([]);
+      expect(ctx.nextStepTriggers.ompRestart).toBe(false);
+      expect(installed).toBe(1);
+      expectNoPiIntercomChange(output);
+    });
+
+    it("names a link without a version as unknown version", async () => {
+      const root = makeRoot();
+      respondWithInventory(
+        inventory(root, [], [{ name: "pi-intercom", path: "/opt/src/pi-intercom" }]),
+      );
+      const output: Array<string> = [];
+
+      await syncOmpPlugins(makeCtx(root, { output }));
+
+      expect(ompCommands()).toEqual(["plugin list --json"]);
+      expect(notices(output)).toEqual([expectedNotice(store(root), "unknown version")]);
+      expectNoPiIntercomChange(output);
+    });
+
+    it.each([
+      ["an escape sequence", "0.19.0\u001b[31m"],
+      ["a line break", "0.19.0\nrun: omp uninstall pi-intercom"],
+      ["65 characters", "1".repeat(65)],
+      ["an empty string", ""],
+      ["a space", "0.19.0 beta"],
+      ["a number", 19],
+    ])("names a version with %s as unknown version", async (_name, version) => {
+      const root = makeRoot();
+      respondWithInventory(inventory(root, [], [{ name: "pi-intercom", version }]));
+      const output: Array<string> = [];
+
+      await syncOmpPlugins(makeCtx(root, { output }));
+
+      expect(notices(output)).toEqual([expectedNotice(store(root), "unknown version")]);
+      expectNoPiIntercomChange(output);
+    });
+
+    it("keeps a version of 64 characters from the allowed set", async () => {
+      const root = makeRoot();
+      const version = `1.0.0-rc.1+build.${"a".repeat(47)}`;
+      expect(version).toHaveLength(64);
+      respondWithInventory(inventory(root, [], [{ name: "pi-intercom", version }]));
+      const output: Array<string> = [];
+
+      await syncOmpPlugins(makeCtx(root, { output }));
+
+      expect(notices(output)).toEqual([expectedNotice(store(root), `version ${version}`)]);
+    });
+
+    it("renders the store path as one line of terminal-safe text", () => {
+      const notice = piIntercomNotice(
+        "/home/u\u001b]0;title\u0007/.omp\r\n/plug\u2028ins",
+        "0.19.0",
+      );
+
+      expect(notice).toBe(expectedNotice("/home/u]0;title/.omp/plugins", "version 0.19.0"));
+      expect(notice).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+    });
+
+    it("names the store of a named omp profile", async () => {
+      const root = makeRoot();
+      process.env["OMP_PROFILE"] = "work";
+      respondWithInventory(inventory(root, [], [{ name: "pi-intercom", version: "0.19.0" }]));
+      const output: Array<string> = [];
+
+      await syncOmpPlugins(makeCtx(root, { output }));
+
+      expect(notices(output)).toEqual([
+        expectedNotice(`${root}/.omp/profiles/work/plugins`, "version 0.19.0"),
+      ]);
+      expectNoPiIntercomChange(output);
+    });
+
+    it("prints the notice without git, reads only the inventory, and changes no plugin", async () => {
+      const root = makeRoot();
+      writeRegistry(join(root, ".omp"), ["docks"]);
+      respondWithInventory(
+        JSON.stringify({
+          npm: [{ name: "pi-intercom", version: "0.19.0" }],
+          marketplace: [DOCKS_USER_ROW],
+        }),
+      );
+      const output: Array<string> = [];
+      const ctx = makeCtx(root, { missingTool: "git", output });
+
+      const installed = await syncOmpPlugins(ctx);
+
+      expect(ompCommands()).toEqual(["plugin list --json"]);
+      expect(notices(output)).toEqual([expectedNotice(store(root), "version 0.19.0")]);
+      expect(messageLines(output, "git not installed")).toHaveLength(1);
+      expect(installed).toBe(0);
+      expect(ctx.failures).toEqual([]);
+      expectNoPiIntercomChange(output);
+    });
+
+    it("spawns nothing and prints no notice in a dry run", async () => {
+      const root = makeRoot();
+      respondWithInventory(inventory(root, [], [{ name: "pi-intercom", version: "0.19.0" }]));
+      const output: Array<string> = [];
+
+      await syncOmp(makeCtx(root, { dryRun: true, output }));
+
+      expect(ompCommands()).toEqual([]);
+      expect(notices(output)).toEqual([]);
+      expect(output.join("")).not.toContain("pi-intercom");
+    });
+
+    it("reads no inventory and prints no notice when omp is unavailable", async () => {
+      const root = makeRoot();
+      respondWithInventory(inventory(root, [], [{ name: "pi-intercom", version: "0.19.0" }]));
+      const output: Array<string> = [];
+
+      await syncOmp(makeCtx(root, { missingTool: "omp", output }));
+
+      expect(ompCommands()).toEqual([]);
+      expect(notices(output)).toEqual([]);
+      expect(messageLines(output, "omp not installed")).toHaveLength(1);
+    });
+
+    it("prints no notice when the inventory lists no pi-intercom", async () => {
+      const root = makeRoot();
+      respondWithInventory(inventory(root));
+      const output: Array<string> = [];
+
+      await syncOmpPlugins(makeCtx(root, { output }));
+
+      expect(notices(output)).toEqual([]);
+    });
   });
 });

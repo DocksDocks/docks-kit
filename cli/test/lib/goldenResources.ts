@@ -190,6 +190,20 @@ process.on("SIGINT", handleSigint);
 process.on("SIGTERM", handleSigterm);
 
 /**
+ * The stub omp body: it prints the omp version and answers each
+ * `plugin list --json` with `npm` as the npm rows and no marketplace row.
+ * Every other omp command succeeds without output.
+ */
+export function ompStubBody(npm: ReadonlyArray<Readonly<Record<string, string>>> = []): string {
+  const inventory = JSON.stringify({ npm, marketplace: [] });
+  return `if (args[0] === "--version") {
+  console.log("omp/19.2.1")
+} else if (args[0] === "plugin" && args[1] === "list") {
+  console.log(${JSON.stringify(inventory)})
+}`;
+}
+
+/**
  * Canned stub behavior. Each stub appends "<name>\t<args>" to
  * `GOLDEN_ARGV_LOG` and emits just enough output for the engine's probes to
  * take a deterministic branch. Bodies are JavaScript so one runner can back
@@ -201,14 +215,11 @@ const STUB_BODIES: Record<string, string> = {
   // machine's host versions.
   git: `if (args[0] === "--version") console.log("git version 2.43.0")`,
   jq: `if (args[0] === "--version") console.log("jq-1.7.1")`,
-  // The inventory stays empty on every call, so a replay row pins the install
-  // path rather than the already-installed path; ompSync's present-detection
-  // is covered by cli/test/unit/ompPluginInventory.test.ts instead.
-  omp: `if (args[0] === "--version") {
-  console.log("omp/19.2.1")
-} else if (args[0] === "plugin" && args[1] === "list") {
-  console.log('{"npm":[],"marketplace":[]}')
-}`,
+  // The inventory stays empty on every call, so a replay row pins the link
+  // path rather than the already-linked path; ompSync's present-detection
+  // is covered by cli/test/unit/ompPluginInventory.test.ts instead. A case
+  // that needs inventory rows overrides this body with `ompStubBody(rows)`.
+  omp: ompStubBody(),
   npm: `if (args[0] === "view") console.log("0.0.1")`,
   bun: `if (args[0] === "--version") console.log("1.4.5")`,
   curl: ``,

@@ -68,7 +68,6 @@ function testCtx(root: string, dryRun = false, stdout: Array<string> = []): Ctx 
     home,
     dryRun,
     verbose: false,
-    skipPluginRefresh: false,
     nextStepTriggers: {
       ompRestart: false,
     },

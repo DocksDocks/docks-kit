@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { snapshotTree } from "../lib/goldenSnapshot";
+import {
+  seededTreeProblems,
+  snapshotTree,
+  writeSeededTree,
+  type SeededTree,
+} from "../lib/goldenSnapshot";
 
 function withSnapshotRoot(run: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "golden-snapshot-test-"));
@@ -13,6 +18,59 @@ function withSnapshotRoot(run: (root: string) => void): void {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+const SEED: SeededTree = {
+  root: ".pi/agent/intercom",
+  files: { "config.json": '{\r\n  "user": true\r\n}\r\n', "notes/marker": "kept\n" },
+};
+
+describe("seededTreeProblems", () => {
+  it("finds no problem when the seeded folder keeps its bytes and entries", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+
+      expect(seededTreeProblems(root, SEED)).toEqual([]);
+    });
+  });
+
+  it("compares raw bytes, so a CRLF to LF rewrite is a problem", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      writeFileSync(
+        join(root, ".pi", "agent", "intercom", "config.json"),
+        '{\n  "user": true\n}\n',
+      );
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        "  seeded file .pi/agent/intercom/config.json changed its bytes",
+      ]);
+    });
+  });
+
+  it("reports a new entry, such as a sync lock file, and a missing entry", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      const folder = join(root, ".pi", "agent", "intercom");
+      writeFileSync(join(folder, ".docks-kit-sync-lock.db"), "");
+      rmSync(join(folder, "notes", "marker"));
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        "  seeded folder .pi/agent/intercom entries differ: expected [config.json, notes, notes/marker] actual [.docks-kit-sync-lock.db, config.json, notes]",
+      ]);
+    });
+  });
+
+  it("reports a seeded folder that the run removed", () => {
+    withSnapshotRoot((root) => {
+      writeSeededTree(root, SEED);
+      rmSync(join(root, ".pi"), { recursive: true });
+
+      expect(seededTreeProblems(root, SEED)).toEqual([
+        "  seeded folder .pi/agent/intercom is missing",
+      ]);
+    });
+  });
+});
 
 describe("snapshotTree", () => {
   it("hashes binary CRLF bytes without text normalization", () => {

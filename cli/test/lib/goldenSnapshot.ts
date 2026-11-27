@@ -2,7 +2,14 @@
  * Output normalization and stable snapshot helpers for golden regressions.
  */
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -151,6 +158,64 @@ export function diffTrees(a: TreeSnapshot, b: TreeSnapshot): Array<string> {
     output.push(`  ${key}: A=${a[key] ?? "(absent)"} B=${b[key] ?? "(absent)"}`);
   }
   return output.sort();
+}
+
+/** Files that a golden case writes below HOME before its run, with their exact bytes. */
+export interface SeededTree {
+  /** The seeded folder, relative to HOME, with `/` separators. */
+  readonly root: string;
+  /** Each seeded file, by its path below `root` with `/` separators, with its text. */
+  readonly files: Readonly<Record<string, string>>;
+}
+
+/** Write each file of `seed` below `home`, with its parent folders. */
+export function writeSeededTree(home: string, seed: SeededTree): void {
+  for (const [name, text] of Object.entries(seed.files)) {
+    const path = join(home, ...seed.root.split("/"), ...name.split("/"));
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  }
+}
+
+/**
+ * The differences between the seeded folder below `home` and `seed`: first
+ * the sorted entry list (files and folders), then the raw bytes of each
+ * seeded file. Unlike `snapshotTree`, it normalizes no line ending and no
+ * path, so a rewrite from CRLF to LF and a new lock file both show.
+ */
+export function seededTreeProblems(home: string, seed: SeededTree): Array<string> {
+  const folder = join(home, ...seed.root.split("/"));
+  if (lstatSync(folder, { throwIfNoEntry: false })?.isDirectory() !== true) {
+    return [`  seeded folder ${seed.root} is missing`];
+  }
+  const names = Object.keys(seed.files).sort();
+  const expected = [
+    ...new Set(
+      names.flatMap((name) => {
+        const parts = name.split("/");
+        return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
+      }),
+    ),
+  ].sort();
+  const actual = readdirSync(folder, { recursive: true, encoding: "utf8" })
+    .map((entry) => entry.replaceAll("\\", "/"))
+    .sort();
+  const problems: Array<string> = [];
+  if (expected.join("\n") !== actual.join("\n")) {
+    problems.push(
+      `  seeded folder ${seed.root} entries differ: expected [${expected.join(", ")}] actual [${actual.join(", ")}]`,
+    );
+  }
+  for (const name of names) {
+    const path = join(folder, ...name.split("/"));
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    // The entry list above already names a missing file.
+    if (stat === undefined) continue;
+    if (!stat.isFile() || !readFileSync(path).equals(Buffer.from(seed.files[name]!, "utf8"))) {
+      problems.push(`  seeded file ${seed.root}/${name} changed its bytes`);
+    }
+  }
+  return problems;
 }
 
 export function diffText(label: string, a: string, b: string): Array<string> {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -131,11 +131,29 @@ describe("native CLI argument and output behavior", () => {
       expect(await runEngineNative(["sync", "--help"], services)).toBe(0);
       const help = stdout.join("");
       expect(help).toContain("Usage: docks-kit sync [flags]");
-      for (const flag of ["--dry-run", "--skip-plugin-refresh", "--verbose"]) {
+      for (const flag of ["--dry-run", "--verbose"]) {
         expect(help).toContain(flag);
       }
-      for (const removed of ["agents", "--prune", "claude"]) expect(help).not.toContain(removed);
+      for (const removed of ["agents", "--prune", "claude", "--skip-plugin-refresh"]) {
+        expect(help).not.toContain(removed);
+      }
       expect(stderr).toEqual([]);
+    });
+  });
+
+  it("refuses the removed --skip-plugin-refresh with exit 2 before it writes an omp file", async () => {
+    await withIsolatedHome(async (home) => {
+      const stderr: Array<string> = [];
+      const services = makeEngineServices({
+        sinks: { stdout: () => {}, stderr: (chunk) => void stderr.push(chunk) },
+      });
+
+      expect(await runEngineNative(["sync", "--skip-plugin-refresh"], services)).toBe(2);
+
+      expect(stderr.join("")).toContain("Unknown arg: --skip-plugin-refresh");
+      for (const folder of [".omp", ".pi", ".docks-kit"]) {
+        expect(existsSync(join(home, folder)), folder).toBe(false);
+      }
     });
   });
 });

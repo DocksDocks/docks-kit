@@ -175,7 +175,7 @@ async function runSync(ctx: Ctx, args: ReadonlyArray<string>): Promise<number> {
   // omp pipeline and its omp children use these paths, so a data root that
   // appears after the locks cannot move them.
   const omp = ompWriteFolders(ctx);
-  const folders = [omp.paths.agentDir, omp.intercomDir, omp.paths.dataRoot];
+  const folders = [omp.paths.agentDir, omp.paths.dataRoot];
   return await withFolderLocks(ctx, folders, () => runPipeline(ctx, omp));
 }
 

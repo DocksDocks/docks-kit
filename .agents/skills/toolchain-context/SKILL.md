@@ -10,7 +10,7 @@ metadata:
     - path: cli/src/engine-native/modes.ts
       lines: "1-67"
     - path: cli/src/engine-native/toolchain.ts
-      lines: "1-253"
+      lines: "1-237"
     - path: cli/src/engine-native/bun.ts
       lines: "1-120"
     - path: cli/src/engine-native/deps.ts
@@ -18,11 +18,11 @@ metadata:
     - path: cli/src/engine-native/kitDb.ts
       lines: "1-240"
     - path: cli/src/engine-native/ompSync.ts
-      lines: "1-146"
+      lines: "1-122"
     - path: cli/src/engine-native/sharedTypes.d.ts
       lines: "1-23"
     - path: SoT/toolchain.json
-      lines: "1-18"
+      lines: "1-15"
   updated: "2026-11-19"
 ---
 

@@ -22,7 +22,7 @@ metadata:
     - path: cli/src/payload.ts
       lines: "1-19"
     - path: cli/src/commands/sync.ts
-      lines: "1-76"
+      lines: "1-68"
     - path: cli/src/engine-native/exec.ts
       lines: "1-346"
     - path: cli/src/commands/update.ts
@@ -30,7 +30,7 @@ metadata:
     - path: cli/src/engine-native/index.ts
       lines: "1-66"
     - path: cli/src/engine-native/engineCtx.ts
-      lines: "1-60"
+      lines: "1-58"
     - path: cli/src/engine-native/syncDispatch.ts
       lines: "1-224"
     - path: cli/src/engine-native/kitLock.ts
@@ -40,19 +40,19 @@ metadata:
     - path: cli/src/engine-native/failures.ts
       lines: "1-16"
     - path: cli/src/engine-native/parseArgs.ts
-      lines: "1-33"
+      lines: "1-30"
     - path: cli/src/engine-native/parseHelp.ts
-      lines: "1-26"
+      lines: "1-25"
     - path: cli/src/engine-native/modes.ts
       lines: "1-67"
     - path: cli/src/engine-native/ompSync.ts
-      lines: "1-146"
+      lines: "1-122"
     - path: cli/src/engine-native/ompPlugins.ts
-      lines: "1-379"
+      lines: "1-374"
     - path: cli/src/engine-native/bun.ts
       lines: "1-120"
     - path: cli/src/engine-native/toolchain.ts
-      lines: "1-253"
+      lines: "1-237"
   updated: "2026-11-20"
 ---
 

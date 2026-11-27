@@ -1,14 +1,51 @@
+import { ompStubBody } from "./goldenResources";
+import type { SeededTree } from "./goldenSnapshot";
+
 export interface MutationMatrixCase {
   fixture: string;
   cmd: Array<string>;
   stubs?: Record<string, string | null>;
   variant?: string;
+  /** Extra environment of the run, such as `OMP_PROFILE` for a named omp profile. */
+  env?: Record<string, string>;
+  /** Files that the case writes below HOME before the run; the run must leave their bytes and entries as they are. */
+  seed?: SeededTree;
+  /**
+   * The pi-intercom notice that the output must hold exactly once, with the
+   * run home as `<HOME>`. A case with a notice also checks that sync changes
+   * no pi-intercom install and that the deployed kit plugin ships `talk`.
+   */
+  piIntercomNotice?: string;
 }
 
 export interface MutationReplayCase {
   fixture: string;
   cmd: Array<string>;
 }
+
+/**
+ * The old pi-intercom state folder below the agent root `agentRoot`, where
+ * pi-intercom keeps its state: `~/.pi/agent` for the default profile, the
+ * profile agent folder for a named profile. `config.json` has CRLF line
+ * endings, so a rewrite that only normalizes them shows too.
+ */
+function piIntercomState(agentRoot: string): SeededTree {
+  return {
+    root: `${agentRoot}/intercom`,
+    files: {
+      "config.json": '{\r\n  "brokerCommand": "bun",\r\n  "brokerArgs": []\r\n}\r\n',
+      "user-marker.txt": "kept by the user\n",
+    },
+  };
+}
+
+/** The expected pi-intercom notice for `store`, with `version` as `version <v>` or `unknown version`. */
+function piIntercomNotice(store: string, version: string): string {
+  return `Notice: the omp plugin store ${store} lists pi-intercom, ${version}. docks-kit no longer installs or updates pi-intercom. The talk tool of the kit plugin replaces it. pi-intercom 0.19.0 from npm does not load on omp 19.2 or later.`;
+}
+
+/** An npm row of a registry install of pi-intercom 0.19.0, the last release that sync installed. */
+const PI_INTERCOM_REGISTRY_ROW = { name: "pi-intercom", version: "0.19.0" };
 
 // `variant` disambiguates rows whose fixture+cmd+stub-keys are identical but
 // whose stub BODIES differ — without it their labels collide and the later
@@ -43,6 +80,45 @@ export const MATRIX: Array<MutationMatrixCase> = [
   },
   // Missing git: one hint-bearing warn from the dependency registry.
   { fixture: "home-fresh", cmd: ["sync"], stubs: { git: null } },
+  // pi-intercom cutover: sync installs, updates, configures, and locks
+  // nothing of pi-intercom, prints one notice while the store lists it, and
+  // leaves its state folder byte-identical.
+  {
+    fixture: "home-fresh",
+    cmd: ["sync"],
+    stubs: { omp: ompStubBody([PI_INTERCOM_REGISTRY_ROW]) },
+    variant: "pi-intercom-registry",
+    seed: piIntercomState(".pi/agent"),
+    piIntercomNotice: piIntercomNotice("<HOME>/.omp/plugins", "version 0.19.0"),
+  },
+  // omp lists a local link without a version.
+  {
+    fixture: "home-fresh",
+    cmd: ["sync"],
+    stubs: { omp: ompStubBody([{ name: "pi-intercom", path: "/opt/src/pi-intercom" }]) },
+    variant: "pi-intercom-link",
+    seed: piIntercomState(".pi/agent"),
+    piIntercomNotice: piIntercomNotice("<HOME>/.omp/plugins", "unknown version"),
+  },
+  // A named omp profile: sync and omp take the profile from OMP_PROFILE.
+  {
+    fixture: "home-fresh",
+    cmd: ["sync"],
+    stubs: { omp: ompStubBody([PI_INTERCOM_REGISTRY_ROW]) },
+    variant: "pi-intercom-profile",
+    env: { OMP_PROFILE: "work" },
+    seed: piIntercomState(".omp/profiles/work/agent"),
+    piIntercomNotice: piIntercomNotice("<HOME>/.omp/profiles/work/plugins", "version 0.19.0"),
+  },
+  // Without git, sync still reads the inventory and prints the notice, and it changes no plugin.
+  {
+    fixture: "home-fresh",
+    cmd: ["sync"],
+    stubs: { omp: ompStubBody([PI_INTERCOM_REGISTRY_ROW]), git: null },
+    variant: "pi-intercom-git-missing",
+    seed: piIntercomState(".pi/agent"),
+    piIntercomNotice: piIntercomNotice("<HOME>/.omp/plugins", "version 0.19.0"),
+  },
 ];
 
 /**

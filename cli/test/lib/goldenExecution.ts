@@ -20,7 +20,7 @@ import { hostOs } from "../../src/engine-native/os";
 
 import { BUN_RUNTIME, cliEntry } from "./cliEntry";
 import { FIXTURES_DIR, REPO_DIR, childHostId, readStubHost, temporaryDir } from "./goldenResources";
-import { normalizeOutput } from "./goldenSnapshot";
+import { normalizeOutput, writeSeededTree, type SeededTree } from "./goldenSnapshot";
 
 const BUN_INSTALL_CACHE_DIR = temporaryDir("golden-bun-cache-");
 const BUN_RUNTIME_TRANSPILER_CACHE_PATH = temporaryDir("golden-bun-transpiler-");
@@ -101,6 +101,8 @@ interface RunOpts {
   readonly nativeHost?: boolean;
   /** Working directory of the child; the repository root by default. */
   readonly cwd?: string;
+  /** Files that `runEngine` writes below HOME before the run, with their exact bytes. */
+  readonly seed?: SeededTree;
 }
 
 function childArgv(args: ReadonlyArray<string>, opts: RunOpts): Array<string> {
@@ -171,6 +173,7 @@ export function runEngine(
 ): EngineRun {
   requirePairedStubHost(stubDir, opts);
   const home = materializeHome("native", fixture, opts.reuseHome);
+  if (opts.seed !== undefined) writeSeededTree(home, opts.seed);
   const argvLog = join(home, ".golden-argv.log");
   writeFileSync(argvLog, "");
 

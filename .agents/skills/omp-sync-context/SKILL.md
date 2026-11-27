@@ -6,11 +6,11 @@ metadata:
   pattern: tool-wrapper
   source_files:
     - path: cli/src/engine-native/ompSync.ts
-      lines: "1-146"
+      lines: "1-122"
     - path: cli/src/engine-native/ompFileDeploy.ts
       lines: "1-116"
     - path: cli/src/engine-native/ompPlugins.ts
-      lines: "1-379"
+      lines: "1-374"
     - path: cli/src/engine-native/ompKitPlugin.ts
       lines: "1-99"
     - path: cli/src/engine-native/ompRemovals.ts

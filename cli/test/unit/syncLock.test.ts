@@ -8,9 +8,9 @@
  * `another docks-kit sync holds <path>; run sync again after it ends` and
  * returns exit code 1.
  *
- * A writing sync also takes a folder lock in each omp
- * folder that it writes: the omp agent folder, the omp intercom folder, and
- * the omp data root. Syncs of different homes can share these folders.
+ * A writing sync also takes a folder lock in each omp folder that it writes:
+ * the omp agent folder and the omp data root. Syncs of different homes can
+ * share these folders. It takes no lock in the old pi-intercom folder.
  *
  * Wait bound seam: both call sites read `DOCKS_KIT_SYNC_LOCK_WAIT_MS` from
  * `process.env` at the start of the run. Unset or empty means `SYNC_LOCK_WAIT_MS`
@@ -383,7 +383,7 @@ describe("folder locks of a shared omp folder", () => {
     });
   });
 
-  it("creates no intercom folder in a held omp agent folder and keeps its mode", async () => {
+  it("keeps the mode of a held omp agent folder and writes nothing into it", async () => {
     await withHome(async () => {
       await withSharedFolder(async (shared) => {
         // A mode other than 0700, so that a chmod to 0700 shows.
@@ -392,23 +392,25 @@ describe("folder locks of a shared omp folder", () => {
 
         await holdingFolderLock(shared, async (lock) => {
           const mode = statSync(shared).mode;
+          const before = snapshot(shared);
           const records: Array<string> = [];
 
           expect(await runEngineNative(["sync"], recordingServices(records))).toBe(1);
 
           expect(records).toContain(heldLineFor(lock));
-          expect(existsSync(join(shared, "intercom"))).toBe(false);
+          expect(snapshot(shared)).toEqual(before);
           expect(statSync(shared).mode).toBe(mode);
         });
       });
     });
   });
 
-  it("makes a sync of another home wait while a sync holds the shared omp intercom folder", async () => {
+  it("does not wait for a lock in the old pi-intercom folder and leaves that folder unchanged", async () => {
     await withHome(async (home) => {
       await withSharedFolder(async (shared) => {
-        // The intercom root `~/.pi/agent` links to a folder that another home
-        // also uses. The omp agent folder stays `~/.omp/agent` in the home.
+        // The old pi-intercom root `~/.pi/agent` links to a folder that
+        // another home also uses, and a holder keeps a lock in its `intercom`
+        // folder. The sync no longer writes or locks that folder.
         const intercom = join(shared, "intercom");
         mkdirSync(intercom);
         chmodSync(intercom, 0o755);
@@ -417,15 +419,15 @@ describe("folder locks of a shared omp folder", () => {
 
         await holdingFolderLock(intercom, async (lock) => {
           const mode = statSync(intercom).mode;
+          const before = snapshot(intercom);
           const records: Array<string> = [];
 
-          expect(await runEngineNative(["sync"], recordingServices(records))).toBe(1);
+          expect(await runEngineNative(["sync"], recordingServices(records))).toBe(0);
 
-          expect(records).toContain(heldLineFor(lock));
-          expect(existsSync(join(intercom, "config.json"))).toBe(false);
+          expect(records).not.toContain(heldLineFor(lock));
+          expect(snapshot(intercom)).toEqual(before);
           expect(statSync(intercom).mode).toBe(mode);
         });
-        expect(await probe(home)).toBe("acquired");
       });
     });
   });

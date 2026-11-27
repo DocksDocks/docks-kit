@@ -232,7 +232,7 @@ export const updateCheckout = (home: string, skipSync: boolean, spawn: UpdateSpa
     const after = git(spawn, home, ["rev-parse", "HEAD"]).out;
 
     // A current kit still syncs: the sync repairs drift of the deployed files
-    // and plugins, for example a pi-intercom install that left its pin.
+    // and of the kit plugin link.
     const changed = before !== after;
     if (changed) {
       const count = git(spawn, home, ["rev-list", "--count", `${before}..${after}`]).out;
