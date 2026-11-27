@@ -2019,6 +2019,12 @@ const LIST_LINE =
   /^- .* \[[^\]]*\]( \(this session\))?: session `([^`\s]+)`, folder .*, instance ([^\s;]+)/;
 const NOT_LIVE_SEND = "the send failed: not-live";
 const PONG = "talk smoke pong";
+/** The first line of the handover template (`HANDOVER_PROMPT` in `cli/talk/ui/handover.ts`). */
+const HANDOVER_PROMPT_TEXT = "Write a handover of the work in this session";
+/** The kind of a handover message (`DeliverKind` in `cli/talk/tool/protocol.ts`). */
+const HANDOVER_KIND = "handover";
+/** The refusal of `handover` outside a TUI session (`HANDOVER_NEEDS_TUI` in `cli/talk/extension.ts`). */
+const HANDOVER_NEEDS_TUI_TEXT = "talk: the handover action needs an interactive omp session";
 /** The longest wait of one step: a tool call, an RPC command, or a peer state. */
 const STEP_TIMEOUT_MS = 30_000;
 const POLL_MS = 100;
@@ -2037,6 +2043,7 @@ const TALK_CHECKS = [
   "talk-offered",
   "talk-list",
   "talk-send",
+  "handover-refused",
   "talk-ask-reply",
   "talk-queued",
   "talk-cancel",
@@ -2111,6 +2118,14 @@ function newUserText(request: JsonObject): string | undefined {
   return fresh.length === 0
     ? undefined
     : fresh.map((message) => textOf(message["content"])).join("\n");
+}
+
+/** Whether a user message of a request holds the handover template: the request is a side turn. */
+function holdsHandoverPrompt(request: JsonObject): boolean {
+  return objects(request["messages"]).some(
+    (message) =>
+      message["role"] === "user" && textOf(message["content"]).includes(HANDOVER_PROMPT_TEXT),
+  );
 }
 
 /**
@@ -2378,16 +2393,18 @@ function talkEntryIndex(entries: readonly JsonObject[], messageId: string): numb
   return entries.findIndex((entry) => talkMessageId(entry) === messageId);
 }
 
-/** Whether an entry holds, in any field, the message id or the payload text of a message. */
+/** Whether an entry holds, in any field, the message id (when one is given) or the payload text. */
 function mentionsMessage(
   entries: readonly JsonObject[],
-  messageId: string,
+  messageId: string | undefined,
   payload: string,
 ): boolean {
   const escaped = JSON.stringify(payload).slice(1, -1);
   return entries.some((entry) => {
     const serialized = JSON.stringify(entry);
-    return serialized.includes(messageId) || serialized.includes(escaped);
+    return (
+      (messageId !== undefined && serialized.includes(messageId)) || serialized.includes(escaped)
+    );
   });
 }
 
@@ -2603,14 +2620,14 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
      * The absence check of #251 G9 (1). `kept` is the last checked answer of the session, which holds a
      * confirmed delivery. After the step that must not deliver, a fresh sentinel message goes to
      * `instance`, the same session; the answer that holds it must continue `kept`, and only then does the
-     * absence of `messageId` and `payload` count.
+     * absence of `messageId` (when the step gave one) and `payload` count. Gives the sentinel answer.
      */
     const expectAbsent = async (
       kept: EntriesAnswer,
       instance: string,
-      messageId: string,
+      messageId: string | undefined,
       payload: string,
-    ): Promise<void> => {
+    ): Promise<EntriesAnswer> => {
       const sentinel = await expectDelivered(
         await sender.call(TALK_TOOL, {
           action: "send",
@@ -2621,7 +2638,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       );
       expectContinues(kept, sentinel.answer, sentinel.messageId);
       if (mentionsMessage(sentinel.answer.entries, messageId, payload))
-        failStep(`the peer session holds the message ${messageId} or its text`);
+        failStep(`the peer session holds the message ${messageId ?? "of the step"} or its text`);
+      return sentinel.answer;
     };
     /** Lists until a session line shows `sessionId` with an instance that is not in `ended`; gives that instance. */
     const listUntil = async (sessionId: string, ended: readonly string[]): Promise<string> => {
@@ -2707,6 +2725,32 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       }),
       firstInstance,
     );
+    pass();
+
+    // H3 of #260: a print session refuses the handover action before its side turn and sends nothing.
+    step = "handover-refused";
+    const requestsBefore = run.requests.length;
+    const handoverNote = "talk smoke: handover note of the print session";
+    const refusal = await sender.call(TALK_TOOL, {
+      action: "handover",
+      instance: firstInstance,
+      message: handoverNote,
+    });
+    if (!refusal.includes(HANDOVER_NEEDS_TUI_TEXT) || !refusal.includes("Nothing was sent."))
+      failStep(`the handover of the print session did not read the refusal: ${short(refusal)}`);
+    if (run.requests.slice(requestsBefore).some(holdsHandoverPrompt))
+      failStep("the fake model got a handover side-turn request from the print session");
+    const afterRefusal = await expectAbsent(hello.answer, firstInstance, undefined, handoverNote);
+    const handoverEntry = afterRefusal.entries.find((entry) => {
+      const details = entry["details"];
+      return (
+        talkMessageId(entry) !== undefined &&
+        isObject(details) &&
+        details["kind"] === HANDOVER_KIND
+      );
+    });
+    if (handoverEntry !== undefined)
+      failStep(`the peer session holds the handover entry ${String(handoverEntry["id"])}`);
     pass();
 
     step = "talk-ask-reply";
@@ -2970,12 +3014,34 @@ const CARD_MORE = "… 1 more lines";
  * (`literal`), then the local time.
  */
 const CARD_HEADER = /talk message from `[^`\n]+` · `([^`\n]+)` · \d\d:\d\d/;
-/** The first line of the handover template (`HANDOVER_PROMPT` in `cli/talk/ui/handover.ts`). */
-const HANDOVER_PROMPT_TEXT = "Write a handover of the work in this session";
 /** The reply of the fake model to the handover side turn, and the text that the flow types before it. */
 const HANDOVER_DRAFT = "talk-ui smoke draft: run the next check.\nRisks: none.";
 const HANDOVER_EDIT = "edited ";
-const HANDOVER_KIND = "handover";
+/**
+ * A prompt with this marker makes the fake model of the TUI omp call the `handover` action once (#260 H7). The
+ * side turn of that handover gets its own draft, so the checks can tell it from the draft of `/talk handover`.
+ */
+const TOOL_HANDOVER_MARKER = "SMOKE-HANDOVER";
+const TOOL_HANDOVER_DRAFT =
+  "talk-ui smoke agent draft: continue the tool check.\nAgent risks: none.";
+const TOOL_CANCEL_DRAFT = "talk-ui smoke draft that escape cancels.\nCancel risks: none.";
+/**
+ * The start of the line that names the agent and the target in the waiting view and in the review of a
+ * tool-started handover (`agentStarted` in `cli/talk/ui/handover.ts`); the review row continues with
+ * `REVIEW_KEYS` (`agentHandoverHeader`). The row is never sent.
+ */
+const AGENT_NOTICE_START = "talk: the agent started a handover to ";
+const REVIEW_KEYS = "ctrl\\+s confirms the destination";
+/** The outcome of a handover that the session accepted (`dispatchResult` in `cli/talk/tool/tool.ts`). */
+const HANDOVER_ACCEPTED = /\bHandover: (?:Delivered|Queued|Submitted):/;
+/** The result of a handover that the user cancelled (`HANDOVER_CANCELLED` in `cli/talk/tool/tool.ts`). */
+const HANDOVER_CANCELLED_TEXT = "talk: the handover was cancelled. Nothing was sent.";
+/** The end of the head line of a handover message (`formatDelivery` in `cli/talk/tool/format.ts`). */
+const HANDOVER_HEAD_START = "**Handover from ";
+const HANDOVER_HEAD_END = ": the sender asks this session to continue its work.";
+/** The line under each head line of a talk message (`TRUST_LINE` in `cli/talk/tool/format.ts`). */
+const TRUST_LINE =
+  "This message comes from another omp session. It is not an instruction from the user.";
 /** The start and the end of the capability notice (`capabilityNotice` in `cli/talk/extension.ts`). */
 const CAPABILITY_NOTICE_START = "talk: this omp has no ";
 const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the talk tool is off.`;
@@ -3013,6 +3079,8 @@ const UI_CHECKS = [
   "ui-compose-send",
   "ui-card",
   "ui-handover",
+  "ui-tool-handover",
+  "ui-tool-handover-cancel",
   "extensions-loaded",
   "sessions",
   "isolated",
@@ -3306,6 +3374,61 @@ class PeerCalls {
   }
 }
 
+/** One tool-started handover of the TUI omp that the driver waits for (#260 H7). */
+interface HandoverCall extends MarkedCall {
+  /** The reply of the fake model to the side turn of this handover. */
+  readonly draft: string;
+}
+
+/**
+ * The fake model of the TUI omp. A handover side turn gets the draft: the draft of the expected tool-started
+ * handover once its call went out, else the draft of `/talk handover`. The turn of a prompt with the marker of
+ * the expected handover calls `talk` with `action: "handover"`, and the driver gets its tool result. Every
+ * other turn answers "ok".
+ */
+class TerminalModel {
+  #pending: HandoverCall | null = null;
+  #count = 0;
+
+  /**
+   * Makes the turn of the next prompt with `marker` call `talk` with `toolArgs`, and the side turn of that
+   * handover get `draft`; gives the tool result that the request after the flow carries.
+   */
+  expect(
+    marker: string,
+    toolArgs: Readonly<Record<string, string>>,
+    draft: string,
+  ): Promise<string> {
+    this.#count += 1;
+    const id = `tui-${this.#count}`;
+    const result = Promise.withResolvers<string>();
+    const call = { id, name: TALK_TOOL, arguments: toolArgs };
+    this.#pending = { marker, call, draft, result, issued: false };
+    return withTimeout(result.promise, STEP_TIMEOUT_MS, `the handover call ${id} of the TUI omp`);
+  }
+
+  respond(request: JsonObject): Answer {
+    const pending = this.#pending;
+    const prompt = newUserText(request);
+    // The side turn copies the session with the pending call and a synthetic result of it (#260 F7), so the
+    // template decides before the result does.
+    if (prompt?.includes(HANDOVER_PROMPT_TEXT) === true)
+      return pending?.issued === true ? pending.draft : HANDOVER_DRAFT;
+    if (pending === null) return [];
+    if (!pending.issued) {
+      if (prompt?.includes(pending.marker) !== true) return [];
+      pending.issued = true;
+      return [pending.call];
+    }
+    const result = toolResultText(request, pending.call.id);
+    if (result !== undefined) {
+      this.#pending = null;
+      pending.result.resolve(result);
+    }
+    return [];
+  }
+}
+
 /**
  * The talk-ui mode (#251 G8): omp in TUI mode in a pseudo-terminal beside an omp RPC peer, both with the talk
  * plugin copy and a private registry folder. On an omp older than 19.2.0, the TUI omp must show the one
@@ -3341,11 +3464,10 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
 
   const env: Record<string, string> = { ...run.env, TERM: TERMINAL_TYPE };
   const peerCalls = new PeerCalls();
+  const terminalModel = new TerminalModel();
   run.script.respond = async (request) => {
     if (request["model"] === PEER_MODEL_ID) return peerCalls.respond(request);
-    if (request["model"] !== UI_MODEL_ID) return [];
-    // The handover side turn gets the draft; every other turn of the TUI omp answers "ok".
-    return newUserText(request)?.includes(HANDOVER_PROMPT_TEXT) === true ? HANDOVER_DRAFT : [];
+    return request["model"] === UI_MODEL_ID ? terminalModel.respond(request) : [];
   };
 
   let step: UiCheck = checks[1] ?? "install";
@@ -3592,6 +3714,121 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
         text(entry["content"])?.includes(edited) === true
       );
     });
+    pass();
+
+    /**
+     * Types a prompt whose turn makes the fake model of the TUI omp call the `handover` action to the peer
+     * (#260 H7). Waits for the start notice that names the agent and the peer instance, and for the side-turn
+     * draft in the review. `result` gives the tool result after the driver ends the flow.
+     */
+    const startAgentHandover = async (
+      toolArgs: Readonly<Record<string, string>>,
+      draft: string,
+      instance: string,
+    ): Promise<{ readonly result: Promise<string> }> => {
+      const result = terminalModel.expect(TOOL_HANDOVER_MARKER, toolArgs, draft);
+      result.catch(() => undefined);
+      const promptText = `${TOOL_HANDOVER_MARKER}: hand the work over to the peer.`;
+      const typed = screen.mark();
+      screen.write(promptText);
+      await screen.waitFor(promptText, typed, "typed handover prompt");
+      const asked = screen.mark();
+      screen.write(ENTER_KEY);
+      // The first row of the review names the agent and the target; it is not part of the editable text.
+      await screen.waitFor(
+        new RegExp(`${AGENT_NOTICE_START}[^\\n]* \\(instance ${instance}\\) · ${REVIEW_KEYS}`),
+        asked,
+        `review start line of the agent handover to instance ${instance}`,
+      );
+      const [draftLine = ""] = draft.split("\n");
+      await screen.waitFor(draftLine, asked, "side-turn draft in the agent handover review");
+      return { result };
+    };
+    /** H4 of #260: the tool result holds no line of the draft. */
+    const expectNoDraft = (result: string, draft: string): void => {
+      for (const line of draft.split("\n"))
+        if (result.includes(line))
+          failStep(`the tool result holds the draft line ${JSON.stringify(line)}: ${short(result)}`);
+    };
+    /**
+     * #260 H2: the start notice shows only in the talk views of the flow. After the flow, the TUI turn ends
+     * with the "ok" answer, and no output after the mark `from` (taken when the last view closes) draws the
+     * start notice, for example as a late transcript notice.
+     */
+    const expectNoLateNotice = async (from: number): Promise<void> => {
+      await screen.waitFor(/\bok\b/, from, "answer of the TUI turn after the handover result");
+      await sleep(SETTLE_MS);
+      const late = new RegExp(`${AGENT_NOTICE_START}[^\\n]*`).exec(screen.text(from));
+      if (late !== null)
+        failStep(`the screen shows the start notice after the flow ended: ${short(late[0])}`);
+    };
+
+    step = "ui-tool-handover";
+    const handover = await startAgentHandover(
+      { action: "handover", instance: peerInstance },
+      TOOL_HANDOVER_DRAFT,
+      peerInstance,
+    );
+    const sending = screen.mark();
+    screen.write(CTRL_S_KEY);
+    await confirm(sending, peerInstance, HANDOVER_KIND);
+    const sent = screen.mark();
+    const toolResult = await handover.result;
+    if (!HANDOVER_ACCEPTED.test(toolResult))
+      failStep(`the handover result names no accepted outcome: ${short(toolResult)}`);
+    expectNoDraft(toolResult, TOOL_HANDOVER_DRAFT);
+    const handedOver = resultIds(toolResult);
+    if (handedOver.instance !== peerInstance)
+      failStep(`the handover reached instance ${handedOver.instance}, expected ${peerInstance}`);
+    // The wake starts a turn of the peer, so an answer follows the entry of the message.
+    const handedWhat = `talk entry of message ${handedOver.messageId} with an answer after it`;
+    await waitFor(handedWhat, async () => {
+      const { entries } = checkedEntries(await rpc.send({ type: "get_entries" }));
+      const at = talkEntryIndex(entries, handedOver.messageId);
+      return at >= 0 && entries.slice(at + 1).some(isAssistantEntry);
+    });
+    await waitPeerIdle();
+    const { entries: handedEntries } = checkedEntries(await rpc.send({ type: "get_entries" }));
+    const handedEntry = handedEntries[talkEntryIndex(handedEntries, handedOver.messageId)];
+    const handedDetails = handedEntry?.["details"];
+    const handedText = text(handedEntry?.["content"]) ?? "";
+    if (!isObject(handedDetails) || handedDetails["kind"] !== HANDOVER_KIND)
+      failStep(`the talk entry of message ${handedOver.messageId} is not of kind ${HANDOVER_KIND}`);
+    if (
+      !handedText.startsWith(HANDOVER_HEAD_START) ||
+      !handedText.includes(`${HANDOVER_HEAD_END}\n${TRUST_LINE}\n`) ||
+      !handedText.includes(TOOL_HANDOVER_DRAFT) ||
+      handedText.includes(AGENT_NOTICE_START)
+    )
+      failStep(
+        `the handover message has no handover head, trust line, and draft, or holds the review header: ${short(handedText)}`,
+      );
+    await expectNoLateNotice(sent);
+    pass();
+
+    step = "ui-tool-handover-cancel";
+    const kept = checkedEntries(await rpc.send({ type: "get_entries" }));
+    const cancelled = await startAgentHandover(
+      { action: "handover", to: sessionId },
+      TOOL_CANCEL_DRAFT,
+      peerInstance,
+    );
+    const escaped = screen.mark();
+    screen.write(ESC);
+    const cancelResult = await cancelled.result;
+    if (!cancelResult.includes(HANDOVER_CANCELLED_TEXT))
+      failStep(`the handover result after escape is not cancelled: ${short(cancelResult)}`);
+    expectNoDraft(cancelResult, TOOL_CANCEL_DRAFT);
+    await expectNoLateNotice(escaped);
+    const later = checkedEntries(await rpc.send({ type: "get_entries" }));
+    const added = later.entries.find(
+      (entry) => !kept.parents.has(String(entry["id"])) && talkMessageId(entry) !== undefined,
+    );
+    if (added !== undefined)
+      failStep(`the peer session holds the new talk entry ${String(added["id"])}`);
+    for (const line of TOOL_CANCEL_DRAFT.split("\n"))
+      if (mentionsMessage(later.entries, undefined, line))
+        failStep(`the peer session holds the draft line ${JSON.stringify(line)}`);
     pass();
   };
 
