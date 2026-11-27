@@ -11,6 +11,7 @@ import {
   confirmTo,
   fire,
   flush,
+  type Harness,
   harness,
   itemsOf,
   key,
@@ -239,7 +240,7 @@ describe("list view (G3)", () => {
       await flush();
       // The list ended inside its factory, so omp mounts nothing of it.
       expect(h.tui.views[0]?.closed).toBe(true);
-      expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
+      expect(h.tui.views[0]?.result).toMatchObject({ _tag: "TooSmall" });
       const resize = h.tui.top;
       expect(resize.options).toMatchObject(FULL_SCREEN);
       // One text node, no frame and no chrome: the first screen row holds the request.
@@ -291,7 +292,7 @@ describe("list view (G3)", () => {
       expect(termOf(list)["hint"]).toBeNull();
       await flush();
       expect(h.tui.views[0]?.closed).toBe(true);
-      expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
+      expect(h.tui.views[0]?.result).toMatchObject({ _tag: "TooSmall" });
       const resize = h.tui.top;
       expect(resize.node.kind).toBe("text");
       // alt+t ends the flow from the resize view.
@@ -304,16 +305,80 @@ describe("list view (G3)", () => {
     },
   );
 
+  const CUES = [
+    "talk: enlarge the pane to see the session list",
+    "talk: enlarge the pane",
+    "enlarge the pane",
+    "enlarge",
+    "grow",
+    "+",
+  ];
+
   it.each([
     [100, "talk: enlarge the pane to see the session list"],
     [30, "talk: enlarge the pane"],
     [16, "enlarge the pane"],
     [12, "enlarge"],
     [7, "enlarge"],
-    [4, "enla"],
-  ])("fits the resize text to %i columns", async (columns, text) => {
+    [5, "grow"],
+    [4, "grow"],
+    [3, "+"],
+    [1, "+"],
+  ])("fits a whole resize cue to %i columns, never a cut word", async (columns, text) => {
     const ui = await loadUi();
-    expect(resizeText(ui, columns)).toBe(text);
+    const shown = resizeText(ui, columns);
+    expect(shown).toBe(text);
+    expect(CUES).toContain(shown);
+    expect([...shown].length).toBeLessThanOrEqual(columns);
+  });
+
+  /** Shrinks the pane below the list, lets the list end, then grows it so the resize view ends. */
+  const shrinkAndGrow = async (h: Harness): Promise<void> => {
+    const list = h.tui.top.node;
+    h.tui.size = { columns: 100, rows: PICKER_FIXED_ROWS };
+    itemsOf(list);
+    await flush();
+    const resize = h.tui.top.node;
+    expect(resize.kind).toBe("text");
+    h.tui.size = { columns: 100, rows: 30 };
+    prop(resize, "text");
+    await flush();
+  };
+
+  it("lists again when the list fits after the resize view, so an ended peer leaves and its replacement shows", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    expect(itemsOf(h.tui.top.node).map((item) => item.label.slice(0, 16))).toEqual([ID_A, ID_B]);
+    const listings = h.services.lives.length;
+    // beta ends while the resize view is open; gamma registers.
+    h.services.rows = [row(ID_A, "self", { own: true }), row(ID_C, "gamma")];
+    await shrinkAndGrow(h);
+    expect(h.services.lives.length).toBe(listings + 1);
+    const list = h.tui.top.node;
+    expect(list.kind).toBe("picker");
+    expect(itemsOf(list).map((item) => item.label.slice(0, 16))).toEqual([ID_A, ID_C]);
+    press(list, "escape");
+    await flow;
+  });
+
+  it("selects the same pair again after a shrink and a grow, and the first other row when that pair ended", async () => {
+    const h = await harness();
+    h.services.rows = [row(ID_A, "self", { own: true }), row(ID_B, "beta"), row(ID_C, "gamma")];
+    const flow = h.run();
+    await flush();
+    const first = h.tui.top.node;
+    const gamma = itemsOf(first)[2]?.id;
+    fire(first, "onSelect", gamma);
+    await shrinkAndGrow(h);
+    expect(prop(h.tui.top.node, "selected")).toBe(gamma);
+    // gamma ends during the next resize: the list selects beta, the first row of another session.
+    h.services.rows = [row(ID_A, "self", { own: true }), row(ID_B, "beta")];
+    await shrinkAndGrow(h);
+    const list = h.tui.top.node;
+    expect(prop(list, "selected")).toBe(itemsOf(list)[1]?.id);
+    press(list, "escape");
+    await flow;
   });
 
   it("keeps the list open at the smallest size that fits", async () => {

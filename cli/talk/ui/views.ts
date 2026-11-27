@@ -136,13 +136,16 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 
 /**
  * The texts of the resize view, longest first (G3): the view shows the
- * longest one that fits the width, so one screen row holds it whole.
+ * longest one that fits the width, so one screen row holds a whole cue and
+ * no word is cut. `+` fits one cell.
  */
 export const RESIZE_TEXTS = [
   "talk: enlarge the pane to see the session list",
   "talk: enlarge the pane",
   "enlarge the pane",
   "enlarge",
+  "grow",
+  "+",
 ] as const;
 const LIST_EMPTY = "No live talk sessions.";
 
@@ -158,12 +161,15 @@ const LIST_HINT: Record<ListMode, string> = {
   handover: "⏎ hand over · ⎋ close",
 };
 
-/** How the list view ends; `TooSmall` when its space cannot show one item row. */
+/**
+ * How the list view ends. `TooSmall` when its space cannot show one item
+ * row; it carries the selected pair, so the list can select it again.
+ */
 export type ListChoice =
   | { readonly _tag: "Compose"; readonly row: ListRow }
   | { readonly _tag: "Handover"; readonly row: ListRow }
   | { readonly _tag: "Close" }
-  | { readonly _tag: "TooSmall" };
+  | { readonly _tag: "TooSmall"; readonly selected: Target | undefined };
 
 /** The picker item id of a row: its exact pair. */
 const itemId = (row: Target): string => `${row.instanceId}/${row.sessionId}`;
@@ -183,12 +189,13 @@ const rowDetail = (row: ListRow): string =>
 /**
  * The list view: a `picker` root with `size: "screen"`, one item per row
  * (G3). Enter (`activate`) chooses compose, or handover in the handover
- * mode; `h` chooses handover; `escape` and `alt+t` close. When no item row
- * with the full instance id fits at open, it ends with `TooSmall` before
- * omp mounts it; a resize below that size ends it with `TooSmall` at the
- * next draw, and that draw shows no empty-state text and no key hint, so an
- * undersized frame never reads as an empty registry. Neither `activate` nor
- * `h` acts while it does not fit.
+ * mode; `h` chooses handover; `escape` and `alt+t` close. It selects the
+ * row of `preferred` when one is listed, else the first row of another
+ * session. When no item row with the full instance id fits at open, it ends
+ * with `TooSmall` before omp mounts it; a resize below that size ends it
+ * with `TooSmall` at the next draw, and that draw shows no empty-state text
+ * and no key hint, so an undersized frame never reads as an empty
+ * registry. Neither `activate` nor `h` acts while it does not fit.
  */
 export const listView = (
   ui: HostUi,
@@ -196,9 +203,11 @@ export const listView = (
   rows: ReadonlyArray<ListRow>,
   mode: ListMode,
   done: (choice: ListChoice) => void,
+  preferred?: Target,
 ): JSXNode => {
   const byId = new Map(rows.map((row) => [itemId(row), row]));
-  const first = rows.find((row) => !row.own) ?? rows[0];
+  const kept = preferred === undefined ? undefined : byId.get(itemId(preferred));
+  const first = kept ?? rows.find((row) => !row.own) ?? rows[0];
   const selected = ui.signal<string | null>(first === undefined ? null : itemId(first));
   const items = rows.map((row) => ({
     id: itemId(row),
@@ -209,8 +218,16 @@ export const listView = (
   /** The selected row while the view fits; undefined otherwise. */
   const chosen = (item: string | null): ListRow | undefined =>
     item === null || !layout().fits ? undefined : byId.get(item);
+  const tooSmall = (): void => {
+    const row = byId.get(selected.peek() ?? "");
+    done({
+      _tag: "TooSmall",
+      selected:
+        row === undefined ? undefined : { instanceId: row.instanceId, sessionId: row.sessionId },
+    });
+  };
   // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1).
-  if (!layout().fits) done({ _tag: "TooSmall" });
+  if (!layout().fits) tooSmall();
   return ui.jsx("picker", {
     title: LIST_TITLE[mode],
     noun: "sessions",
@@ -219,7 +236,7 @@ export const listView = (
       if (layout().fits) return items;
       // A resize below the size: the view ends after this draw; `done` runs once only.
       queueMicrotask(() => {
-        done({ _tag: "TooSmall" });
+        tooSmall();
       });
       return [];
     },
@@ -260,13 +277,10 @@ export const listView = (
 /** How the resize view ends: the list fits again, or the operator closed the flow. */
 export type ResizeChoice = { readonly _tag: "Fits" } | { readonly _tag: "Close" };
 
-/** The resize text for `columns` cells: the longest text that fits, else `enlarge` cut to the width. */
+/** The resize text for `columns` cells: the longest whole cue that fits; none below one cell. */
 export const resizeText = (ui: HostUi, columns: number | undefined): string => {
   const width = Math.max(0, columns ?? 0);
-  const last = RESIZE_TEXTS[RESIZE_TEXTS.length - 1] ?? "";
-  return (
-    RESIZE_TEXTS.find((text) => ui.visibleWidth(text) <= width) ?? ui.truncate(last, width, "")
-  );
+  return RESIZE_TEXTS.find((text) => ui.visibleWidth(text) <= width) ?? "";
 };
 
 /**

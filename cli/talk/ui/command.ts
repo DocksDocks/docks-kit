@@ -421,19 +421,30 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       DOCKED,
     );
 
-  const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
+  /** One listing of the flow's rows; undefined after an end or after the error notice. */
+  const listRows = async (
+    flow: Flow,
+    flowUi: FlowUi,
+  ): Promise<ReadonlyArray<ListRow> | undefined> => {
     const answer = await untilEnded(flow, flow.services.list(flow.life));
-    if (answer === undefined || !live(flow)) return;
-    if (answer._tag === "Failed") {
-      flowUi.notify(talkErrorText(answer.text), "error");
-      return;
-    }
-    // G3: while the list does not fit, the resize view stands in for it; each fits again into the other.
-    for (;;) {
+    if (answer === undefined || !live(flow)) return undefined;
+    if (answer._tag === "Listed") return answer.rows;
+    flowUi.notify(talkErrorText(answer.text), "error");
+    return undefined;
+  };
+
+  const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
+    let rows = await listRows(flow, flowUi);
+    let preferred: Target | undefined;
+    // G3: while the list does not fit, the resize view stands in for it. When the list fits
+    // again, the flow lists again, so the rows leave out ended registrations, and the list
+    // selects the pair that it selected before, while that pair is listed.
+    while (rows !== undefined) {
+      const shown = rows;
       const choice = await mount<ListChoice>(
         flow,
         flowUi,
-        (size, done) => listView(ui, size, answer.rows, mode, done),
+        (size, done) => listView(ui, size, shown, mode, done, preferred),
         { _tag: "Close" },
         FULL_SCREEN,
       );
@@ -449,6 +460,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
             FULL_SCREEN,
           );
           if (resized._tag !== "Fits") return;
+          preferred = choice.selected;
+          rows = await listRows(flow, flowUi);
           continue;
         }
         case "Handover":

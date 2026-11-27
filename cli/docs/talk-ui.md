@@ -217,20 +217,28 @@ view in place of the list:
   the list. That draw shows no rows, no empty-state text, and no key hint, so
   an undersized frame never reads as an empty registry.
 - The resize view is a full-screen overlay whose root is one `text` node,
-  with no frame, no title, and no hint, so the first screen row holds the
-  request also in a one-row pane. On each draw, it shows the longest of
-  these texts that fits the width from `ui.size()`, and cuts `enlarge` to the
-  width as the last resort:
+  with no frame, no title, and no hint. omp's bare sheet centers a single
+  child vertically in the full-screen overlay (`bare-sheet.ts`
+  v19.2.1:24-27), so the request is the middle row of the screen, and the
+  only row of a one-row pane. On each draw, it shows the longest of these
+  cues that fits the width from `ui.size()`. Each cue is whole: no word is
+  cut, and `+` fits one column.
 
 ```text
 talk: enlarge the pane to see the session list
 talk: enlarge the pane
 enlarge the pane
 enlarge
+grow
++
 ```
 
-- When the list fits again, the resize view ends at its next draw, and the
-  flow mounts the list with the rows of the same listing.
+- When the list fits again, the resize view ends at its next draw. The flow
+  lists the registry again, with the abort signal and the session checks of
+  the flow, and mounts the list with the fresh rows: a registration that
+  ended while the resize view was open is gone, and a new one shows. The
+  list selects the pair that it selected before the resize while that pair
+  is still listed, else the first row of another session.
 - In the resize view, Enter, `h`, and every other key do nothing; `escape`
   and `alt+t` end the flow. Enter and `h` never act on a list that does not
   fit.
