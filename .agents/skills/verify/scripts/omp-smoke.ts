@@ -48,10 +48,9 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { Effect, Option, Result, Schema } from "effect";
+import { Effect, Option, Result } from "effect";
 import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
 import { endpointKindFor } from "../../../../cli/talk/transport/endpoint.ts";
-import { InstanceId } from "../../../../cli/talk/transport/handshake.ts";
 import {
   DARWIN_GETCONF,
   registryFolderFor,
@@ -71,6 +70,12 @@ import {
   TalkPosixSystem,
   TalkTrustError,
 } from "../../../../cli/talk/transport/trustPosix.ts";
+import {
+  type Attribution,
+  decodeAttribution,
+  decodeFinal,
+  timeoutScanChoice,
+} from "./smokeScan.ts";
 
 /** The `name` of the kit plugin package, and of its npm row in `omp plugin list --json`. */
 const PACKAGE_NAME = "docks-kit-omp";
@@ -801,12 +806,6 @@ function leakProblem(
   return `the default talk registry folder ${defaultFolder} holds the entry ${names.join(", ")} of process ${registration.processId} with the folder ${registration.cwd}`;
 }
 
-/** The result of one attribution: the problem, or an empty text, and the instance id of the valid private entry. */
-interface Attribution {
-  readonly problem: string;
-  readonly instanceId: string | undefined;
-}
-
 /**
  * The polls of one attribution, in the scan child. Each poll scans the private folder and then the default
  * folder; the default scan runs also when the private scan failed, so its diagnostic is not lost. No poll starts
@@ -1046,22 +1045,6 @@ function scanInChild<T>(
   return scanned.promise;
 }
 
-const isInstanceId = Schema.is(InstanceId);
-
-/**
- * The attribution of a JSON result of the scan child, `"none"` when no poll found a valid entry, or undefined for
- * a result of another shape or of another kind. A passed check must name a valid instance id.
- */
-function decodeAttribution(result: JsonObject): Attribution | "none" | undefined {
-  if (result["kind"] !== "attribution") return undefined;
-  if (result["status"] === "none") return "none";
-  const problem = text(result["problem"]);
-  const instanceId = text(result["instanceId"]);
-  if (result["status"] !== "done" || problem === undefined) return undefined;
-  if (problem !== "") return { problem, instanceId: undefined };
-  return instanceId !== undefined && isInstanceId(instanceId) ? { problem, instanceId } : undefined;
-}
-
 /**
  * The registry attribution of one live omp session (H7). A default folder that holds an entry of the omp child
  * fails at once: a session that lost `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the
@@ -1112,8 +1095,7 @@ async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Pr
         registration: registrationJson(registration),
       })),
     },
-    (result) =>
-      result["kind"] === "final" && result["status"] === "done" ? text(result["problem"]) : undefined,
+    decodeFinal,
   );
   return "failure" in outcome
     ? `the final scan of the default talk registry folder ${run.defaultRegistry} ${outcome.failure}`
@@ -1202,7 +1184,7 @@ function printSessionRegistry(
       run.script.final = finalScan;
     },
     beforeTimeoutKill: () => {
-      if (!finalEnded) return finalScan();
+      if (timeoutScanChoice(finalEnded) === "reuse") return finalScan();
       timeoutScan = scanDefault();
       return timeoutScan;
     },
