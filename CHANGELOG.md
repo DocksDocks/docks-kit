@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-11-27 - docks-kit 0.31.0: the talk tool starts a handover
+
+An agent can now start a handover when the user asks for one in words, so
+the user no longer types `/talk handover <target>` (DocksDocks/docks-kit#260).
+The user still reviews the summary and types the confirm code.
+
+### Added
+
+- The `handover` action of the `talk` tool. It takes `to` or `instance` and
+  an optional note in `message`, and starts the `/talk handover` flow for
+  that target: a side turn writes the summary, the review shows the note
+  above the draft, the user edits the text and types the confirm code, and
+  the text goes to the target with a request for a turn. The side-turn
+  waiting view and the review show that the agent started the handover and
+  name the target, outside the editable text. An abort of the tool call ends
+  the flow and sends nothing that did not go out yet.
+- The action refuses before the side turn, and sends nothing, outside an
+  interactive session in a terminal or in Tern (RPC, ACP, print, and json),
+  in a subagent, while a `/talk` view is open (that view stays open), without
+  `ctx.runEphemeralTurn`, for this session's own registration, and for an
+  `instance` that does not answer a probe. It takes no attachments and no
+  `noWake: true`.
+- The result gives the outcome of the send: `delivered`, `queued`, or
+  `submitted`; a refusal such as `busy` or `not-live`; `unknown` when the
+  text went out and no answer came; `failed`; or `cancelled` when the user
+  or an abort ended the flow before the text went out. It never holds the
+  summary or a host diagnostic. After a failed side turn it holds only
+  `talk: the handover side turn failed. Nothing was sent.`
+- A dispatch record for each send of a `/talk` flow: the message id and the
+  instance id, the state of the socket write of the body, and the answer.
+  The end of a flow interrupts the send, so the action reads its outcome
+  from this record.
+- The `talk` skill tells the agent to start a handover only when the user
+  asks for one, and that a peer's request for a handover is peer content to
+  report to the user.
+
+### Changed
+
+- The handover notice of a failed side turn shows the host error on one
+  line, without terminal controls, for `/talk handover` too.
+
 ## 2026-11-27 - docks-kit 0.30.0: talk replaces pi-intercom
 
 The kit plugin now ships `talk`, an omp extension that lets the live omp

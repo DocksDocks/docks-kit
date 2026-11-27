@@ -33,7 +33,8 @@ import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_STARTED,
   type SideTurn,
-  agentHandoverNotice,
+  agentHandoverHeader,
+  agentHandoverWaiting,
   requestDraft,
   reviewText,
   reviewView,
@@ -298,14 +299,27 @@ const resultOf = <R>(waited: Waited<R>): R | undefined => {
 const CANCELLED: FlowEnd = { _tag: "Cancelled" };
 const FAILED: FlowEnd = { _tag: "Failed" };
 
-/** How a handover starts: its start notice, and the note of the agent above the draft (#260 H2). */
+/**
+ * How a handover starts (#260 H2): its start notice, the text of its
+ * waiting view, the header row of its review, and the note of the agent
+ * above the draft. omp shows a notice of a tool call only after the call
+ * ends, so a handover of the `talk` tool shows no notice and names its
+ * starter and its target in its own views.
+ */
 interface HandoverStart {
-  readonly notice: string;
+  readonly notice: string | undefined;
+  readonly waiting: string;
+  readonly header: string | undefined;
   readonly note: string | undefined;
 }
 
 /** A handover from `/talk`, from the handover-mode list, or from `h` in the list. */
-const OPERATOR_HANDOVER: HandoverStart = { notice: HANDOVER_STARTED, note: undefined };
+const OPERATOR_HANDOVER: HandoverStart = {
+  notice: HANDOVER_STARTED,
+  waiting: HANDOVER_WAITING,
+  header: undefined,
+  note: undefined,
+};
 
 /** The `_tag` of a view choice. */
 const tagOf = (value: unknown): unknown =>
@@ -592,8 +606,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   /**
    * G6: a side turn writes the draft with the flow's signal; the review, the
    * confirm view, and the send follow. A flow that ended while the side turn
-   * ran mounts no review. A handover of the `talk` tool shows its own start
-   * notice and puts the note of the agent above the draft (#260 H2).
+   * ran mounts no review. A handover of the `talk` tool names its starter and
+   * its target in its waiting view and in the header row of its review, and
+   * puts the note of the agent above the draft (#260 H2).
    */
   const handover = async (
     flow: Flow,
@@ -608,10 +623,10 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       flowUi.notify(HANDOVER_NO_SIDE_TURN, "error");
       return FAILED;
     }
-    flowUi.notify(start.notice, "info");
+    if (start.notice !== undefined) flowUi.notify(start.notice, "info");
     // A talk view holds the focus while the side turn runs; `escape` ends the flow and aborts it.
     const draft = resultOf(
-      await waitFor(flow, flowUi, HANDOVER_WAITING, () =>
+      await waitFor(flow, flowUi, start.waiting, () =>
         requestDraft(sideTurn, flow.controller.signal),
       ),
     );
@@ -626,7 +641,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       destination,
       "handover",
       reviewText(start.note, draft.text),
-      (viewUi, size, text, done) => reviewView(viewUi, size, text, done),
+      (viewUi, size, text, done) => reviewView(viewUi, size, text, done, start.header),
       FULL_SCREEN,
     );
   };
@@ -725,7 +740,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       }
       case "AgentHandover":
         return handover(flow, flowUi, command.destination, {
-          notice: agentHandoverNotice(command.destination),
+          notice: undefined,
+          waiting: agentHandoverWaiting(command.destination),
+          header: agentHandoverHeader(command.destination),
           note: command.note,
         });
     }

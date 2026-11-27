@@ -60,7 +60,8 @@ import { VIEWS_NEED_TUI } from "../../../talk/ui/command";
 import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_PROMPT,
-  agentHandoverNotice,
+  agentHandoverHeader,
+  agentHandoverWaiting,
 } from "../../../talk/ui/handover";
 import type { HostModuleLoader } from "../../../talk/ui/host";
 
@@ -2943,6 +2944,10 @@ describe("handover action of the talk tool (#260)", () => {
     instanceId: idFrom(text, "Instance"),
   });
 
+  /** The header row of a review of beta and its line break: shown, never sent. */
+  const betaLead = (betaId: string): string =>
+    `${agentHandoverHeader({ instanceId: betaId, sessionId: "s-beta", name: "beta", cwd: "/x" })}\n`;
+
   it.each(["to", "instance"] as const)(
     "hands over by %s: the side turn runs HANDOVER_PROMPT, the review shows the cleaned note above the draft, and ctrl+s and the code deliver kind handover with a wake",
     async (field) => {
@@ -2957,7 +2962,9 @@ describe("handover action of the talk tool (#260)", () => {
       expect(Predicate.hasProperty(turn, "promptText") ? turn.promptText : "").toBe(
         HANDOVER_PROMPT,
       );
-      expect(nodeProp(alpha.top.node, "text")).toBe(`${CLEAN_NOTE}\n\n${SUMMARY}`);
+      expect(nodeProp(alpha.top.node, "text")).toBe(
+        `${betaLead(betaId)}${CLEAN_NOTE}\n\n${SUMMARY}`,
+      );
       pressKey(alpha.top.node, "ctrl+s");
       await until(() => openKind(alpha) === "col");
       expect(confirmCode(alpha.top.node).instanceId).toBe(betaId);
@@ -2981,42 +2988,48 @@ describe("handover action of the talk tool (#260)", () => {
     },
   );
 
-  it("shows a start notice that says that the agent started the handover and names the target", async () => {
+  it("names the agent and the target in the waiting view and in the review header, and shows no notice while the call runs", async () => {
     const { alpha, betaId } = await sessions();
+    const reply = Promise.withResolvers<unknown>();
+    alpha.sideTurn = async () => reply.promise;
     const { call } = startHandover(alpha, { to: "beta" });
+    await until(() => openKind(alpha) === "text");
+    const destination = { instanceId: betaId, sessionId: "s-beta", name: "beta", cwd: "/x" };
+    expect(nodeProp(alpha.top.node, "text")).toBe(agentHandoverWaiting(destination));
+    expect(agentHandoverWaiting(destination)).toContain(
+      `the agent started a handover to ${literal("beta")} (instance ${betaId})`,
+    );
+    reply.resolve({ replyText: SUMMARY });
     await until(() => openKind(alpha) === "editor");
-    const notice = agentHandoverNotice({
-      instanceId: betaId,
-      sessionId: "s-beta",
-      name: "beta",
-      cwd: "/work/project",
-    });
-    expect(alpha.notices).toEqual([notice]);
-    expect(notice).toContain("the agent started a handover");
-    expect(notice).toContain(literal("beta"));
-    expect(notice).toContain(betaId);
+    expect(nodeProp(alpha.top.node, "text")).toBe(`${betaLead(betaId)}${SUMMARY}`);
+    expect(agentHandoverHeader(destination)).toContain(
+      `the agent started a handover to ${literal("beta")} (instance ${betaId})`,
+    );
+    expect(alpha.notices).toEqual([]);
     pressKey(alpha.top.node, "escape");
     expect((await call).text).toBe(HANDOVER_CANCELLED);
+    expect(alpha.notices).toEqual([]);
   });
 
   it("returns from the confirm view to the review on escape with the text kept, while the tool call waits", async () => {
-    const { alpha, beta } = await sessions();
+    const { alpha, beta, betaId } = await sessions();
     const { call, settled } = startHandover(alpha, { to: "beta" });
     await until(() => openKind(alpha) === "editor");
+    const lead = betaLead(betaId);
     const draft = nodeProp(alpha.top.node, "text");
     const length = Predicate.isString(draft) ? draft.length : 0;
     fireNode(alpha.top.node, "onEdit", {
-      from: 0,
+      from: lead.length,
       to: length,
       text: "edited",
-      cursor: 6,
+      cursor: lead.length + 6,
       len: length,
     });
     pressKey(alpha.top.node, "ctrl+s");
     await until(() => openKind(alpha) === "col");
     pressKey(alpha.top.node, "escape");
     await until(() => openKind(alpha) === "editor");
-    expect(nodeProp(alpha.top.node, "text")).toBe("edited");
+    expect(nodeProp(alpha.top.node, "text")).toBe(`${lead}edited`);
     expect(settled()).toBe(false);
     await approve(alpha);
     expect((await call).ok).toBe(true);

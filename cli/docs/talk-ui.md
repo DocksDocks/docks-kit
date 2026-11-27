@@ -42,7 +42,8 @@ talk: the /talk views need an interactive omp session in a terminal or in Tern. 
 
 A session with a UI (`ctx.hasUI`) gets the notice through `ctx.ui.notify` as
 a warning. Other sessions get it on standard error. The `talk` tool works in
-every mode.
+every mode, except its `handover` action: that action starts a flow, so it
+refuses outside mode `tui` (see [Handover](#handover)).
 
 When the host gives no `ctx.ui.custom` or no `ctx.ui.notify`, `/talk` shows a
 notice that names the two methods and omp 19.2.0, and opens no view.
@@ -97,15 +98,17 @@ first listing.
 
 ## Flows
 
-A flow is one run of `/talk` or `alt+t`: a listing or a target resolution,
-the views, and at most one send. Each binding has one flow slot, so it runs at
-most one flow at a time. A flow belongs to the session id of the context that
-started it.
+A flow is one run of `/talk`, of `alt+t`, or of the `handover` action of the
+`talk` tool: a listing or a target resolution, the views, and at most one
+send. Each binding has one flow slot, so it runs at most one flow at a time.
+A flow belongs to the session id of the context that started it.
 
 A flow ends:
 
 - when another flow starts in the same binding, from the command or from the
-  shortcut;
+  shortcut. The `handover` action never ends an open flow: it refuses while
+  one is open;
+- when the tool call that started it is aborted;
 - at `session_before_switch`, `session_before_branch`, `session_before_tree`,
   `session_clear` (an in-place reset that keeps the session id), and
   `session_shutdown` of the binding;
@@ -157,7 +160,9 @@ so a pending step stops at once.
 
 The command handler awaits its flow, because omp awaits a command handler
 without a deadline. The shortcut handler starts its flow and returns, because
-no omp source states the deadline of a shortcut handler.
+no omp source states the deadline of a shortcut handler. The `handover`
+action awaits its flow and reports how it ended (see `cli/docs/talk-tool.md`,
+"Handover").
 
 A flow shows each error with `ctx.ui.notify` as an error, while it did not
 end. The text starts
@@ -452,15 +457,19 @@ default card.
 
 ## Handover
 
-`/talk handover <target>`, Enter in the handover-mode list, and `h` in a list
-start a handover. A side turn writes a summary of this session's work. The
-operator reviews and edits it locally, confirms the destination, and the
-approved text goes to the target as a message with a request for a turn
-there (a wake).
+`/talk handover <target>`, Enter in the handover-mode list, `h` in a list,
+and the `handover` action of the `talk` tool start a handover. A side turn
+writes a summary of this session's work. The operator reviews and edits it
+locally, confirms the destination, and the approved text goes to the target
+as a message with a request for a turn there (a wake). A handover that the
+tool starts has the same review and confirm code (see
+[Tool-started handover](#tool-started-handover)).
 
 ### Side turn
 
-The flow first shows an information notice that names the review keys. Then
+The flow first shows an information notice that names the review keys (a
+tool-started handover shows none; see
+[Tool-started handover](#tool-started-handover)). Then
 it calls `ctx.runEphemeralTurn({ promptText, signal })` with the template and
 the signal of the flow. It gives no `maxTokens` and no `tools` option. omp
 runs the side turn with the current model on a copy of the conversation. The
@@ -524,7 +533,8 @@ empty, the review shows this line in place of omp's `[…truncated]`:
 [talk: omp cut this handover at 4096 bytes, so its end is missing. Complete or shorten it before you send it.]
 ```
 
-The review starts with the caret at the start of the draft.
+The review starts with the caret at the start of its text: the note of a
+tool-started handover, else the draft.
 
 ### Send
 
@@ -543,8 +553,9 @@ receiver hands the message to omp with `triggerTurn: true`. It answers
 session changes first, and `submitted` when the watch confirms neither
 within 1 s; a busy interactive receiver queues the message, answers
 `queued`, and starts no turn before its queue sends it. `kind` is a field of the
-deliver body and of `details`, not a tool field: the `talk` tool sends only
-messages, and a plain message leaves `kind` out of the body. An ask is never a
+deliver body and of `details`, not a tool field. The `send` action of the
+tool sends plain messages, which leave `kind` out of the body; its `handover`
+action sends nothing itself and starts this flow. An ask is never a
 handover. The receiver's text starts with this line instead of the From line,
 and the trust line of each talk message follows it:
 
@@ -568,8 +579,48 @@ Each of these shows an error notice and sends nothing:
 | The reply is empty              | `talk: the side turn gave no handover text. Nothing was sent.`                                     |
 | The target does not resolve     | The resolver error; no side turn starts                                                            |
 
+The host error is the message of the rejection, cleaned with `safeOneLine`
+(`cli/talk/ui/views.ts`): each terminal control goes and the text is one
+line. The `/talk` flow and a tool-started flow show the same notice.
+
 A cancel in the review or in the confirm view sends nothing and shows no
 notice.
+
+### Tool-started handover
+
+The `handover` action of the `talk` tool runs this flow for the one
+registration pair that its `to` or `instance` resolves to. The agent calls it
+only when the user asks for a handover. The views, the keys, the confirm
+code, and the send are the ones above, so the user still reviews the summary
+and types the code. The differences:
+
+- The flow shows no start notice, because omp shows a notice that a tool
+  call posts only after the call ends. Instead, the side-turn waiting view
+  and the review show this line, outside the editable text, so it never goes
+  out with the handover:
+
+  ```text
+  talk: the agent started a handover to <name> (instance <instance id>)
+  ```
+
+- The `message` of the call is a note above the draft. The flow cleans it
+  with `safeMultiline`, as it cleans the draft, then trims it, so no terminal
+  control of agent text reaches the view, and the user sees the text that can
+  go out. A blank line separates the note and the draft. The note does not
+  change the side turn.
+- An abort of the tool call ends the flow as `escape` does.
+- The action refuses before the side turn outside mode `tui`, in a subagent,
+  while a `/talk` flow is open (which stays open), without
+  `ctx.runEphemeralTurn`, and for the registration of this session.
+
+The tool result gives the outcome of the send from its dispatch record:
+`delivered`, `queued`, or `submitted`; a refusal such as `busy` or `not-live`;
+`unknown` when the body went out and no answer came; `failed`; or
+`cancelled` when the flow ended before the body write. After a failed side
+turn, the result holds only `talk: the handover side turn failed. Nothing was
+sent.` The host error stays in the notice. The result never holds the
+summary. `cli/docs/talk-tool.md`, "Handover", lists the refusals and the
+outcomes.
 
 ### Privacy
 
@@ -617,7 +668,7 @@ installed.
 ## Known limits
 
 - RPC and ACP clients get no views. They get the notice of [Modes](#modes)
-  and can use the `talk` tool.
+  and can use the `talk` tool, but not its `handover` action, which refuses.
 - An ACP client does not see a notice that talk shows with `ctx.ui.notify`:
   ACP writes `notify` only to a debug log. This includes the notice of
   [Modes](#modes) and the shortcut warning.
