@@ -133,7 +133,8 @@ The field rules:
 
 A call that breaks a rule fails before it sends anything. The tool has no
 broker, Herdr, cross-machine, `list-cwd`, or `handover` fields. A handover
-comes only from `/talk handover` (see `cli/docs/talk-ui.md`, "Handover").
+comes only from the `/talk` views: `/talk handover`, or `h` in the list that
+`/talk` or `alt+t` opens (see `cli/docs/talk-ui.md`, "Handover").
 
 ### Actions
 
@@ -146,7 +147,9 @@ comes only from `/talk handover` (see `cli/docs/talk-ui.md`, "Handover").
   folder, and the full instance id. Use the full instance id as `instance`.
   When the registry cannot be listed, the call fails. All probes of one call
   go out as one batch of the transport, which reads the socket folder once.
-  The `/talk` list view reads the same rows (`listSessions` of `tool.ts`).
+  The `/talk` list view reads the same rows (`listSessions` of `tool.ts`),
+  and the rows of both refresh the `/talk` completion (see
+  `cli/docs/talk-ui.md`, "Completion").
 - `send` resolves the target, sends the message, and returns the result of
   [Results](#results). The `/talk` views use the same resolver
   (`resolveTarget`) and the same send (`sendTo`), so their results, ids, and
@@ -366,12 +369,16 @@ live list, a watch that runs for minutes does not copy or scan the whole
 transcript each 10 ms. The `getEntries()` fallback gives a new array on each
 read, so there each read copies and scans the whole transcript. The binding
 keeps its read position only while a watch runs, so it holds no list after
-the last watch ends. The watch ends:
+the last watch ends. A watch that starts while no other watch runs sets its
+read position to the end of the list before the send, because no watch
+waits for an older entry. So an isolated send to an idle session reads only
+the entries after it. The watch ends:
 
 - `delivered` when the entry appears while `getSessionId()` still equals the
   target session id.
 - `not-live` when the session id changes first.
-- `unknown` after 10 minutes, or when a read of the session throws.
+- `unknown` after 10 minutes of the monotonic clock, or when a read of the
+  session throws.
 
 The request answers `delivered` or `not-live` when the watch ends so within
 1 s, and `submitted` otherwise. A watch that ends `unknown` within 1 s, for
@@ -448,8 +455,10 @@ guard and the queue use the same rule.
 - A full queue answers `busy` in every mode. The queue of one registration
   holds at most 64 messages and at most 4 MiB of message text (UTF-8). This
   bounds what a peer can make the receiving omp process hold while the
-  session cannot take messages. The receiver checks the count first and
-  measures the text only of a message that joins the queue.
+  session cannot take messages. On the queue path, the receiver checks the
+  count first and then measures the text before it applies the byte cap. So
+  it measures each message that passes the count check, also one that the
+  byte cap then refuses, and no message that the count check refuses.
 
 Each registration has one queue, first in first out, outside the transcript.
 The binding tries the queue from a fresh task: once 100 ms after a message
@@ -503,8 +512,13 @@ An ask carries a reply address and an origin flag:
   that map. A main session has no parent, so it has no entry. The map counts
   the subagents of each agent. At `session_shutdown`, the binding releases
   its entry; the map keeps it only while the entry of a live subagent names
-  it as parent, and then drops it. The sweep (see [Sweep](#sweep)) releases
-  the entry of a binding that omp closed without a `session_shutdown`.
+  it as parent, and then drops it. Each subagent binding beats from a 1 s
+  managed timer (`ctx.setInterval`). omp keeps those timers running while
+  the extension is suspended and clears them when it closes the binding.
+  The sweep (see [Sweep](#sweep)) releases the entry of a binding that gave
+  no beat in 3 sweeps in a row: omp closed that binding without a
+  `session_shutdown`. A suspended binding keeps its entry, so a subagent
+  that it starts after it resumes still finds its ancestors.
 
 A reply address is live only while it is still the current registration of
 its owning binding: that binding is active, and its session id equals the
@@ -542,11 +556,12 @@ still withdraw an ask that the receiver queued.
 The receiver of an ask keeps it as a pending ask until a successful reply,
 the 10-minute ask timeout, or the end of the message (`cancelled` or
 `not-live`). A timer of the pending asks ends each ask at its timeout, also
-when no call reads them; it runs only while an ask is pending. The pending
+when no call reads them; it runs only while an ask is pending. The deadline
+and the age of a pending ask use a monotonic clock (`performance.now()`), so
+a step of the wall clock neither extends nor shortens an ask. The pending
 asks stay in the order of their deadlines: an ask received again under the
-same id goes last, and an ask that comes after the clock stepped back keeps
-at least the deadline of the ask before it. So each expiry removes only the
-due asks at the front. Each pending ask belongs to the registration that
+same id goes last. So each expiry removes only the due asks at the front.
+Each pending ask belongs to the registration that
 received it. It stays across an after-event that keeps the session id, and
 it ends with that registration: at a withdrawal, at an unseen session id
 change, and at `session_shutdown`. A successor session never sees it in
@@ -660,10 +675,8 @@ registration of the process whose binding fails its activity check. So the
 registration of a binding that omp closed while the extension was suspended,
 whose own handler and timer no longer run, is withdrawn even when no other
 binding remains and no request comes. The sweep also releases the agent map
-entry of each subagent binding whose marker row omp no longer lists (see
-[Ask](#ask)). A binding that omp only suspended adds its entry again at its
-next `talk` call; until then, an ask of a later subagent of it can fail with
-`no reply address`.
+entry of each subagent binding that gave no beat in 3 sweeps in a row (see
+[Ask](#ask)). A binding that omp only suspended keeps its entry.
 
 ## Known limits
 

@@ -14,6 +14,7 @@ import { Predicate } from "effect";
 
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 
+import { safeMultiline } from "../tool/attachments";
 import type { HostUi } from "./host";
 import {
   CLOSE_KEY,
@@ -22,6 +23,8 @@ import {
   type TextChoice,
   type ViewEdit,
   type ViewKey,
+  type ViewSize,
+  applyEdit,
 } from "./views";
 
 /** omp caps the reply of a side turn at 4 KiB (F7); the template stays inside it too. */
@@ -55,7 +58,7 @@ export const HANDOVER_PROMPT = [
   "Open questions, known risks, and what the receiver must check first.",
   "",
   "Rules:",
-  "- Keep the whole handover under 3500 characters. omp cuts a longer reply.",
+  "- Keep the whole handover under 3500 bytes of UTF-8 text: about 3500 ASCII characters, and fewer characters in other scripts. omp cuts a reply above 4096 bytes.",
   "- Use short bullets. Write no greeting, no preamble, and no closing line.",
   "- Do not copy secrets: API keys, tokens, passwords, credentials, or private keys.",
   "- Do not call tools and do not answer other questions. Reply with the handover only.",
@@ -78,6 +81,13 @@ export const HANDOVER_NO_SIDE_TURN =
 
 export const HANDOVER_EMPTY = "talk: the side turn gave no handover text. Nothing was sent.";
 
+/** The line that omp puts at the end of a side-turn reply that it cut at 4 KiB (`dedupeEphemeralReply` v19.2.1). */
+export const OMP_CUT_MARK = "\n[…truncated]";
+
+/** The review shows this line in place of omp's mark, so the operator sees that the end is missing (C8). */
+export const HANDOVER_CUT_LINE =
+  "[talk: omp cut this handover at 4096 bytes, so its end is missing. Complete or shorten it before you send it.]";
+
 /** What the side turn gave: a draft, or the text of its error. */
 export type DraftAnswer =
   | { readonly _tag: "Draft"; readonly text: string }
@@ -94,11 +104,18 @@ export const requestDraft = async (
 ): Promise<DraftAnswer> => {
   try {
     const reply = await sideTurn({ promptText: HANDOVER_PROMPT, signal });
+    // T1: the reply is model text; no escape sequence of it reaches the terminal.
     const text =
       Predicate.hasProperty(reply, "replyText") && Predicate.isString(reply.replyText)
-        ? reply.replyText.trim()
+        ? safeMultiline(reply.replyText).trim()
         : "";
-    return text === "" ? { _tag: "Failed", text: HANDOVER_EMPTY } : { _tag: "Draft", text };
+    if (text === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
+    return {
+      _tag: "Draft",
+      text: text.endsWith(OMP_CUT_MARK)
+        ? `${text.slice(0, -OMP_CUT_MARK.length)}\n${HANDOVER_CUT_LINE}`
+        : text,
+    };
   } catch (cause) {
     const hostError = Predicate.isError(cause) ? cause.message : String(cause);
     return {
@@ -108,18 +125,18 @@ export const requestDraft = async (
   }
 };
 
-/** The rows under the review that omp keeps for its status panel and dock (F5). */
-export const REVIEW_KEPT_ROWS = 6;
-/** The review shows at least these rows of the draft, also in a small pane. */
-const REVIEW_MIN_ROWS = 3;
+/** The review fits while one editable row of the draft fits the screen that it owns (C4). */
+export const reviewFits = (size: ViewSize | undefined): boolean =>
+  size !== undefined && size.rows >= 1 && size.columns >= 1;
 
 /**
- * The review view: an `editor` root, so the field takes the typing (F5). It
- * starts with the draft and the caret at its start. `ctrl+s` with text goes
- * to the confirm view; `alt+enter`, `shift+enter`, and `ctrl+j` reach the
- * widget, which adds a line; `enter` from `\r` adds nothing; `escape` and
- * `alt+t` cancel. The view shows a window of rows around the caret, so a
- * long draft does not push the frame past the pane.
+ * The review view: an `editor` root, so the field takes the typing (F5),
+ * shown as a full-screen overlay, so the view owns the screen that
+ * `ui.size()` reports. It starts with the draft and the caret at its start.
+ * `ctrl+s` with text goes to the confirm view while an editable row fits;
+ * `alt+enter`, `shift+enter`, and `ctrl+j` reach the widget, which adds a
+ * line; `enter` from `\r` adds nothing; `escape` and `alt+t` cancel. The
+ * view shows a window of screen rows around the caret.
  */
 export const reviewView = (
   ui: HostUi,
@@ -133,13 +150,9 @@ export const reviewView = (
     text: () => draft(),
     cursor: () => cursor(),
     placeholder: "the handover summary; ctrl+s confirms the destination, ⎋ cancels",
-    maxLines: () => Math.max(REVIEW_MIN_ROWS, (size()?.rows ?? REVIEW_MIN_ROWS) - REVIEW_KEPT_ROWS),
+    maxLines: () => Math.max(1, size()?.rows ?? 1),
     onEdit: (edit: ViewEdit) => {
-      const before = draft.peek();
-      // A stale edit saw another text: pi-tui says to ignore it.
-      if (edit.len !== before.length) return;
-      draft.set(before.slice(0, edit.from) + edit.text + before.slice(edit.to));
-      cursor.set(edit.cursor);
+      applyEdit(draft, cursor, edit);
     },
     onKey: (key: ViewKey): boolean => {
       if (key.kind === "release") return false;
@@ -149,7 +162,7 @@ export const reviewView = (
       }
       if (key.id === "ctrl+s") {
         const value = draft.peek();
-        if (value.trim() !== "") done({ _tag: "Confirm", text: value });
+        if (value.trim() !== "" && reviewFits(size())) done({ _tag: "Confirm", text: value });
         return true;
       }
       // `ctrl+j` arrives as `enter` with a raw LF, and the widget adds a line for it (F5).

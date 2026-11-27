@@ -31,6 +31,7 @@ import {
 import { type ProbeResult, sessionName } from "./tool/targets";
 import {
   type ListAnswer,
+  type ListingSnapshot,
   type PeerTransport,
   type RequestAnswer,
   TALK_TOOL_DESCRIPTION,
@@ -51,6 +52,7 @@ import type { RequestHandler, Target } from "./transport/request";
 import { TalkTransport, type TalkTransportOptions } from "./transport/transport";
 import { type TalkCardRenderer, makeTalkCardRenderer } from "./ui/card";
 import {
+  type FlowLife,
   type FlowServices,
   type FlowUi,
   type ListingAnswer,
@@ -157,13 +159,19 @@ export const makeTalkTransport = (
     }),
   );
   let installed: Promise<void> | undefined;
-  const run = async <A>(effect: Effect.Effect<A, never, TalkTransport>): Promise<A> => {
+  /** Runs one call; an abort of `signal` interrupts it (#251 G3). */
+  const run = async <A>(
+    effect: Effect.Effect<A, never, TalkTransport>,
+    signal?: AbortSignal,
+  ): Promise<A> => {
     installed ??= runtime.runPromise(install).catch((error: unknown) => {
       installed = undefined;
       throw error;
     });
     await installed;
-    return runtime.runPromise(effect);
+    // A fiber runs its synchronous part before it reads the signal, so an aborted call starts nothing.
+    signal?.throwIfAborted();
+    return runtime.runPromise(effect, signal === undefined ? undefined : { signal });
   };
   const facade: TransportFacade = {
     register: (input) =>
@@ -197,13 +205,14 @@ export const makeTalkTransport = (
           Effect.orElseSucceed(() => false),
         ),
       ),
-    known: (instanceId) =>
+    known: (instanceId, signal) =>
       run(
         TalkTransport.use((transport) => transport.known(instanceId)).pipe(
           Effect.map(Option.getOrUndefined),
         ),
+        signal,
       ),
-    list: () =>
+    list: (signal) =>
       run(
         TalkTransport.use((transport) => transport.list).pipe(
           Effect.map((listing): ListAnswer => ({
@@ -219,8 +228,9 @@ export const makeTalkTransport = (
             Effect.succeed<ListAnswer>({ _tag: "ListFailed", reason: error.reason }),
           ),
         ),
+        signal,
       ),
-    probeAll: (targets) =>
+    probeAll: (targets, signal) =>
       run(
         TalkTransport.use((transport) => transport.probeAll(targets)).pipe(
           Effect.map((results) =>
@@ -229,8 +239,9 @@ export const makeTalkTransport = (
             ),
           ),
         ),
+        signal,
       ),
-    request: (target, kind, body) =>
+    request: (target, kind, body, signal) =>
       run(
         TalkTransport.use((transport) => transport.request(target, kind, body)).pipe(
           Effect.map((answer): RequestAnswer => ({ _tag: "Answered", body: answer })),
@@ -242,6 +253,7 @@ export const makeTalkTransport = (
             }),
           ),
         ),
+        signal,
       ),
   };
   return { facade, dispose: () => runtime.dispose() };
@@ -559,8 +571,7 @@ const flowUi = (ctx: unknown): FlowUi | undefined => {
   const notify = method(ui, "notify");
   if (custom === undefined || notify === undefined) return undefined;
   return {
-    custom: (factory, options) =>
-      Promise.resolve(options === undefined ? custom(factory) : custom(factory, options)),
+    custom: (factory, options) => Promise.resolve(custom(factory, options)),
     notify: (text, level) => {
       notify(text, level);
     },
@@ -764,20 +775,19 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   const flows = makeFlowSlot(env.ui);
   /** The names of the last listing of this binding, for the synchronous completion (F1, G2). */
   let listedNames: ReadonlyArray<string> = [];
+  /** The number of listings that this binding started; only the latest one may publish. */
+  let listings = 0;
   /**
-   * The transport of this binding's tool and flows. Each listing refreshes
-   * the completion snapshot (G2), so the `list` action, a target resolution,
-   * and the list view all keep it current.
+   * G2: each `listSessions` call of this binding, by the `list` action or a
+   * list view, refreshes the completion snapshot with its probed rows. A
+   * listing that a later listing overtook publishes nothing (C5, S7).
    */
-  const peers: PeerTransport = {
-    list: async () => {
-      const answer = await talk.transport.list();
-      if (answer._tag === "Listed") listedNames = answer.peers.map((peer) => peer.name);
-      return answer;
-    },
-    probeAll: (targets) => talk.transport.probeAll(targets),
-    request: (target, kind, body) => talk.transport.request(target, kind, body),
-    known: (instanceId) => talk.transport.known(instanceId),
+  const snapshot: ListingSnapshot = () => {
+    listings += 1;
+    const generation = listings;
+    return (rows) => {
+      if (generation === listings) listedNames = rows.map((row) => row.name);
+    };
   };
   let conflictWarned = false;
 
@@ -788,6 +798,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   const bindingKey = `${env.scope}#${randomBytes(8).toString("hex")}`;
   let markerPath: string | undefined;
   let timer: unknown;
+  /** S6: the managed timer whose beats show the sweep that this subagent binding is not closed. */
+  let beatTimer: { readonly context: SessionContext; readonly timer: unknown } | undefined;
   let closed = false;
   let registering = false;
   let updating = false;
@@ -840,12 +852,6 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     markerPath !== undefined &&
     toolRows().some((row) => ownRow(row) && rowPath(row) === markerPath);
   const active = (): boolean => holds(isActive);
-  /**
-   * The check of the agent map row (E6): omp still lists this binding's
-   * marker. omp removes the rows of a suspended or closed extension (F13); a
-   * placeholder source path does not matter here.
-   */
-  const listed = (): boolean => toolRows().some(ownRow);
 
   const requireSession = (): SessionContext => {
     if (session === undefined) throw new Error("talk: the session has not started yet.");
@@ -1047,7 +1053,20 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       }
     }
     identity = readContext(ctx, ["agent"]).agent();
-    talk.asks.noteAgent(agentRef(env.scope, bindingKey, identity), listed);
+    const agent = agentRef(env.scope, bindingKey, identity);
+    talk.asks.noteAgent(agent);
+    // S6: omp keeps the managed timers of a suspended extension running (F13) and
+    // clears those of a closed binding (F16), so the beats tell the sweep that the
+    // binding is not closed. Only an agent with a parent has a row to keep.
+    if (agent.parentId !== undefined && beatTimer === undefined) {
+      const context = readContext(ctx, ["setInterval", "clearTimer"]);
+      beatTimer = {
+        context,
+        timer: context.setInterval(() => {
+          talk.asks.beat(agent.id);
+        }, SWEEP_INTERVAL_MS),
+      };
+    }
     // A subagent session is no target (#248 D2): it has no registration and no timer.
     if (identity.kind !== "main") return;
     session = readContext(ctx, MAIN_NEEDS);
@@ -1106,6 +1125,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     flows.end();
     if (timer !== undefined) session?.clearTimer(timer);
     timer = undefined;
+    if (beatTimer !== undefined) beatTimer.context.clearTimer(beatTimer.timer);
+    beatTimer = undefined;
     // C13: the agent map keeps this binding's entry only while a live subagent names it.
     if (identity !== undefined) talk.asks.forgetAgent(agentRef(env.scope, bindingKey, identity).id);
     const registration = delivery.registration;
@@ -1128,16 +1149,17 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     ) => {
       const context = readContext(ctx, TOOL_NEEDS);
       const self = toolSelf(context);
-      // A row that the sweep released while the extension was suspended comes back.
-      talk.asks.noteAgent(self.agent, listed);
+      // A note is also a beat; it restores a row that the sweep released.
+      talk.asks.noteAgent(self.agent);
       const outcome = await Effect.runPromise(
         runTalkTool(
           {
-            transport: peers,
+            transport: talk.transport,
             asks: talk.asks,
             self,
             clock: env.clock,
             signal: signal instanceof AbortSignal ? signal : undefined,
+            snapshot,
           },
           params,
         ),
@@ -1148,36 +1170,51 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   });
 
   /**
+   * The transport of one flow (#251 G3): each call runs with the flow's
+   * signal, so the end of the flow interrupts it, and no call starts after
+   * the flow ended or its session changed. The check also runs right before
+   * the request of a send, after its lookups.
+   */
+  const flowTransport = (life: FlowLife): PeerTransport => {
+    const whileLive = <A>(call: () => Promise<A>): Promise<A> =>
+      life.live() ? call() : Promise.reject(new Error("the /talk flow ended. Nothing was sent."));
+    return {
+      list: () => whileLive(() => talk.transport.list(life.signal)),
+      probeAll: (targets) => whileLive(() => talk.transport.probeAll(targets, life.signal)),
+      request: (target, kind, body) =>
+        whileLive(() => talk.transport.request(target, kind, body, life.signal)),
+      known: (instanceId) => whileLive(() => talk.transport.known(instanceId, life.signal)),
+    };
+  };
+
+  /**
    * The listing, the resolver, the pair send, and the side turn of one flow,
    * bound to its context (#251 G3, G6).
    */
   const flowServices = (ctx: unknown, context: SessionContext): FlowServices => {
     const runEphemeralTurn = method(ctx, "runEphemeralTurn");
-    const toolContext = (): ToolContext => ({
-      transport: peers,
+    const toolContext = (life: FlowLife): ToolContext => ({
+      transport: flowTransport(life),
       asks: talk.asks,
       self: toolSelf(context),
       clock: env.clock,
       signal: undefined,
+      snapshot,
     });
     return {
       sessionId: () => context.sessionId(),
-      list: async () => {
-        const answer = await Effect.runPromise(
-          listSessions(toolContext()).pipe(
+      list: (life) =>
+        Effect.runPromise(
+          listSessions(toolContext(life)).pipe(
             Effect.match({
               onFailure: (error): ListingAnswer => ({ _tag: "Failed", text: error.message }),
               onSuccess: (rows): ListingAnswer => ({ _tag: "Listed", rows }),
             }),
           ),
-        );
-        // The probed rows replace the raw listing that `peers` kept: they leave out ended entries.
-        if (answer._tag === "Listed") listedNames = answer.rows.flatMap((row) => row.name ?? []);
-        return answer;
-      },
-      resolve: (target) =>
+        ),
+      resolve: (target, life) =>
         Effect.runPromise(
-          resolveTarget(toolContext(), { _tag: "To", to: target }).pipe(
+          resolveTarget(toolContext(life), { _tag: "To", to: target }).pipe(
             Effect.match({
               onFailure: (error): TargetAnswer => ({ _tag: "Failed", text: error.message }),
               onSuccess: (resolved): TargetAnswer => ({
@@ -1187,9 +1224,14 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             }),
           ),
         ),
-      send: (pair, text, kind) =>
+      send: (pair, text, kind, life) =>
         Effect.runPromise(
-          sendToPair(toolContext(), pair, { text, attachments: [], noWake: false, kind }).pipe(
+          sendToPair(toolContext(life), pair, {
+            text,
+            attachments: [],
+            noWake: false,
+            kind,
+          }).pipe(
             Effect.match({
               onFailure: (error): SendAnswer => ({ ok: false, text: error.message }),
               onSuccess: (outcome): SendAnswer => ({ ok: true, text: outcome.text }),

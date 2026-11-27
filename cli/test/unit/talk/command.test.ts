@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DOCKED,
   FULL_SCREEN,
   ID_A,
   ID_B,
@@ -26,9 +27,11 @@ import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
   LIST_TOO_SMALL,
+  PICKER_EMPTY_FRAME_ROWS,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
+  composePlaceholder,
   drawCode,
   listLayout,
 } from "../../../talk/ui/views";
@@ -95,16 +98,22 @@ describe("list layout (G3)", () => {
     expect(listLayout({ columns: 80, rows: 40 })).toEqual({
       maxRows: PICKER_ROW_LIMIT,
       fits: true,
+      framed: true,
     });
     expect(listLayout({ columns: 80, rows: 8 })).toEqual({
       maxRows: 8 - PICKER_FIXED_ROWS,
       fits: true,
+      framed: true,
     });
     expect(listLayout({ columns: 80, rows: PICKER_FIXED_ROWS + 1 })).toEqual({
       maxRows: 1,
       fits: true,
+      framed: true,
     });
     expect(listLayout({ columns: 80, rows: PICKER_FIXED_ROWS }).fits).toBe(false);
+    expect(listLayout({ columns: 80, rows: PICKER_EMPTY_FRAME_ROWS }).framed).toBe(true);
+    expect(listLayout({ columns: 80, rows: PICKER_EMPTY_FRAME_ROWS - 1 }).framed).toBe(false);
+    expect(listLayout(undefined).framed).toBe(false);
   });
 
   it("fits only when the label budget holds the full instance id", () => {
@@ -142,7 +151,7 @@ describe("list view (G3)", () => {
     const flow = h.run();
     await flush();
     const view = h.tui.top;
-    expect(view.options).toEqual(FULL_SCREEN);
+    expect(view.options).toMatchObject(FULL_SCREEN);
     expect(view.node.kind).toBe("picker");
     expect(prop(view.node, "size")).toBe("screen");
     const items = itemsOf(view.node);
@@ -178,8 +187,11 @@ describe("list view (G3)", () => {
     await flush();
     const compose = h.tui.top;
     expect(compose.node.kind).toBe("input");
-    expect(compose.options).toBeUndefined();
-    expect(prop(compose.node, "prompt")).toBe(`To ${literal("gamma")}: `);
+    expect(compose.options).toMatchObject(DOCKED);
+    // C3: no prompt shifts the caret; the placeholder names the destination.
+    expect(prop(compose.node, "prompt")).toBeUndefined();
+    expect(prop(compose.node, "placeholder")).toBe(composePlaceholder(row(ID_C, "gamma")));
+    expect(prop(compose.node, "placeholder")).toContain(literal("gamma"));
     press(compose.node, "escape");
     await flow;
     expect(h.services.sends).toEqual([]);
@@ -246,6 +258,24 @@ describe("list view (G3)", () => {
     },
   );
 
+  it.each([1, PICKER_EMPTY_FRAME_ROWS - 1])(
+    "puts the request for a larger pane in the top border of a %i-row pane, the first row that omp keeps (S10)",
+    async (rows) => {
+      const h = await harness();
+      const flow = h.run();
+      await flush();
+      const list = h.tui.top.node;
+      h.tui.size = { columns: 100, rows };
+      expect(termOf(list)["title"]).toBe(LIST_TOO_SMALL);
+      // A pane with room for the empty frame shows the request as the empty text.
+      h.tui.size = { columns: 100, rows: PICKER_EMPTY_FRAME_ROWS };
+      expect(termOf(list)["title"]).toBeNull();
+      expect(prop(list, "empty")).toBe(LIST_TOO_SMALL);
+      press(list, "escape");
+      await flow;
+    },
+  );
+
   it("keeps rows that differ only by instance id apart and sends to the chosen pair", async () => {
     const h = await harness();
     const twin = { name: "beta", sessionId: "session-shared", cwd: "/work/beta" };
@@ -290,7 +320,7 @@ describe("compose and confirm views (G3)", () => {
     const confirm = await confirmTo(h, ID_B, "hello there");
     expect(h.services.sends).toEqual([]);
     const view = h.tui.top;
-    expect(view.options).toEqual(FULL_SCREEN);
+    expect(view.options).toMatchObject(FULL_SCREEN);
     expect(confirm.kind).toBe("col");
     const { instanceId, code } = codeOf(confirm);
     expect(instanceId).toBe(ID_B);
@@ -458,6 +488,10 @@ describe("compose and confirm views (G3)", () => {
     expect(press(compose, "left")).toBe(false);
     fire(compose, "onEdit", { from: 0, to: 0, text: "x", cursor: 1, len: 99 });
     expect(prop(compose, "text")).toBe("   ");
+    // T1: an edit loses its escape sequences and control characters; the caret goes to its end.
+    fire(compose, "onEdit", { from: 3, to: 3, text: "a\u001b[2Jb\u0007", cursor: 9, len: 3 });
+    expect(prop(compose, "text")).toBe("   ab");
+    expect(prop(compose, "cursor")).toBe(5);
     press(compose, "escape");
     await flow;
   });
@@ -585,4 +619,63 @@ describe("flow slot (G3)", () => {
     await flow;
     expect(h.tui.calls).toEqual([]);
   });
+
+  it("gives each listing and send the flow's life, whose signal aborts when the flow ends (C1)", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const confirm = await confirmTo(h, ID_B, "hello");
+    typeCode(confirm, codeOf(confirm).code);
+    await flow;
+    expect(h.services.lives).toHaveLength(2);
+    const [listing, send] = h.services.lives;
+    expect(listing).toBe(send);
+    expect(send?.signal.aborted).toBe(true);
+    expect(send?.live()).toBe(false);
+  });
+
+  it("posts no notice when the flow ends while its send runs (C1, T2)", async () => {
+    const h = await harness();
+    const gate = Promise.withResolvers<void>();
+    h.services.sendGate = gate.promise;
+    const flow = h.run();
+    await flush();
+    const confirm = await confirmTo(h, ID_B, "hello");
+    typeCode(confirm, codeOf(confirm).code);
+    await flush();
+    expect(h.services.sends).toHaveLength(1);
+    const life = h.services.lives.at(-1);
+    expect(life?.live()).toBe(true);
+    h.slot.end();
+    expect(life?.signal.aborted).toBe(true);
+    expect(life?.live()).toBe(false);
+    gate.resolve();
+    await flow;
+    expect(h.tui.notices).toEqual([]);
+  });
+
+  it.each([
+    ["compose", false],
+    ["the list", true],
+  ] as const)(
+    "cancels %s at the next check when omp closed its overlay without done (C2)",
+    async (name, list) => {
+      const h = await harness();
+      const flow = h.run();
+      await flush();
+      if (!list) await composeTo(h, ID_B, "draft");
+      const view = h.tui.top;
+      expect(view.node.kind).toBe(name === "compose" ? "input" : "picker");
+      h.slot.check();
+      expect(view.closed).toBe(false);
+      view.hostClose();
+      h.slot.check();
+      // The view settles at once, so the flow ends without a key.
+      expect(view.closed).toBe(true);
+      await flow;
+      expect(view.result).toEqual(list ? { _tag: "Close" } : { _tag: "Cancel" });
+      expect(h.services.sends).toEqual([]);
+      expect(h.tui.notices).toEqual([]);
+    },
+  );
 });

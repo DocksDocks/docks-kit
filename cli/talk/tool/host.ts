@@ -151,19 +151,26 @@ export type CancelTimer = () => void;
 
 /** Time and timers of the receiver, so tests can use a fake clock. */
 export interface TalkClock {
-  /** Epoch milliseconds. */
+  /** Epoch milliseconds, for message timestamps only: the wall clock can step back or forward. */
   readonly now: () => number;
+  /**
+   * Monotonic milliseconds from an arbitrary start, for deadlines and ages: a
+   * step of the wall clock does not change it.
+   */
+  readonly elapsed: () => number;
   /** Runs `callback` in a fresh task after `delayMs`. */
   readonly schedule: (delayMs: number, callback: () => void) => CancelTimer;
 }
 
 /**
- * The clock of the process: `Date.now` and `setTimeout`. A timer does not
- * keep the process alive (`unref`), and a throw inside a callback goes to
- * `onError`, because a throw from a raw timer ends the omp session.
+ * The clock of the process: `Date.now`, `performance.now`, and `setTimeout`.
+ * A timer does not keep the process alive (`unref`), and a throw inside a
+ * callback goes to `onError`, because a throw from a raw timer ends the omp
+ * session.
  */
 export const systemClock = (onError: (error: unknown) => void): TalkClock => ({
   now: () => Date.now(),
+  elapsed: () => performance.now(),
   schedule: (delayMs, callback) => {
     const timer = setTimeout(() => {
       try {

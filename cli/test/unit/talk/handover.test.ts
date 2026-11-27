@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DRAFT,
+  FULL_SCREEN,
   type FakeNode,
   type Harness,
   ID_B,
@@ -20,11 +21,13 @@ import {
 } from "../../lib/talkFlowHost";
 import { literal } from "../../../talk/tool/attachments";
 import {
+  HANDOVER_CUT_LINE,
   HANDOVER_EMPTY,
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_PROMPT,
   HANDOVER_STARTED,
   MAX_HANDOVER_BYTES,
+  OMP_CUT_MARK,
 } from "../../../talk/ui/handover";
 
 // The handover flows of plan #251 G6 against the fake TUI host of
@@ -62,10 +65,14 @@ const replaceText = (node: FakeNode, text: string): void => {
 };
 
 describe("handover template (G6)", () => {
-  it("asks for the five sections, from this session's view, within 4 KiB", () => {
+  it("asks for the five sections, from this session's view, within a UTF-8 byte budget under omp's 4 KiB cap (C8, S9)", () => {
     for (const section of ["Next task", "Decisions", "Files", "Current state", "Risks"])
       expect(HANDOVER_PROMPT).toContain(`## ${section}`);
     expect(HANDOVER_PROMPT).toContain("this session");
+    // The budget counts UTF-8 bytes, as omp's cap does, not characters.
+    expect(HANDOVER_PROMPT).toContain("under 3500 bytes of UTF-8 text");
+    expect(HANDOVER_PROMPT).toContain("above 4096 bytes");
+    expect(HANDOVER_PROMPT).not.toMatch(/3500 characters/u);
     expect(new TextEncoder().encode(HANDOVER_PROMPT).byteLength).toBeLessThanOrEqual(
       MAX_HANDOVER_BYTES,
     );
@@ -85,7 +92,11 @@ describe("/talk handover <target> (G2, G6)", () => {
     expect(request?.signal.aborted).toBe(false);
     expect(h.tui.notices).toEqual([{ text: HANDOVER_STARTED, level: "info" }]);
     const review = reviewOf(h);
-    expect(h.tui.top.options).toBeUndefined();
+    // C4: a full-screen overlay, so the review owns the rows that `ui.size()` reports.
+    expect(h.tui.top.options).toMatchObject(FULL_SCREEN);
+    expect(prop(review, "maxLines")).toBe(h.tui.size.rows);
+    h.tui.size = { columns: 100, rows: 5 };
+    expect(prop(review, "maxLines")).toBe(5);
     expect(prop(review, "text")).toBe(DRAFT);
     expect(prop(review, "cursor")).toBe(0);
     press(review, "escape");
@@ -117,7 +128,7 @@ describe("/talk handover <target> (G2, G6)", () => {
     expect(press(review, "ctrl+s")).toBe(true);
     await flush();
     const confirm = h.tui.top.node;
-    expect(h.tui.top.options).toEqual({ overlay: true, fullscreen: true });
+    expect(h.tui.top.options).toMatchObject(FULL_SCREEN);
     const { instanceId, code } = codeOf(confirm);
     expect(instanceId).toBe(ID_C);
     expect(linesOf(confirm).slice(1, 4)).toEqual([
@@ -173,6 +184,63 @@ describe("/talk handover <target> (G2, G6)", () => {
     press(review, "escape");
     await flow;
     expect(h.services.sends).toEqual([]);
+  });
+
+  it("does not approve while no editable row fits the screen (C4)", async () => {
+    const h = await harness();
+    const { flow } = await handoverToGamma(h);
+    const review = reviewOf(h);
+    h.tui.size = { columns: 100, rows: 0 };
+    expect(press(review, "ctrl+s")).toBe(true);
+    await flush();
+    expect(h.tui.top.node).toBe(review);
+    h.tui.size = { columns: 100, rows: 1 };
+    press(review, "ctrl+s");
+    await flush();
+    expect(h.tui.top.node.kind).toBe("col");
+    press(h.tui.top.node, "alt+t");
+    await flow;
+    expect(h.services.sends).toEqual([]);
+  });
+
+  it("cleans escape sequences and control characters from the draft and each edit, and sends exactly the reviewed text (T1)", async () => {
+    const h = await harness();
+    h.services.reply = () =>
+      Promise.resolve({
+        replyText:
+          "## Next\u001b]52;c;ZXZpbA==\u0007 task\r\nShip\u009b31m it\u001b[2J.\u0000\n\tDone.",
+      });
+    const { flow } = await handoverToGamma(h);
+    const review = reviewOf(h);
+    expect(prop(review, "text")).toBe("## Next task\nShip it.\n\tDone.");
+    const length = String(prop(review, "text")).length;
+    fire(review, "onEdit", {
+      from: length,
+      to: length,
+      text: "\u001b[31m!\u001b[0m",
+      cursor: length + 10,
+      len: length,
+    });
+    expect(prop(review, "text")).toBe("## Next task\nShip it.\n\tDone.!");
+    expect(prop(review, "cursor")).toBe(length + 1);
+    press(review, "ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    typeCode(confirm, codeOf(confirm).code);
+    await flow;
+    expect(h.services.sends).toEqual([
+      { pair: GAMMA_PAIR, text: "## Next task\nShip it.\n\tDone.!", kind: "handover" },
+    ]);
+  });
+
+  it("shows a line that says omp cut the draft in place of omp's mark (C8, S9)", async () => {
+    const h = await harness();
+    h.services.reply = () => Promise.resolve({ replyText: `## Next task\nShip${OMP_CUT_MARK}` });
+    const { flow } = await handoverToGamma(h);
+    const review = reviewOf(h);
+    expect(prop(review, "text")).toBe(`## Next task\nShip\n${HANDOVER_CUT_LINE}`);
+    press(review, "escape");
+    await flow;
   });
 
   it.each(["escape", "alt+t"])("cancels the review on %s and sends nothing", async (id) => {
@@ -273,7 +341,7 @@ describe("handover-mode list and h (G2, G6)", () => {
     await flush();
     const list = h.tui.top.node;
     expect(list.kind).toBe("picker");
-    expect(h.tui.top.options).toEqual({ overlay: true, fullscreen: true });
+    expect(h.tui.top.options).toMatchObject(FULL_SCREEN);
     expect(String(termOf(list)["hint"])).toContain("hand over");
     expect(h.services.turns).toEqual([]);
     const beta = itemsOf(list).find((item) => item.label.startsWith(ID_B));

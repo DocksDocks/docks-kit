@@ -6,7 +6,8 @@ import {
   type TransportFacade,
   makeTalkExtension,
 } from "../../../talk/extension";
-import { type Attachment, literal } from "../../../talk/tool/attachments";
+import type * as Attachments from "../../../talk/tool/attachments";
+import { type Attachment, literal, oneLine } from "../../../talk/tool/attachments";
 import {
   type FormattedMessage,
   formatDelivery,
@@ -17,6 +18,12 @@ import { TALK_MESSAGE_TYPE, type TalkDetails } from "../../../talk/tool/host";
 import type { DeliverBody, MessageKind, ReplyBody } from "../../../talk/tool/protocol";
 import { COLLAPSED_BODY_LINES, makeTalkCardRenderer } from "../../../talk/ui/card";
 import { type HostModuleLoader, type HostUi, probeHost } from "../../../talk/ui/host";
+
+// C9: the spy counts which lines the card cleans; it keeps the real cleaner.
+vi.mock("../../../talk/tool/attachments", async (importOriginal) => {
+  const actual = await importOriginal<typeof Attachments>();
+  return { ...actual, oneLine: vi.fn(actual.oneLine) };
+});
 
 // The message card of plan #251 G5: the renderer that the factory registers
 // for `talk` messages, against a fake `jsx` that records each node.
@@ -232,6 +239,19 @@ describe("message card (#251 G5)", () => {
   it("counts one hidden line as `… 1 more lines`", async () => {
     const card = cardOf(await render(talkMessage("message", "a\nb\nc\nd"), false));
     expect(card.rows).toEqual(["a", "b", "c", "… 1 more lines"]);
+  });
+
+  it("cleans only the shown lines of a collapsed body and counts the hidden lines (C9)", async () => {
+    const hidden = Array.from({ length: 500 }, (_, index) => `hidden ${index}`).join("\n");
+    const message = talkMessage("message", `one\ntwo\r\nthree\u2028${hidden}`);
+    vi.mocked(oneLine).mockClear();
+    const card = cardOf(await render(message, false));
+    expect(card.rows).toEqual(["one", "two", "three", "… 500 more lines"]);
+    expect(vi.mocked(oneLine).mock.calls.map(([text]) => text)).toEqual(["one", "two", "three"]);
+    vi.mocked(oneLine).mockClear();
+    const expanded = cardOf(await render(message, true));
+    expect(expanded.rows).toHaveLength(503);
+    expect(vi.mocked(oneLine)).toHaveBeenCalledTimes(503);
   });
 
   it("names each attachment from details and keeps a body that looks like an attachment label as body", async () => {

@@ -20,9 +20,9 @@ import { randomInt } from "node:crypto";
 
 import { Predicate } from "effect";
 
-import type { JSXNode } from "@oh-my-pi/pi-tui";
+import type { JSXNode, Signal } from "@oh-my-pi/pi-tui";
 
-import { literal, oneLine } from "../tool/attachments";
+import { literal, oneLine, safeMultiline } from "../tool/attachments";
 import type { ProbeResult } from "../tool/targets";
 import type { Target } from "../transport/request";
 import type { HostUi } from "./host";
@@ -115,6 +115,8 @@ export const PICKER_FIXED_ROWS = 3;
  * painter keeps when it cuts a label (2).
  */
 export const PICKER_LABEL_CHROME = 9;
+/** The rows of the empty picker frame without a hint: the top border, the empty text, and the bottom border. */
+export const PICKER_EMPTY_FRAME_ROWS = 3;
 
 /** What the list view can show in its space. */
 export interface ListLayout {
@@ -122,15 +124,22 @@ export interface ListLayout {
   readonly maxRows: number;
   /** At least one item row fits, and the label budget holds the full instance id. */
   readonly fits: boolean;
+  /**
+   * The empty frame fits, so its empty text can hold the request for a
+   * larger pane. Otherwise the top border holds it: omp clips an overflowing
+   * frame to its first rows (S10).
+   */
+  readonly framed: boolean;
 }
 
 /** G3: the rows after the fixed picker rows, at most 10, and the width guard of the label. */
 export const listLayout = (size: ViewSize | undefined): ListLayout => {
-  if (size === undefined) return { maxRows: 1, fits: false };
+  if (size === undefined) return { maxRows: 1, fits: false, framed: false };
   const rows = Math.min(PICKER_ROW_LIMIT, size.rows - PICKER_FIXED_ROWS);
   return {
     maxRows: Math.max(1, rows),
     fits: rows >= 1 && size.columns - PICKER_LABEL_CHROME >= INSTANCE_ID_LENGTH,
+    framed: size.rows >= PICKER_EMPTY_FRAME_ROWS,
   };
 };
 
@@ -204,8 +213,9 @@ export const listView = (
     selected: () => (layout().fits ? selected() : null),
     empty: () => (layout().fits ? LIST_EMPTY : LIST_TOO_SMALL),
     term: () => {
-      const { maxRows, fits } = layout();
-      return fits ? { maxRows, hint: LIST_HINT[mode] } : { maxRows, hint: null, title: null };
+      const { maxRows, fits, framed } = layout();
+      if (fits) return { maxRows, hint: LIST_HINT[mode] };
+      return { maxRows, hint: null, title: framed ? null : LIST_TOO_SMALL };
     },
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
@@ -240,10 +250,31 @@ export type TextChoice =
   | { readonly _tag: "Cancel" };
 
 /**
+ * Applies one edit of a text field (T1). The inserted text passes
+ * `safeMultiline`, so no escape sequence or other control character reaches
+ * the field or the send; the caret of a cleaned insertion goes to its end.
+ * A stale edit saw another text, and pi-tui says to ignore it.
+ */
+export const applyEdit = (draft: Signal<string>, cursor: Signal<number>, edit: ViewEdit): void => {
+  const before = draft.peek();
+  if (edit.len !== before.length) return;
+  const text = safeMultiline(edit.text);
+  draft.set(before.slice(0, edit.from) + text + before.slice(edit.to));
+  cursor.set(text === edit.text ? edit.cursor : edit.from + text.length);
+};
+
+/** The placeholder of the compose field: the destination and the keys. */
+export const composePlaceholder = (destination: Destination): string =>
+  `To ${shownName(destination)}: the message; ⏎ confirms the destination, ⎋ cancels`;
+
+/**
  * The compose view: an `input` root, so the field takes the typing (F5).
  * `enter` with text goes to the confirm view; `escape` and `alt+t` cancel.
  * The field starts with `text`, so the text is kept when the confirm view
- * returns here.
+ * returns here. The destination is in the placeholder, not in a prompt:
+ * omp 19.2.1 scrolls an `input` without the width of its prompt, so a
+ * prompt can hide the caret of a long text (C3). The confirm view names
+ * the destination again.
  */
 export const composeView = (
   ui: HostUi,
@@ -256,14 +287,9 @@ export const composeView = (
   return ui.jsx("input", {
     text: () => draft(),
     cursor: () => cursor(),
-    prompt: `To ${shownName(destination)}: `,
-    placeholder: "the message; ⏎ confirms the destination, ⎋ cancels",
+    placeholder: composePlaceholder(destination),
     onEdit: (edit: ViewEdit) => {
-      const before = draft.peek();
-      // A stale edit saw another text: pi-tui says to ignore it.
-      if (edit.len !== before.length) return;
-      draft.set(before.slice(0, edit.from) + edit.text + before.slice(edit.to));
-      cursor.set(edit.cursor);
+      applyEdit(draft, cursor, edit);
     },
     onKey: (key: ViewKey): boolean => {
       if (key.kind === "release") return false;

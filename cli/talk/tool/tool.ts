@@ -152,18 +152,28 @@ export type RequestAnswer =
 /**
  * The transport calls of the tool, as plain functions of the process
  * singleton (E12). An expected failure is a value; a rejection is a defect
- * of the transport runtime.
+ * of the transport runtime. A `signal` interrupts the call when it aborts,
+ * so a `/talk` flow that ends stops its transport work (#251 G3); the tool
+ * gives none.
  */
 export interface PeerTransport {
-  readonly list: () => Promise<ListAnswer>;
+  readonly list: (signal?: AbortSignal) => Promise<ListAnswer>;
   /**
    * Pings each target under the dial limit, in one batch that shares one
    * socket snapshot. The results come in the order of the targets.
    */
-  readonly probeAll: (targets: ReadonlyArray<Target>) => Promise<ReadonlyArray<ProbeResult>>;
-  readonly request: (target: Target, kind: string, body: Schema.Json) => Promise<RequestAnswer>;
+  readonly probeAll: (
+    targets: ReadonlyArray<Target>,
+    signal?: AbortSignal,
+  ) => Promise<ReadonlyArray<ProbeResult>>;
+  readonly request: (
+    target: Target,
+    kind: string,
+    body: Schema.Json,
+    signal?: AbortSignal,
+  ) => Promise<RequestAnswer>;
   /** The pair of an entry that this process kept, by its full instance id. */
-  readonly known: (instanceId: string) => Promise<Target | undefined>;
+  readonly known: (instanceId: string, signal?: AbortSignal) => Promise<Target | undefined>;
 }
 
 /** The calling session, as the tool sees it. */
@@ -188,7 +198,16 @@ export interface ToolContext {
   readonly signal: AbortSignal | undefined;
   /** Default: the ask timeout of `asks.ts`. */
   readonly askTimeoutMs?: number | undefined;
+  /** Gets the rows of each `listSessions` call, such as the `/talk` completion snapshot (#251 G2). */
+  readonly snapshot?: ListingSnapshot | undefined;
 }
+
+/**
+ * Starts one listing and returns the function that publishes its rows. A
+ * call starts before the registry read, so the owner can drop the rows of a
+ * listing that a later one overtook.
+ */
+export type ListingSnapshot = () => (rows: ReadonlyArray<SessionRow>) => void;
 
 /** What `send`, `ask`, `reply`, and `cancel` report besides the text. */
 export interface TalkToolDetails {
@@ -337,12 +356,16 @@ export interface SessionRow extends ListedPeer {
   readonly probe: ProbeResult;
 }
 
-/** The listing as rows, not prose: every listed registration that its probe did not prove ended. */
+/**
+ * The listing as rows, not prose: every listed registration that its probe
+ * did not prove ended. Only these probed rows reach `context.snapshot`.
+ */
 export const listSessions = Effect.fnUntraced(function* (
   context: ToolContext,
 ): Effect.fn.Return<ReadonlyArray<SessionRow>, TalkToolFailed> {
+  const publish = context.snapshot?.();
   const candidates = yield* probeAll(context, yield* listPeers(context.transport));
-  return candidates
+  const rows = candidates
     .filter((candidate) => probeState(candidate.probe) !== "ended")
     .map(({ peer, probe }) => ({
       instanceId: peer.instanceId,
@@ -352,6 +375,8 @@ export const listSessions = Effect.fnUntraced(function* (
       own: isOwn(context.self, peer),
       probe,
     }));
+  publish?.(rows);
+  return rows;
 });
 
 /** The exact registration pair that a selector resolved to, with the metadata that the listing gave. */

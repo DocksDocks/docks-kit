@@ -160,7 +160,7 @@ const clock = systemClock((error) => {
 
 beforeEach(() => {
   clockErrors = [];
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
 });
 
 afterEach(() => {
@@ -310,28 +310,70 @@ describe("confirmation and wake (E4)", () => {
     expect(WATCH_LIMIT_MS).toBe(600_000);
   });
 
-  it("reads each old entry once over many checks, not on each check (C6)", async () => {
+  it("ends a watch after 10 minutes also when the wall clock stepped back (C7)", async () => {
     const { fake, delivery } = setup();
-    fake.holdAppends = true;
-    let reads = 0;
-    const backing: Array<unknown> = Array.from({ length: 5_000 }, () => ({ type: "message" }));
+    fake.refuseTurns = true;
+    const body = sendBody();
+    void delivery.deliver(REG_A, body);
+    await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS);
+    vi.setSystemTime(Date.now() - 30 * 60 * 1_000);
+    await vi.advanceTimersByTimeAsync(WATCH_LIMIT_MS - ANSWER_WAIT_MS - 20);
+    expect(cancelOf(delivery, body.messageId)).toBe("submitted");
+    await vi.advanceTimersByTimeAsync(20);
+    expect(cancelOf(delivery, body.messageId)).toBe("unknown");
+  });
+
+  /** A list of `length` plain entries that counts the reads of its items. */
+  const countedEntries = (length: number) => {
+    const counter = { reads: 0 };
+    const backing: Array<unknown> = Array.from({ length }, () => ({ type: "message" }));
     const entries = new Proxy(backing, {
       get: (target, key, receiver) => {
-        if (typeof key === "string" && /^\d+$/u.test(key)) reads += 1;
+        if (typeof key === "string" && /^\d+$/u.test(key)) counter.reads += 1;
         return Reflect.get(target, key, receiver);
       },
     });
+    return { counter, entries };
+  };
+
+  it("reads no old entry over many checks: a new watch starts at the end of the list (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    const { counter, entries } = countedEntries(5_000);
     fake.state = { ...fake.state, entries };
     const body = sendBody();
     const state = peek(delivery.deliver(REG_A, body));
     await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS);
-    // About a hundred checks ran; together they read each old entry once.
+    // About a hundred checks ran; none read an entry from before the send.
     expect(state.value?.outcome).toBe("submitted");
-    expect(reads).toBe(5_000);
+    expect(counter.reads).toBe(0);
     fake.releaseHeld();
     await vi.advanceTimersByTimeAsync(10);
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
-    expect(reads).toBe(5_001);
+    expect(counter.reads).toBe(1);
+  });
+
+  it("reads only the new entry of each isolated delivery to an idle session (C6)", async () => {
+    const { fake, delivery } = setup();
+    const { counter, entries } = countedEntries(5_000);
+    fake.state = { ...fake.state, entries };
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect(counter.reads).toBe(2);
+  });
+
+  it("reads a list that became shorter again from its start (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    fake.state.entries.push({ type: "message" }, { type: "message" }, { type: "message" });
+    const body = sendBody();
+    const state = peek(delivery.deliver(REG_A, body));
+    await flushMicrotasks();
+    // omp empties the same list, then the message lands as its first entry.
+    fake.state.entries.length = 0;
+    fake.releaseHeld();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(state.value?.outcome).toBe("delivered");
   });
 
   it("reads a replaced entry list of the same session again from its start (C6)", async () => {
@@ -370,6 +412,31 @@ describe("confirmation and wake (E4)", () => {
     })();
     expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
     // omp replaces the live list, and no other talk message comes.
+    fake.state = stateFor(SESSION_A);
+    await collectGarbage();
+    expect(watched.deref()).toBeUndefined();
+  });
+
+  it("keeps no entry list after a send that omp refused with a throw (C6)", async () => {
+    const { fake, host } = makeFakeHost();
+    const failure = new Error("sendMessage failed");
+    const delivery = makeDelivery({
+      host: {
+        ...host,
+        sendMessage: () => {
+          throw failure;
+        },
+      },
+      clock,
+      retain: async () => true,
+    });
+    delivery.attach(REG_A);
+    const watched = ((): WeakRef<Array<unknown>> => {
+      const entries: Array<unknown> = Array.from({ length: 1_000 }, () => ({ type: "message" }));
+      fake.state = { ...fake.state, entries };
+      return new WeakRef(entries);
+    })();
+    await expect(delivery.deliver(REG_A, sendBody())).rejects.toBe(failure);
     fake.state = stateFor(SESSION_A);
     await collectGarbage();
     expect(watched.deref()).toBeUndefined();
@@ -572,6 +639,24 @@ describe("transition hold (E2)", () => {
     expect(fake.sentIds()).toEqual([body.messageId]);
     await flushMicrotasks();
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
+  });
+
+  it("sends a held message from a fresh task after the after-event also when the wall clock jumped ahead (C7)", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    const body = sendBody();
+    // A busy session queues the message and plans a try in 100 ms.
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    fake.idle = true;
+    await delivery.beforeTransition({ kind: "switch", reason: "resume" });
+    vi.setSystemTime(Date.now() + 60 * 60 * 1_000);
+    delivery.afterTransition({
+      kind: "switch",
+      reason: "resume",
+      previousSessionFile: fake.state.file,
+    });
+    await freshTask();
+    expect(fake.sentIds()).toEqual([body.messageId]);
   });
 
   it("keeps the queue across a session_switch that keeps the session id", async () => {
@@ -966,7 +1051,7 @@ describe("request handlers", () => {
 
   const handlersFor = (delivery: TalkDelivery | undefined) => {
     const asks = makeAskStore(clock);
-    asks.noteAgent({ id: "asker", parentId: undefined, main: true }, () => true);
+    asks.noteAgent({ id: "asker", parentId: undefined, main: true });
     asks.setRegistration("asker", { registration: ASKER, isCurrent: () => true });
     const handlers = new Map(
       talkRequestHandlers({

@@ -130,6 +130,17 @@ export const talkCompletions = (
 
 // ── Flow services ──
 
+/**
+ * The options of each flow view: every view is an overlay, so no other view
+ * of omp replaces it in the editor slot (C2). `onHandle` gets the overlay
+ * handle of omp (`ExtensionOverlayHandle` v19.2.1).
+ */
+export interface ViewOptions {
+  readonly overlay: true;
+  readonly fullscreen: boolean;
+  readonly onHandle: (handle: unknown) => void;
+}
+
 /** The `ctx.ui` methods that a flow calls; no other (#248 D9). */
 export interface FlowUi {
   /** `ctx.ui.custom(factory, options)`: omp calls the factory with `(ui, theme, keybindings, done)`. */
@@ -140,7 +151,7 @@ export interface FlowUi {
       keybindings: unknown,
       done: (value: unknown) => void,
     ) => JSXNode,
-    options: { readonly overlay: true; readonly fullscreen: true } | undefined,
+    options: ViewOptions,
   ) => Promise<unknown>;
   readonly notify: (text: string, level: "info" | "warning" | "error") => void;
 }
@@ -159,16 +170,32 @@ export interface SendAnswer {
   readonly text: string;
 }
 
+/**
+ * The life of one flow, as its services see it (G3). The services run each
+ * transport call with `signal`, so the end of the flow interrupts the call,
+ * and they start no call while `live` is false.
+ */
+export interface FlowLife {
+  readonly signal: AbortSignal;
+  /** True while the flow goes on; a changed session id ends the flow and reads false. */
+  readonly live: () => boolean;
+}
+
 /** What one flow reads and calls, bound to the context that started it. */
 export interface FlowServices {
   /** The session id of the flow's context now. */
   readonly sessionId: () => string;
-  /** The typed listing; it also refreshes the completion snapshot. */
-  readonly list: () => Promise<ListingAnswer>;
+  /** The typed listing; its probed rows refresh the completion snapshot. */
+  readonly list: (life: FlowLife) => Promise<ListingAnswer>;
   /** The E8 resolver of a `/talk <target>` text. */
-  readonly resolve: (target: string) => Promise<TargetAnswer>;
+  readonly resolve: (target: string, life: FlowLife) => Promise<TargetAnswer>;
   /** The send to one exact pair through the `instance` path (G3), as a message or a handover (G6). */
-  readonly send: (pair: Target, text: string, kind: DeliverKind) => Promise<SendAnswer>;
+  readonly send: (
+    pair: Target,
+    text: string,
+    kind: DeliverKind,
+    life: FlowLife,
+  ) => Promise<SendAnswer>;
   /** `ctx.runEphemeralTurn` of the flow's context; undefined when the host has none (F7). */
   readonly sideTurn: SideTurn | undefined;
 }
@@ -180,14 +207,25 @@ export interface FlowSlot {
   readonly run: (ui: FlowUi, services: FlowServices, command: TalkCommand) => Promise<void>;
   /** Ends the running flow. */
   readonly end: () => void;
-  /** Ends the running flow when its session id changed. */
+  /**
+   * Ends the running flow when its session id changed, and cancels its open
+   * view when omp closed that view without `done`.
+   */
   readonly check: () => void;
+}
+
+/** The open view of a flow: the overlay handle that omp gave, and the cancel of the view. */
+interface OpenView {
+  handle: unknown;
+  cancel: () => void;
 }
 
 interface Flow {
   readonly controller: AbortController;
   readonly sessionId: string;
   readonly services: FlowServices;
+  readonly life: FlowLife;
+  view: OpenView | undefined;
 }
 
 const TALK_PREFIX = "talk: ";
@@ -198,7 +236,9 @@ export const talkErrorText = (cause: unknown): string => {
   return text.startsWith(TALK_PREFIX) ? text : `${TALK_PREFIX}${text}`;
 };
 
-const FULL_SCREEN = { overlay: true, fullscreen: true } as const;
+/** The list, the confirm view, and the handover review own the whole screen; compose docks at the bottom. */
+const FULL_SCREEN = true;
+const DOCKED = false;
 
 export interface FlowSlotOptions {
   /** Default: `drawCode` of `views.ts` with `crypto.randomInt`. */
@@ -240,37 +280,53 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   };
 
   /**
-   * Mounts one view and waits for its choice. The view closes through its own
-   * `done` with `ended` when the flow ends; a view that omp closes without
-   * `done` reads as `ended` too.
+   * Mounts one view as an overlay and waits for its choice. The view closes
+   * through its own `done` with `ended` when the flow ends, and `check`
+   * cancels it with `ended` when omp closed its overlay without `done`.
    */
   const mount = async <T>(
     flow: Flow,
     flowUi: FlowUi,
     build: (size: SizeReader, done: (choice: T) => void) => JSXNode,
     ended: T,
-    overlay: typeof FULL_SCREEN | undefined,
+    fullscreen: boolean,
   ): Promise<T> => {
     if (!live(flow)) return ended;
     const { signal } = flow.controller;
     let choice = ended;
-    await flowUi.custom((host, _theme, _keybindings, done) => {
-      let open = true;
-      const finish = (value: T): void => {
-        if (!open) return;
-        open = false;
-        signal.removeEventListener("abort", onAbort);
-        choice = value;
-        done(value);
-      };
-      const onAbort = (): void => {
-        finish(ended);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      // omp can run the factory after the flow ended; the view then closes at once.
-      if (!live(flow)) finish(ended);
-      return build(sizeReader(host), finish);
-    }, overlay);
+    const view: OpenView = { handle: undefined, cancel: () => undefined };
+    flow.view = view;
+    try {
+      await flowUi.custom(
+        (host, _theme, _keybindings, done) => {
+          let open = true;
+          const finish = (value: T): void => {
+            if (!open) return;
+            open = false;
+            signal.removeEventListener("abort", onAbort);
+            choice = value;
+            done(value);
+          };
+          const onAbort = (): void => {
+            finish(ended);
+          };
+          view.cancel = onAbort;
+          signal.addEventListener("abort", onAbort, { once: true });
+          // omp can run the factory after the flow ended; the view then closes at once.
+          if (!live(flow)) finish(ended);
+          return build(sizeReader(host), finish);
+        },
+        {
+          overlay: true,
+          fullscreen,
+          onHandle: (handle) => {
+            view.handle = handle;
+          },
+        },
+      );
+    } finally {
+      if (flow.view === view) flow.view = undefined;
+    }
     return choice;
   };
 
@@ -279,7 +335,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
 
   /**
    * Edit, confirm, and send to one destination (G3, G6). `escape` in the
-   * confirm view returns to the edit view with the text kept.
+   * confirm view returns to the edit view with the text kept. A flow that
+   * ended while the send ran posts no notice: the send stopped before its
+   * request, or the request went out and the peer can hold the text.
    */
   const editConfirmSend = async (
     flow: Flow,
@@ -288,6 +346,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     kind: DeliverKind,
     first: string,
     edit: EditView,
+    fullscreen: boolean,
   ): Promise<void> => {
     let text = first;
     for (;;) {
@@ -296,7 +355,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         flowUi,
         (size, done) => edit(size, text, done),
         { _tag: "Cancel" },
-        undefined,
+        fullscreen,
       );
       if (edited._tag !== "Confirm") return;
       text = edited.text;
@@ -312,7 +371,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       if (confirmed._tag === "Back") continue;
       if (confirmed._tag !== "Send" || !live(flow)) return;
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
-      const sent = await flow.services.send(pair, text, kind);
+      const sent = await flow.services.send(pair, text, kind, flow.life);
+      if (!live(flow)) return;
       if (sent.ok) flowUi.notify(sent.text, "info");
       else flowUi.notify(talkErrorText(sent.text), "error");
       return;
@@ -337,18 +397,30 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       flowUi.notify(draft.text, "error");
       return;
     }
-    await editConfirmSend(flow, flowUi, destination, "handover", draft.text, (size, text, done) =>
-      reviewView(ui, size, text, done),
+    await editConfirmSend(
+      flow,
+      flowUi,
+      destination,
+      "handover",
+      draft.text,
+      (size, text, done) => reviewView(ui, size, text, done),
+      FULL_SCREEN,
     );
   };
 
   const compose = (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> =>
-    editConfirmSend(flow, flowUi, destination, "message", "", (_size, text, done) =>
-      composeView(ui, destination, text, done),
+    editConfirmSend(
+      flow,
+      flowUi,
+      destination,
+      "message",
+      "",
+      (_size, text, done) => composeView(ui, destination, text, done),
+      DOCKED,
     );
 
   const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
-    const answer = await untilEnded(flow, flow.services.list());
+    const answer = await untilEnded(flow, flow.services.list(flow.life));
     if (answer === undefined || !live(flow)) return;
     if (answer._tag === "Failed") {
       flowUi.notify(talkErrorText(answer.text), "error");
@@ -379,7 +451,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     flowUi: FlowUi,
     target: string,
   ): Promise<Destination | undefined> => {
-    const answer = await untilEnded(flow, flow.services.resolve(target));
+    const answer = await untilEnded(flow, flow.services.resolve(target, flow.life));
     if (answer === undefined || !live(flow)) return undefined;
     if (answer._tag === "Resolved") return answer.destination;
     flowUi.notify(talkErrorText(answer.text), "error");
@@ -411,18 +483,26 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   return {
     run: async (flowUi, services, command) => {
       current?.controller.abort();
-      let flow: Flow;
+      const controller = new AbortController();
+      let sessionId: string;
       try {
-        flow = { controller: new AbortController(), sessionId: services.sessionId(), services };
+        sessionId = services.sessionId();
       } catch (error) {
         flowUi.notify(talkErrorText(error), "error");
         return;
       }
+      const flow: Flow = {
+        controller,
+        sessionId,
+        services,
+        life: { signal: controller.signal, live: () => live(flow) },
+        view: undefined,
+      };
       current = flow;
       try {
         await steps(flow, flowUi, command);
       } catch (error) {
-        flowUi.notify(talkErrorText(error), "error");
+        if (live(flow)) flowUi.notify(talkErrorText(error), "error");
       } finally {
         flow.controller.abort();
         if (current === flow) current = undefined;
@@ -432,7 +512,10 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       current?.controller.abort();
     },
     check: () => {
-      if (current !== undefined) live(current);
+      if (current === undefined || !live(current)) return;
+      const handle = current.view?.handle;
+      // omp closed the overlay without `done`: the view reads as cancelled (C2).
+      if (Predicate.hasProperty(handle, "closed") && handle.closed === true) current.view?.cancel();
     },
   };
 };

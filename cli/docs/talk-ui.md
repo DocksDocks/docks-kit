@@ -57,10 +57,15 @@ notice that names the two methods and omp 19.2.0, and opens no view.
 | `/talk handover <target>` | Starts a [handover](#handover) to that target                 |
 | `/talk handover`          | Opens the list view in handover mode; Enter starts a handover |
 
+`h` in the list that `/talk` or `alt+t` opens also starts a handover to the
+selected row.
+
 The command trims its argument text. The word `handover` as the first word
 always starts the sub-command, and the rest of the text is the target. Every
-other text is one target, so a session name with spaces works. A session
-whose name starts with the word `handover` gets a message only from the list.
+other text is one target, so a session name with spaces works. The reserved
+word stops only the targeting by name: a session whose name starts with the
+word `handover` gets a message from the list, or from `/talk <session id>`
+or a session id prefix that resolves to it.
 
 A target resolves with the rules of the tool field `to`: the exact name
 without regard to case, the full session id, or a session id prefix of at
@@ -73,9 +78,12 @@ and opens no view.
 
 omp asks for completions synchronously and gives no context, so the
 completion reads a snapshot: the names of the last listing of the binding.
-Each listing of the registry by the binding refreshes the snapshot: the tool
-actions that list, a target resolution, and the list view. The snapshot is
-empty until the first listing.
+Each listing of the binding (`listSessions`: the `list` action of the tool
+and the list view) refreshes the snapshot with its probed rows, so a name
+whose probe proved an end is not offered. A target resolution probes only
+its matches, so it does not refresh the snapshot. When two listings overlap,
+only the one that started last refreshes it. The snapshot is empty until the
+first listing.
 
 - The completion offers `handover` while the argument text is a start of
   `handover`.
@@ -107,15 +115,28 @@ A flow ends:
   the 1 s repair timer of a main binding checks it too.
 
 An ended flow aborts its pending listing, target resolution, or side turn,
-closes its open view through the view's own `done`, mounts no other view, and
-sends nothing. A view that omp closes without `done` ends its step as a
-cancel.
+closes its open view through the view's own `done`, mounts no other view,
+sends nothing, and shows no notice.
+
+Each transport call of a flow (the listing, the probes, the lookups of the
+resolver and of the send, and the request) runs with the `AbortSignal` of
+the flow, so the end of the flow interrupts the call. Right before each
+transport call, the flow checks that it did not end and that its session id
+did not change. So a send whose lookup was pending when the flow ended makes
+no request. A request whose body already went out can reach the peer; the
+flow shows no notice for it and does not say that it was withdrawn.
+
+Each view is an overlay, so no other dialog of omp replaces it in the editor
+slot. omp gives the handle of each overlay through `onHandle`. When omp
+closed the overlay without `done`, the next check of the flow (the 1 s
+repair timer of a main binding) ends the view as a cancel.
 
 The command handler awaits its flow, because omp awaits a command handler
 without a deadline. The shortcut handler starts its flow and returns, because
 no omp source states the deadline of a shortcut handler.
 
-A flow shows each error with `ctx.ui.notify` as an error. The text starts
+A flow shows each error with `ctx.ui.notify` as an error, while it did not
+end. The text starts
 with exactly one `talk:` prefix. A failed listing or a failed resolution opens
 no view.
 
@@ -181,13 +202,25 @@ least 4 rows and 25 columns.
 
 When the space is smaller, the picker shows only
 `talk: make the pane larger to show the sessions.`, and Enter and `h` do
-nothing. The view checks again after each resize.
+nothing. The view checks again after each resize. When the pane has fewer
+than 3 rows, it cannot hold the empty frame, and omp keeps only the first
+rows of the frame. The request then shows as the title in the top border,
+the first row.
 
 ## Compose view
 
-The compose view is an `input` node, so the field has the focus. It opens in
-the editor slot of omp, not as an overlay. Its prompt is `To <name>: `. The
-field holds one line.
+The compose view is an `input` node, so the field has the focus. It is an
+overlay at the bottom of the screen (`{ overlay: true, fullscreen: false }`).
+The field holds one line and has no prompt: omp 19.2.1 scrolls an `input`
+without the width of its prompt, so a prompt can hide the caret of a long
+text. The placeholder names the destination while the field is empty:
+
+```text
+To <name>: the message; ⏎ confirms the destination, ⎋ cancels
+```
+
+The confirm view names the destination again. Each edit passes
+`safeMultiline` (see [Review](#review)).
 
 Enter with text that is not blank opens the [confirm view](#confirm-view).
 Enter with a blank text does nothing. `escape` and `alt+t` end the flow and
@@ -215,7 +248,11 @@ letters (`crypto.randomInt`). The code is never the last code of the binding.
 Only the two letters, typed in order as two separate key presses, send.
 
 - A key event of the kind `repeat` clears the typed letters.
-- A paste clears the typed letters, and so does the first key after a paste.
+- A paste that omp reports as a paste event (a bracketed paste) clears the
+  typed letters. So does a key that omp marks as after a paste: the first key
+  that omp decodes from the same input read as the bracketed paste. A paste
+  that the terminal does not bracket arrives as separate key presses, which
+  the view cannot tell from typing.
 - Any other key clears the typed letters. Enter sends nothing.
 - `escape` returns to the compose view or the handover review, with the text
   kept. The next confirm view draws a new code.
@@ -316,8 +353,10 @@ Under the header, the card shows, in this order:
    its first 3 lines and then `… <n> more lines` when more lines remain. An
    expanded card shows all lines. An empty body shows no body row.
 
-The card splits the body at each line break and passes each line through
-`oneLine`, so a peer cannot send a control character to the terminal.
+The card passes each shown line through `oneLine`, so a peer cannot send a
+control character to the terminal. A collapsed card cleans only its first 3
+lines and counts the line breaks of the rest; it does not split or clean the
+hidden text.
 
 When the message does not decode, the renderer returns `undefined`, and omp
 draws its default card with the text. A message from the talk tool of plan
@@ -329,7 +368,8 @@ default card.
 `/talk handover <target>`, Enter in the handover-mode list, and `h` in a list
 start a handover. A side turn writes a summary of this session's work. The
 operator reviews and edits it locally, confirms the destination, and the
-approved text goes to the target as a message that starts a turn there.
+approved text goes to the target as a message with a request for a turn
+there (a wake).
 
 ### Side turn
 
@@ -338,7 +378,8 @@ it calls `ctx.runEphemeralTurn({ promptText, signal })` with the template and
 the signal of the flow. It gives no `maxTokens` and no `tools` option. omp
 runs the side turn with the current model on a copy of the conversation. The
 side turn appends nothing to the session, can run during a main turn, and
-cuts its reply at 4 KiB. omp keeps its tool list in the request and discards
+cuts a reply above 4096 bytes of UTF-8, which it ends with the line
+`[…truncated]`. omp keeps its tool list in the request and discards
 each tool call of the side turn.
 
 When the flow ends during the side turn, the flow aborts it, shows no error,
@@ -360,24 +401,42 @@ Markdown with these five sections in this order:
    branches, and the last check results.
 5. `## Risks`: open questions, risks, and what to check first.
 
-The rules of the prompt: at most 3500 characters, short bullets, no greeting,
+The rules of the prompt: at most 3500 bytes of UTF-8 text (fewer characters
+in scripts other than ASCII), short bullets, no greeting,
 no secrets (API keys, tokens, passwords, credentials, private keys), no tool
 calls, and only the handover in the reply. The sections follow the handover
 of pi-intercom 0.19.0; the text is talk's own.
 
 ### Review
 
-The review view is an `editor` node, so the field has the focus. It opens in
-the editor slot of omp with the trimmed reply and the caret at its start. It
-shows at most the pane rows less 6 (omp keeps those rows for its status panel
-and dock), and at least 3 rows. The keys are in [Keys](#keys): `ctrl+s` opens
-the confirm view, and Enter adds no line.
+The review view is an `editor` node, so the field has the focus. It is a
+full-screen overlay (`{ overlay: true, fullscreen: true }`), so it owns the
+screen that `ui.size()` reports, and it shows a window of that many rows
+around the caret. While no editable row fits the screen, `ctrl+s` does
+nothing. The keys are in [Keys](#keys): `ctrl+s` opens the confirm view,
+and Enter adds no line.
+
+The reply of the side turn is model text, so the review cleans it with
+`safeMultiline` (`cli/talk/tool/attachments.ts`) before it trims it: each
+line break becomes a line feed, and each terminal escape sequence and each
+other control character except the tab goes. Each edit passes the same
+cleaner, so the send carries exactly the text of the review. When omp cut
+the reply, the review shows this line in place of omp's `[…truncated]`:
+
+```text
+[talk: omp cut this handover at 4096 bytes, so its end is missing. Complete or shorten it before you send it.]
+```
+
+The review starts with the caret at the start of the draft.
 
 ### Send
 
 After the confirm code, the flow sends the reviewed text to the exact pair as
-a `deliver` request with `kind: "handover"`, no attachments, and a wake
-(`triggerTurn: true`), so the target acts on it. `kind` is a field of the
+a `deliver` request with `kind: "handover"`, no attachments, and a request
+for a turn (`noWake: false`). The wake is a request, not a promise: an idle
+receiver appends the message with `triggerTurn: true` and answers
+`delivered`; a busy interactive receiver queues the message, answers
+`queued`, and starts no turn before its queue sends it. `kind` is a field of the
 deliver body and of `details`, not a tool field: the `talk` tool sends only
 messages, and a plain message leaves `kind` out of the body. An ask is never a
 handover. The receiver's text starts with this line instead of the From line:
@@ -468,8 +527,8 @@ installed.
 - The compose view holds one line and no attachments. Use the `talk` tool for
   attachments, and handover for a long text.
 - The confirm code does not prove that omp drew the row with the instance id.
-- omp cuts a side-turn reply at 4 KiB. The template asks for at most 3500
-  characters, but a model can write more.
+- omp cuts a side-turn reply above 4096 bytes. The template asks for at most
+  3500 bytes, but a model can write more; the review then names the cut.
 
 ## Source files
 
@@ -483,3 +542,13 @@ installed.
 | `cli/talk/types/pi-tui.d.ts`            | The declarations of the `@oh-my-pi/pi-tui` exports that talk uses                                                          |
 | `cli/talk/types/pi-tui/text/width.d.ts` | The declarations of the `@oh-my-pi/pi-tui/text/width` exports that talk uses                                               |
 | `cli/talk/extension.ts`                 | The registration of the renderer, the command, and the shortcut, the mode check, the conflict check, and the flow services |
+
+### Test files
+
+| File                                   | Covers                                                                                                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `cli/test/lib/talkFlowHost.ts`         | The fake TUI host of the flow tests: a recording `ctx.ui`, fake flow services, and a `jsx` that records each node           |
+| `cli/test/unit/talk/command.test.ts`   | The `/talk` arguments, the completion, the list, compose, and confirm views, the size guards, and the flow slot             |
+| `cli/test/unit/talk/handover.test.ts`  | The template, the side turn, the review, the handover-mode list and `h`, the errors, and the end of a flow in the side turn |
+| `cli/test/unit/talk/card.test.ts`      | The message card of each kind, collapsed and expanded, the cleaners, and the renderer registration                          |
+| `cli/test/unit/talk/extension.test.ts` | The registration of the command, the shortcut, and the renderer, and the flows end to end with the fake transport           |

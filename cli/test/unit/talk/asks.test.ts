@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ASK_TIMEOUT_MS,
   type AgentRef,
+  CLOSED_AFTER_SWEEPS,
   PREVIEW_LENGTH,
   makeAskStore,
   makePendingAsks,
 } from "../../../talk/tool/asks";
-import { systemClock } from "../../../talk/tool/host";
+import { type TalkClock, systemClock } from "../../../talk/tool/host";
 import type {
   AskRoute as AskRouteSchema,
   DeliverBody,
@@ -36,7 +37,7 @@ const clock = systemClock((error) => {
 
 beforeEach(() => {
   clockErrors = [];
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
 });
 
 afterEach(() => {
@@ -77,14 +78,11 @@ const reply = (overrides: Partial<ReplyBody> = {}): ReplyBody => ({
   ...overrides,
 });
 
-/** The activity check of a binding that still runs. */
-const live = (): boolean => true;
-
 const storeWithMain = () => {
   const store = makeAskStore(clock);
-  store.noteAgent(MAIN, live);
-  store.noteAgent(CHILD, live);
-  store.noteAgent(GRANDCHILD, live);
+  store.noteAgent(MAIN);
+  store.noteAgent(CHILD);
+  store.noteAgent(GRANDCHILD);
   store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
   return store;
 };
@@ -137,8 +135,8 @@ describe("reply address", () => {
 
   it("ends the walk on a cycle in the agent map", () => {
     const store = makeAskStore(clock);
-    store.noteAgent({ id: "loop-a", parentId: "loop-b", main: false }, live);
-    store.noteAgent({ id: "loop-b", parentId: "loop-a", main: false }, live);
+    store.noteAgent({ id: "loop-a", parentId: "loop-b", main: false });
+    store.noteAgent({ id: "loop-b", parentId: "loop-a", main: false });
     expect(store.replyAddress({ id: "loop-a", parentId: "loop-b", main: false })).toBeUndefined();
   });
 
@@ -192,43 +190,60 @@ describe("agent map release (C13)", () => {
     const store = storeWithMain();
     store.forgetAgent("never-noted");
     store.forgetAgent(CHILD.id);
-    store.noteAgent(CHILD, live);
+    store.noteAgent(CHILD);
     store.forgetAgent(GRANDCHILD.id);
     expect(store.replyAddress(probeOf(CHILD.id))).toEqual({ origin: "sub", replyTo: MAIN_REG });
   });
 
   it("keeps no row for an agent without a parent, such as a main session", () => {
     const store = makeAskStore(clock);
-    store.noteAgent(MAIN, live);
+    store.noteAgent(MAIN);
     expect(store.ancestryRows).toBe(0);
-    store.noteAgent(CHILD, live);
+    store.noteAgent(CHILD);
     expect(store.ancestryRows).toBe(1);
     store.forgetAgent(MAIN.id);
     store.forgetAgent(CHILD.id);
     expect(store.ancestryRows).toBe(0);
   });
 
-  it("releases at the sweep the row of an agent whose binding no longer runs, after its last subagent", () => {
+  it("keeps the row of a suspended binding, whose beats go on, for a subagent that it starts later (S6)", () => {
     const store = makeAskStore(clock);
     store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
-    let childRuns = true;
-    let grandchildRuns = true;
-    store.noteAgent(MAIN, live);
-    store.noteAgent(CHILD, () => childRuns);
-    store.noteAgent(GRANDCHILD, () => {
-      if (!grandchildRuns) throw new Error("getAllTools is missing");
-      return true;
-    });
-    store.sweepAgents();
+    store.noteAgent(MAIN);
+    store.noteAgent(CHILD);
+    // omp suspends the child's extension: its marker row goes, and its managed timer still beats (F13).
+    for (let sweep = 0; sweep < 4 * CLOSED_AFTER_SWEEPS; sweep += 1) {
+      store.beat(CHILD.id);
+      store.sweepAgents();
+    }
+    expect(store.ancestryRows).toBe(1);
+    // After the resume, the child starts a subagent that asks before the child calls talk.
+    store.noteAgent(GRANDCHILD);
+    expect(store.replyAddress(GRANDCHILD)).toEqual({ origin: "sub", replyTo: MAIN_REG });
+  });
+
+  it("releases at the sweep the row of a binding that gave no beat in CLOSED_AFTER_SWEEPS sweeps, after its last subagent", () => {
+    const store = makeAskStore(clock);
+    store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
+    store.noteAgent(MAIN);
+    store.noteAgent(CHILD);
+    store.noteAgent(GRANDCHILD);
+    const sweepWithBeats = (...beating: ReadonlyArray<AgentRef>): void => {
+      for (const agent of beating) store.beat(agent.id);
+      store.sweepAgents();
+    };
+    // A note counts as a beat, so the missed sweeps of the child start again.
+    for (let sweep = 1; sweep < CLOSED_AFTER_SWEEPS; sweep += 1) sweepWithBeats(GRANDCHILD);
+    store.noteAgent(CHILD);
+    // omp closed the child's binding without a session_shutdown: its beats stop (F16).
+    for (let sweep = 1; sweep < CLOSED_AFTER_SWEEPS; sweep += 1) sweepWithBeats(GRANDCHILD);
     expect(store.ancestryRows).toBe(2);
-    // omp closed the child's binding without a session_shutdown: the grandchild still walks through it.
-    childRuns = false;
-    store.sweepAgents();
+    sweepWithBeats(GRANDCHILD);
+    // The child ended; the grandchild still walks through it.
     expect(store.replyAddress(GRANDCHILD)).toEqual({ origin: "sub", replyTo: MAIN_REG });
     expect(store.ancestryRows).toBe(2);
-    // A check that throws counts as a binding that no longer runs.
-    grandchildRuns = false;
-    store.sweepAgents();
+    // A late beat does not bring the ended child back; the grandchild's binding closes too.
+    for (let sweep = 0; sweep < CLOSED_AFTER_SWEEPS; sweep += 1) sweepWithBeats(CHILD);
     expect(store.ancestryRows).toBe(0);
     expect(store.replyAddress(probeOf(CHILD.id))).toBeUndefined();
   });
@@ -236,14 +251,14 @@ describe("agent map release (C13)", () => {
   it("counts the subagents of an agent, also one noted before its parent or noted again under another parent", () => {
     const store = makeAskStore(clock);
     store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
-    store.noteAgent({ id: "leaf", parentId: "mid", main: false }, live);
-    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false }, live);
+    store.noteAgent({ id: "leaf", parentId: "mid", main: false });
+    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false });
     store.forgetAgent("mid");
     // The leaf, noted first, still holds the ended parent.
     expect(store.replyAddress(probeOf("mid"))).toEqual({ origin: "sub", replyTo: MAIN_REG });
     expect(store.ancestryRows).toBe(2);
     // The leaf moves to another parent: the ended parent has no subagent left and goes.
-    store.noteAgent({ id: "leaf", parentId: MAIN.id, main: false }, live);
+    store.noteAgent({ id: "leaf", parentId: MAIN.id, main: false });
     expect(store.ancestryRows).toBe(1);
     expect(store.replyAddress(probeOf("mid"))).toBeUndefined();
     store.forgetAgent("leaf");
@@ -252,10 +267,10 @@ describe("agent map release (C13)", () => {
 
   it("releases each of many sibling leaves without a scan of the agent map (C13)", () => {
     const store = makeAskStore(clock);
-    store.noteAgent(MAIN, live);
-    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false }, live);
+    store.noteAgent(MAIN);
+    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false });
     const leaves = Array.from({ length: 1_000 }, (_, index) => `leaf-${index}`);
-    for (const id of leaves) store.noteAgent({ id, parentId: "mid", main: false }, live);
+    for (const id of leaves) store.noteAgent({ id, parentId: "mid", main: false });
     store.forgetAgent("mid");
     expect(store.ancestryRows).toBe(1 + leaves.length);
     const scans = collectionScans(() => {
@@ -366,7 +381,7 @@ describe("ask", () => {
 
   it("allows one waiter per session", async () => {
     const store = storeWithMain();
-    store.noteAgent({ id: "main-2", parentId: undefined, main: true }, live);
+    store.noteAgent({ id: "main-2", parentId: undefined, main: true });
     store.setRegistration("main-2", { registration: OTHER_REG, isCurrent: () => true });
     const deliver = vi.fn(async () => result("delivered"));
     const first = peek(store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver }));
@@ -584,19 +599,97 @@ describe("pending inbound asks", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("lets an ask that comes after the clock stepped back expire with the ask before it", async () => {
+  const MINUTE_MS = 60 * 1_000;
+
+  it("expires an ask that comes after the wall clock stepped back at its own timeout (C7)", async () => {
     const pending = makePendingAsks(clock);
-    pending.add(ask("0000000000000001"), PEER);
-    vi.setSystemTime(Date.now() - 5_000);
-    pending.add(ask("0000000000000002"), PEER);
     const ids = (): Array<string> => pending.list(PEER).map((entry) => entry.askId);
-    expect(pending.list(PEER).map((entry) => entry.ageMs)).toEqual([0, 0]);
-    // The clock reads 5 s less than the timers: both asks stay until the deadline of the first.
-    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS + 4_999);
+    pending.add(ask("0000000000000001"), PEER);
+    vi.setSystemTime(Date.now() - 30 * MINUTE_MS);
+    pending.add(ask("0000000000000002"), PEER);
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS - 1);
     expect(ids()).toEqual(["0000000000000001", "0000000000000002"]);
+    // The sender of the second ask stops waiting now, so the ask ends with it.
     await vi.advanceTimersByTimeAsync(1);
     expect(ids()).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("gives an ask after a clock rollback no deadline of a removed later ask, and ages asks by the monotonic clock (S8)", async () => {
+    const pending = makePendingAsks(clock);
+    const ids = (): Array<string> => pending.list(PEER).map((entry) => entry.askId);
+    pending.add(ask("0000000000000001"), PEER);
+    await vi.advanceTimersByTimeAsync(5 * MINUTE_MS);
+    pending.add(ask("0000000000000002"), PEER);
+    pending.remove("0000000000000002");
+    vi.setSystemTime(Date.now() - 5 * MINUTE_MS);
+    pending.add(ask("0000000000000003"), PEER);
+    expect(pending.list(PEER).map((entry) => entry.ageMs)).toEqual([5 * MINUTE_MS, 0]);
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS - 5 * MINUTE_MS);
+    expect(ids()).toEqual(["0000000000000003"]);
+    await vi.advanceTimersByTimeAsync(5 * MINUTE_MS - 1);
+    expect(ids()).toEqual(["0000000000000003"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ids()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("examines only the due asks and the first live ask at an expiry (S4)", () => {
+    let time = 0;
+    let expiry: (() => void) | undefined;
+    const manual: TalkClock = {
+      now: () => time,
+      elapsed: () => time,
+      schedule: (_delayMs, callback) => {
+        expiry = callback;
+        return () => {
+          if (expiry === callback) expiry = undefined;
+        };
+      },
+    };
+    const pending = makePendingAsks(manual, 1_000);
+    const due = Array.from({ length: 10 }, (_, index) =>
+      (index + 1).toString(16).padStart(16, "0"),
+    );
+    for (const askId of due) {
+      pending.add(ask(askId), PEER);
+      time += 1;
+    }
+    time = 500;
+    const tail = Array.from({ length: 1_000 }, (_, index) =>
+      (0x1000 + index).toString(16).padStart(16, "0"),
+    );
+    for (const askId of tail) pending.add(ask(askId), PEER);
+    // Every ask of `due` is due; no ask of `tail` is.
+    time = 1_009;
+    const run = expiry;
+    if (run === undefined) throw new Error("no expiry is planned");
+    // Counts the steps of each `Map` iteration that starts in the expiry.
+    let steps = 0;
+    const original: unknown = Reflect.get(Map.prototype, Symbol.iterator);
+    if (typeof original !== "function") throw new Error("Map has no iterator");
+    Reflect.set(Map.prototype, Symbol.iterator, function (this: unknown) {
+      const iterator: unknown = Reflect.apply(original, this, []);
+      const next: unknown = Reflect.get(Object(iterator), "next");
+      if (typeof next !== "function") throw new Error("the iterator has no next");
+      return {
+        next: () => {
+          steps += 1;
+          return Reflect.apply(next, iterator, []);
+        },
+        [Symbol.iterator]() {
+          return this;
+        },
+      };
+    });
+    try {
+      run();
+    } finally {
+      Reflect.set(Map.prototype, Symbol.iterator, original);
+    }
+    expect(steps).toBe(due.length + 1);
+    expect(pending.list(PEER)).toHaveLength(tail.length);
+    expect(expiry).toBeDefined();
   });
 
   it("shows each ask only to the registration that received it (C1)", () => {

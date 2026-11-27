@@ -24,6 +24,13 @@ export const ASK_TIMEOUT_MS = 10 * 60 * 1_000;
 /** The characters of text that `pending` shows for each ask (F1). */
 export const PREVIEW_LENGTH = 80;
 
+/**
+ * The sweeps in a row without a beat or note that prove a binding closed. A
+ * binding beats once per sweep interval, and a stall of the event loop
+ * delays the sweep as much as the beat, so one missed sweep proves nothing.
+ */
+export const CLOSED_AFTER_SWEEPS = 3;
+
 /** One agent session: `ctx.agent.id`, `ctx.agent.parentId`, and whether `ctx.agent.kind` is `main`. */
 export interface AgentRef {
   readonly id: string;
@@ -86,21 +93,30 @@ export type AskOutcome =
 export interface AskStore {
   /**
    * Records the parent of an agent session; each binding calls it at
-   * `session_start`. Only an agent with a parent gets a row of the agent map,
-   * because the walk of `replyAddress` reads only those rows. `isLive` is the
-   * check of the agent's binding that `sweepAgents` asks; a throw counts as
-   * false.
+   * `session_start` and at each `talk` call. Only an agent with a parent gets
+   * a row of the agent map, because the walk of `replyAddress` reads only
+   * those rows. A note also counts as a beat.
    */
-  readonly noteAgent: (agent: AgentRef, isLive: () => boolean) => void;
+  readonly noteAgent: (agent: AgentRef) => void;
+  /**
+   * A managed timer of the agent's binding ran. omp keeps the managed timers
+   * of a suspended extension running (F13) and clears those of a closed
+   * binding (F16), so the beats show that the binding is not closed. A beat
+   * of an agent without a row, or of an ended one, does nothing.
+   */
+  readonly beat: (agentId: string) => void;
   /**
    * The binding of an agent session ended. Its row of the agent map goes
    * once no row names it as parent, and so on up the map.
    */
   readonly forgetAgent: (agentId: string) => void;
   /**
-   * Forgets each agent whose binding check fails: omp closed that binding
-   * without a `session_shutdown`, for example while the extension was
-   * suspended. The process sweep calls it.
+   * Forgets each agent whose binding gave no beat or note in
+   * `CLOSED_AFTER_SWEEPS` sweeps in a row: omp closed that binding without a
+   * `session_shutdown`, for example while the extension was suspended. A
+   * binding that omp only suspended keeps its beats, so it keeps its row,
+   * and a later subagent of it still finds its ancestors. The process sweep
+   * calls it.
    */
   readonly sweepAgents: () => void;
   /** The number of rows of the agent map. */
@@ -160,7 +176,8 @@ const waited = (ended: WaitResult, result: DeliverResult | undefined): AskOutcom
 /** One row of the agent map: an agent session that has a parent. */
 interface AncestryRow {
   readonly parentId: string;
-  readonly isLive: () => boolean;
+  /** The sweeps since the last beat or note of the agent's binding. */
+  missedSweeps: number;
   /** The binding of the agent ended; the row stays while another row names it as parent. */
   ended: boolean;
 }
@@ -293,7 +310,7 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
   };
 
   return {
-    noteAgent: (agent, isLive) => {
+    noteAgent: (agent) => {
       const previous = rows.get(agent.id);
       if (agent.parentId === undefined) {
         // An agent without a parent needs no row; a row of an earlier note goes.
@@ -303,17 +320,25 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
         release(previous.parentId);
         return;
       }
-      rows.set(agent.id, { parentId: agent.parentId, isLive, ended: false });
+      rows.set(agent.id, { parentId: agent.parentId, missedSweeps: 0, ended: false });
       if (previous?.parentId === agent.parentId) return;
       countChild(agent.parentId, 1);
       if (previous === undefined) return;
       countChild(previous.parentId, -1);
       release(previous.parentId);
     },
+    beat: (agentId) => {
+      const row = rows.get(agentId);
+      if (row !== undefined && !row.ended) row.missedSweeps = 0;
+    },
     forgetAgent,
     sweepAgents: () => {
-      for (const [agentId, row] of [...rows])
-        if (!row.ended && !holds(row.isLive)) forgetAgent(agentId);
+      // A delete during the walk is safe: the walk skips a deleted row that it has not reached.
+      for (const [agentId, row] of rows) {
+        if (row.ended) continue;
+        row.missedSweeps += 1;
+        if (row.missedSweeps >= CLOSED_AFTER_SWEEPS) forgetAgent(agentId);
+      }
     },
     get ancestryRows() {
       return rows.size;
@@ -379,35 +404,34 @@ interface StoredAsk {
   readonly from: Sender;
   readonly route: AskRoute;
   readonly receivedBy: Target;
+  /** The monotonic time of receipt (`clock.elapsed`). */
   readonly receivedAt: number;
-  /** The expiry time: the ask timeout after `receivedAt`, and never before the deadline of an earlier ask. */
+  /** The monotonic expiry time: the ask timeout after `receivedAt`. */
   readonly deadline: number;
   readonly preview: string;
 }
 
 /**
  * The store keeps the asks in expiry order: a new ask goes last, also under
- * an id that the store already holds, and its deadline is never before the
- * deadline of the ask before it, also when the clock stepped back. So the
+ * an id that the store already holds. Receipt times and deadlines are
+ * monotonic, so a step of the wall clock does not change the order, and the
  * expiry removes only the due asks at the front. Each ask expires from a
  * timer of the store, so an ask that no call reads does not stay; the timer
  * runs only while the store holds an ask.
  */
 export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): PendingAsks => {
   const asks = new Map<string, StoredAsk>();
-  let lastDeadline = Number.NEGATIVE_INFINITY;
   let cancelExpiry: CancelTimer | undefined;
 
   const stopExpiry = (): void => {
     cancelExpiry?.();
     cancelExpiry = undefined;
-    lastDeadline = Number.NEGATIVE_INFINITY;
   };
 
   /** Removes the due asks at the front and plans the next expiry, or none for an empty store. */
   const expire = (): void => {
     cancelExpiry = undefined;
-    const now = clock.now();
+    const now = clock.elapsed();
     for (const [askId, stored] of asks) {
       if (now < stored.deadline) {
         cancelExpiry = clock.schedule(stored.deadline - now, expire);
@@ -415,12 +439,11 @@ export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): P
       }
       asks.delete(askId);
     }
-    stopExpiry();
   };
 
   const list = (receivedBy: Target | undefined): ReadonlyArray<PendingAsk> => {
     if (receivedBy === undefined) return [];
-    const now = clock.now();
+    const now = clock.elapsed();
     const live: Array<PendingAsk> = [];
     for (const { receivedAt, deadline, ...stored } of asks.values()) {
       if (
@@ -428,16 +451,14 @@ export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): P
         stored.receivedBy.instanceId === receivedBy.instanceId &&
         stored.receivedBy.sessionId === receivedBy.sessionId
       )
-        live.push({ ...stored, ageMs: Math.max(0, now - receivedAt) });
+        live.push({ ...stored, ageMs: now - receivedAt });
     }
     return live;
   };
 
   return {
     add: (body, receivedBy) => {
-      const now = clock.now();
-      const deadline = Math.max(now + timeoutMs, lastDeadline);
-      lastDeadline = deadline;
+      const now = clock.elapsed();
       asks.delete(body.messageId);
       asks.set(body.messageId, {
         askId: body.messageId,
@@ -445,10 +466,10 @@ export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): P
         route: body.ask,
         receivedBy,
         receivedAt: now,
-        deadline,
+        deadline: now + timeoutMs,
         preview: oneLine(body.text).slice(0, PREVIEW_LENGTH),
       });
-      cancelExpiry ??= clock.schedule(deadline - now, expire);
+      cancelExpiry ??= clock.schedule(timeoutMs, expire);
     },
     remove: (askId) => {
       asks.delete(askId);

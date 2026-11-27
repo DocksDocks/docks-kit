@@ -8,6 +8,7 @@ import { expect } from "vitest";
 import type { DeliverKind } from "../../talk/tool/protocol";
 import type { Target } from "../../talk/transport/request";
 import {
+  type FlowLife,
   type FlowServices,
   type FlowSlot,
   type FlowUi,
@@ -173,9 +174,13 @@ export interface View {
   readonly options: unknown;
   readonly closed: boolean;
   readonly result: unknown;
+  /** omp closes the overlay without `done`, as no omp 19.2.1 path does but a later one can. */
+  readonly hostClose: () => void;
 }
 
 export const FULL_SCREEN = { overlay: true, fullscreen: true };
+/** The compose view: an overlay docked at the bottom. */
+export const DOCKED = { overlay: true, fullscreen: false };
 
 /** A fake TUI `ctx.ui`: it mounts each view at once and records each call by method name. */
 export class FakeTui {
@@ -187,7 +192,7 @@ export class FakeTui {
     custom: (factory, options) => {
       this.calls.push("custom");
       const { promise, resolve } = Promise.withResolvers<unknown>();
-      const state = { closed: false, result: undefined as unknown };
+      const state = { closed: false, hostClosed: false, result: undefined as unknown };
       const node = factory({ size: () => this.size }, {}, {}, (value) => {
         if (state.closed) throw new Error("done called twice");
         state.closed = true;
@@ -195,6 +200,15 @@ export class FakeTui {
         resolve(value);
       });
       if (!isFakeNode(node)) throw new Error("the factory gave no node");
+      // omp gives the overlay handle once the overlay is open (`ExtensionCustomOptions` v19.2.1).
+      options.onHandle({
+        get closed() {
+          return state.closed || state.hostClosed;
+        },
+        close: () => {
+          state.hostClosed = true;
+        },
+      });
       const view: View = {
         node,
         options,
@@ -203,6 +217,9 @@ export class FakeTui {
         },
         get result() {
           return state.result;
+        },
+        hostClose: () => {
+          state.hostClosed = true;
         },
       };
       this.views.push(view);
@@ -260,22 +277,36 @@ export class FakeServices implements FlowServices {
   readonly targets: Array<string> = [];
   readonly sends: Array<Sent> = [];
   answer: SendAnswer = { ok: true, text: "Delivered: the message is in the session." };
+  /** Set: each send waits for it after it records the send, as a slow lookup does. */
+  sendGate: Promise<void> | undefined;
+  /** The flow life of each listing, resolution, and send, in call order. */
+  readonly lives: Array<FlowLife> = [];
   /** Each side-turn request, as the flow made it. */
   readonly turns: Array<SideTurnRequest> = [];
   /** What the side turn gives; the default answers with `DRAFT`. */
   reply: () => Promise<unknown> = () => Promise.resolve({ replyText: DRAFT });
 
   readonly sessionId = (): string => this.session;
-  readonly list = (): Promise<ListingAnswer> =>
-    this.listError === undefined
+  readonly list = (life: FlowLife): Promise<ListingAnswer> => {
+    this.lives.push(life);
+    return this.listError === undefined
       ? (this.listing ?? Promise.resolve({ _tag: "Listed", rows: this.rows }))
       : Promise.reject(this.listError);
-  readonly resolve = async (target: string): Promise<TargetAnswer> => {
+  };
+  readonly resolve = async (target: string, life: FlowLife): Promise<TargetAnswer> => {
+    this.lives.push(life);
     this.targets.push(target);
     return this.target;
   };
-  readonly send = async (pair: Target, text: string, kind: DeliverKind): Promise<SendAnswer> => {
+  readonly send = async (
+    pair: Target,
+    text: string,
+    kind: DeliverKind,
+    life: FlowLife,
+  ): Promise<SendAnswer> => {
+    this.lives.push(life);
     this.sends.push({ pair, text, kind });
+    if (this.sendGate !== undefined) await this.sendGate;
     return this.answer;
   };
   sideTurn: SideTurn | undefined = (request) => {

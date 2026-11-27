@@ -35,6 +35,7 @@ import {
 } from "../../../talk/extension";
 import talkEntry from "../../../talk/index";
 import { literal } from "../../../talk/tool/attachments";
+import { CLOSED_AFTER_SWEEPS } from "../../../talk/tool/asks";
 import { ANSWER_WAIT_MS, HOLD_MS, QUEUE_RETRY_MS } from "../../../talk/tool/delivery";
 import type { SendOptions, SessionMode, TalkMessage } from "../../../talk/tool/host";
 import { MAX_MESSAGE_BYTES } from "../../../talk/tool/protocol";
@@ -170,6 +171,12 @@ class FakeNetwork {
   registerGate: Promise<void> | undefined;
   /** The hooks of the process singleton, from its transport. */
   hooks: TransportHooks | undefined;
+  /** The signal of each `list`, `probeAll`, `known`, and `request` call, in call order. */
+  readonly signals: Array<AbortSignal | undefined> = [];
+  /** Set: the next `list` reads the registry, then waits for it; a later call does not. */
+  listGate: Promise<void> | undefined;
+  /** Set: the next `known` waits for it; a later call does not. */
+  knownGate: Promise<void> | undefined;
 
   live(sessionId?: string): Array<NetEntry> {
     return [...this.entries.values()].filter(
@@ -269,23 +276,38 @@ class FakeNetwork {
         }
       },
       retain: async (pair) => this.retainWorks && this.entries.get(pair.instanceId)?.live === true,
-      known: async (instanceId) => this.kept.get(instanceId),
-      list: async (): Promise<ListAnswer> => {
+      known: async (instanceId, signal) => {
+        this.signals.push(signal);
+        const gate = this.knownGate;
+        this.knownGate = undefined;
+        if (gate !== undefined) await gate;
+        return this.kept.get(instanceId);
+      },
+      list: async (signal): Promise<ListAnswer> => {
+        this.signals.push(signal);
         if (this.listFails) return { _tag: "ListFailed", reason: "the folder is unreadable" };
         const peers: Array<ListedPeer> = [...this.entries.values()]
           .filter((entry) => entry.live)
           .map(({ instanceId, sessionId, name, cwd }) => ({ instanceId, sessionId, name, cwd }));
         for (const peer of peers) this.kept.set(peer.instanceId, peer);
+        const gate = this.listGate;
+        this.listGate = undefined;
+        if (gate !== undefined) await gate;
         return { _tag: "Listed", peers };
       },
-      probeAll: async (targets) =>
-        Promise.all(
+      probeAll: async (targets, signal) => {
+        this.signals.push(signal);
+        return Promise.all(
           targets.map(async (target) => {
             const answer = await this.dispatch(target, PING_KIND, null);
             return answer._tag === "Answered" ? "ok" : answer.outcome;
           }),
-        ),
-      request: (target, kind, body) => this.dispatch(target, kind, body),
+        );
+      },
+      request: (target, kind, body, signal) => {
+        this.signals.push(signal);
+        return this.dispatch(target, kind, body);
+      },
     };
   }
 }
@@ -974,8 +996,37 @@ describe("runtime (E12)", () => {
     expect(rows()).toBe(2);
     closing.suspended = true;
     closing.dropTimers();
+    await vi.advanceTimersByTimeAsync((CLOSED_AFTER_SWEEPS - 1) * SWEEP_INTERVAL_MS);
+    expect(rows()).toBe(2);
     await vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
     expect(rows()).toBe(1);
+  });
+
+  it("keeps the agent entry of a suspended subagent binding, so a subagent that it starts after resuming finds the main session (S6)", async () => {
+    const bind = factory();
+    await start(bind, "s-main");
+    const middle = await start(bind, "s-sub-1", (fake) => {
+      fake.agent = { kind: "sub", id: "sub-1", parentId: "main" };
+    });
+    const talk: unknown = Reflect.get(globalThis, TALK_SINGLETON_KEY);
+    const rows = (): number => (talk as TalkProcess).asks.ancestryRows;
+    // omp suspends the extension: the marker row goes, and the managed timers keep running (F13).
+    middle.suspended = true;
+    await vi.advanceTimersByTimeAsync(4 * CLOSED_AFTER_SWEEPS * SWEEP_INTERVAL_MS);
+    expect(rows()).toBe(1);
+    middle.suspended = false;
+    // The resumed subagent starts a subagent, which asks before the middle one calls talk.
+    const leaf = await start(bind, "s-sub-2", (fake) => {
+      fake.agent = { kind: "sub", id: "sub-2", parentId: "sub-1" };
+    });
+    expect(rows()).toBe(2);
+    // The abort ends the waiter of an ask that went out; a refused ask answers before it.
+    const abort = new AbortController();
+    const asked = leaf.tool({ action: "ask", to: "s-main", message: "still there?" }, abort.signal);
+    await settle();
+    abort.abort();
+    const call = await asked;
+    expect(call.text).not.toContain("no reply address");
   });
 });
 
@@ -1047,7 +1098,8 @@ describe("session scope (E7)", () => {
       fake.agent = { kind: "sub", id: "sub-1", parentId: "main" };
     });
     expect(network.live("s-sub")).toEqual([]);
-    expect(sub.timers.size).toBe(0);
+    // S6: a subagent session runs only the timer of its beats.
+    expect(sub.timers.size).toBe(1);
     // A subagent session's transitions hold nothing and fail no handler.
     await expect(sub.emit("session_before_switch", { reason: "new" })).resolves.toEqual([
       undefined,
@@ -2198,6 +2250,46 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
       await runtime.dispose();
     }
   });
+
+  it("interrupts each call whose signal aborted, so an aborted request runs no handler (C1, T2)", async () => {
+    let handled = 0;
+    const runtime = makeTalkTransport(
+      {
+        admit: () => true,
+        handlers: [
+          [
+            "count",
+            () =>
+              Effect.sync(() => {
+                handled += 1;
+                return null;
+              }),
+          ],
+        ],
+      },
+      { folder: join(base, "reg-abort") },
+    );
+    const { facade } = runtime;
+    try {
+      const registered = await facade.register({ sessionId: "s-abort", name: "abort", cwd: base });
+      if (registered._tag !== "Registered") throw new Error(registered.reason);
+      const { registration } = registered;
+      const aborted = AbortSignal.abort();
+      await expect(facade.list(aborted)).rejects.toBeDefined();
+      await expect(facade.probeAll([registration], aborted)).rejects.toBeDefined();
+      await expect(facade.known(registration.instanceId, aborted)).rejects.toBeDefined();
+      await expect(facade.request(registration, "count", null, aborted)).rejects.toBeDefined();
+      expect(handled).toBe(0);
+      const live = new AbortController().signal;
+      expect(await facade.request(registration, "count", null, live)).toEqual({
+        _tag: "Answered",
+        body: null,
+      });
+      expect(handled).toBe(1);
+    } finally {
+      await runtime.dispose();
+    }
+  });
 });
 
 // ── The /talk command, the shortcut, and the views (#251 G1 to G4) ──
@@ -2303,9 +2395,9 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     const { alpha, beta } = await pair();
     const betaId = network.only("s-beta").instanceId;
     const { flow, confirm } = await listToConfirm(alpha, betaId, "hello beta");
-    expect(alpha.views.map((view) => view.options)).toEqual([
+    expect(alpha.views.map((view) => view.options)).toMatchObject([
       { overlay: true, fullscreen: true },
-      undefined,
+      { overlay: true, fullscreen: false },
       { overlay: true, fullscreen: true },
     ]);
     expect(nodeProp(alpha.views[0]?.node ?? confirm, "size")).toBe("screen");
@@ -2420,7 +2512,7 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     await until(() => alpha.views.length === 1);
     const list = alpha.top;
     expect(list.node.kind).toBe("picker");
-    expect(list.options).toEqual({ overlay: true, fullscreen: true });
+    expect(list.options).toMatchObject({ overlay: true, fullscreen: true });
     expect(pressKey(list.node, "alt+t")).toBe(true);
     expect(list.closed()).toBe(true);
   });
@@ -2483,14 +2575,61 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
   });
 
-  it("refreshes the snapshot from the listing of a /talk <target> resolution, also when it fails", async () => {
+  it("leaves out of the snapshot a listed peer whose probe proves it ended, and a resolution does not refresh it (S7)", async () => {
     const { alpha } = await pair();
+    network.addForeign("ghost", "s-ghost", "not-live");
     const complete = (prefix: string): unknown =>
       alpha.commands.get("talk")?.getArgumentCompletions(prefix);
-    expect(complete("be")).toBeNull();
+    // A resolution probes only its matches, so it publishes no snapshot.
     await alpha.command("nobody");
     expect(alpha.views).toEqual([]);
+    expect(complete("be")).toBeNull();
+    expect(complete("gh")).toBeNull();
+    const listed = await alpha.tool({ action: "list" });
+    expect(listed.text).not.toContain("ghost");
     expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
+    expect(complete("gh")).toBeNull();
+  });
+
+  it("keeps the snapshot of the latest listing when an older listing ends after it (C5)", async () => {
+    const { alpha } = await pair();
+    const ghost = network.addForeign("ghost", "s-ghost", "ok");
+    const complete = (prefix: string): unknown =>
+      alpha.commands.get("talk")?.getArgumentCompletions(prefix);
+    const gate = Promise.withResolvers<void>();
+    network.listGate = gate.promise;
+    const older = alpha.tool({ action: "list" });
+    await settle();
+    // The entry leaves the registry after the older listing read it.
+    ghost.live = false;
+    await alpha.tool({ action: "list" });
+    expect(complete("gh")).toBeNull();
+    gate.resolve();
+    expect((await older).text).toContain("ghost");
+    expect(complete("gh")).toBeNull();
+    expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
+  });
+
+  it("sends nothing and shows no notice when the flow ends while the send looks up its pair, and the lookup gets the flow's signal (C1, S5, T2)", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const { flow, confirm } = await listToConfirm(alpha, betaId, "late");
+    const gate = Promise.withResolvers<void>();
+    network.knownGate = gate.promise;
+    const before = network.signals.length;
+    typeCode(confirm, confirmCode(confirm).code);
+    // The send lists, then waits in the lookup of the retained pair.
+    await until(() => network.signals.length === before + 2);
+    const lookup = network.signals.at(-1);
+    expect(lookup?.aborted).toBe(false);
+    await alpha.emit("session_clear");
+    expect(lookup?.aborted).toBe(true);
+    gate.resolve();
+    await flow;
+    await settle();
+    expect(network.signals).toHaveLength(before + 2);
+    expect(beta.talkTexts()).toEqual([]);
+    expect(alpha.notices).toEqual([]);
   });
 
   it("shows a flow error with exactly one talk: prefix", async () => {

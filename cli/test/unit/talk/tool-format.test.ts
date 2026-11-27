@@ -7,6 +7,7 @@ import {
   type Attachment,
   formatAttachment,
   literal,
+  safeMultiline,
 } from "../../../talk/tool/attachments";
 import {
   type FormattedMessage,
@@ -52,6 +53,23 @@ const lines = (text: string): ReadonlyArray<string> => text.split("\n");
 // More backtick runs than V8 and JavaScriptCore take as arguments of one call, in a body under the size limit.
 const MANY_RUNS = 200_000;
 const manyRuns = "`a".repeat(MANY_RUNS);
+
+describe("safeMultiline (#251 T1)", () => {
+  it.each([
+    ["a CSI sequence", "a\u001b[2J\u001b[31mb", "ab"],
+    ["an OSC 52 clipboard write with BEL", "a\u001b]52;c;ZXZpbA==\u0007b", "ab"],
+    ["an OSC 8 link with ST", "\u001b]8;;https://x\u001b\\link\u001b]8;;\u001b\\", "link"],
+    ["a DCS string", "a\u001bPq#0;2;0;0;0\u001b\\b", "ab"],
+    ["the C1 CSI and OSC forms", "a\u009b31mb\u009d0;title\u009cc", "abc"],
+    ["a two-character escape", "a\u001bcb\u001b7c", "abc"],
+    ["an OSC without its terminator: only the introducer goes", "a\u001b]52;c;text", "a52;c;text"],
+    ["other control characters", "a\u0000\u0007\u0008\u007fb\u0085c", "abc"],
+    ["line breaks, as line feeds", "a\r\nb\rc\u2028d\u2029e", "a\nb\nc\nd\ne"],
+    ["line feeds and tabs, as they are", "a\n\tb\n", "a\n\tb\n"],
+  ])("cleans %s", (_name, text, expected) => {
+    expect(safeMultiline(text)).toBe(expected);
+  });
+});
 
 describe("literal", () => {
   it("shows peer text as one inline code span", () => {

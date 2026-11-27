@@ -1670,17 +1670,19 @@ function isAssistantEntry(entry: JsonObject): boolean {
   return entry["type"] === "message" && isObject(message) && message["role"] === "assistant";
 }
 
+/** The `details.messageId` of a talk message entry, else undefined. */
+function talkMessageId(entry: JsonObject): string | undefined {
+  const details = entry["details"];
+  return entry["type"] === "custom_message" &&
+    entry["customType"] === TALK_ENTRY_TYPE &&
+    isObject(details)
+    ? text(details["messageId"])
+    : undefined;
+}
+
 /** The index of the talk message entry whose `details.messageId` is `messageId`, else -1. */
 function talkEntryIndex(entries: readonly JsonObject[], messageId: string): number {
-  return entries.findIndex((entry) => {
-    const details = entry["details"];
-    return (
-      entry["type"] === "custom_message" &&
-      entry["customType"] === TALK_ENTRY_TYPE &&
-      isObject(details) &&
-      details["messageId"] === messageId
-    );
-  });
+  return entries.findIndex((entry) => talkMessageId(entry) === messageId);
 }
 
 /** Whether an entry holds, in any field, the message id or the payload text of a message. */
@@ -1766,13 +1768,27 @@ function leafChain(answer: EntriesAnswer): Set<string> {
 
 /**
  * Fails unless `later` continues the history of `kept`: every kept entry is there again with the same
- * `parentId`, and the parent chain from the leaf of `later` holds the talk entry of `sentinel` and the
- * leaf of `kept`. Only such an answer can prove the absence of an entry (#251 G9 (1)).
+ * `parentId`, every kept talk entry is there again as a talk entry with the same `details.messageId` and
+ * `content`, and the parent chain from the leaf of `later` holds the talk entry of `sentinel` and the leaf of
+ * `kept`. Only such an answer can prove the absence of an entry (#251 G9 (1)).
  */
 function expectContinues(kept: EntriesAnswer, later: EntriesAnswer, sentinel: string): void {
   for (const [id, parentId] of kept.parents)
     if (!later.parents.has(id) || later.parents.get(id) !== parentId)
       failStep(`RPC get_entries dropped or moved the entry ${id} of an earlier answer`);
+  for (const entry of kept.entries) {
+    const messageId = talkMessageId(entry);
+    if (messageId === undefined) continue;
+    const again = later.entries.find((other) => other["id"] === entry["id"]);
+    if (
+      again === undefined ||
+      talkMessageId(again) !== messageId ||
+      again["content"] !== entry["content"]
+    )
+      failStep(
+        `RPC get_entries no longer holds the talk message ${messageId} in the entry ${String(entry["id"])}`,
+      );
+  }
   const chain = leafChain(later);
   if (!chain.has(kept.leafId))
     failStep(`the leaf ${later.leafId} does not descend from the earlier leaf ${kept.leafId}`);
@@ -2197,6 +2213,8 @@ const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the 
 const CAPABILITY_NOTICE_START = "talk: this omp has no ";
 /** A talk notice on the screen: `talk:` and the rest of its row. */
 const TALK_NOTICE = /talk: [^\n]*/g;
+/** A built-in tool of omp: a request that offers it has a tool list that `offersTool` can read. */
+const BUILTIN_TOOL = "read";
 /** A prompt with one of these markers makes the fake model of the RPC peer call `talk` once. */
 const PEER_LIST_MARKER = "SMOKE-LIST";
 const PEER_CARD_MARKER = "SMOKE-CARD";
@@ -2232,6 +2250,9 @@ const ESC = "\u001b";
 const CURSOR_MOVE_FINALS = "HfBEFGd";
 /** The second characters of the ESC sequences that run to a string terminator: DCS, SOS, PM, APC, and OSC. */
 const STRING_SEQUENCE_KINDS = "P^_X]";
+/** omp writes the rows of one frame between autowrap off and autowrap on (`FrameWriter` of pi-tui). */
+const AUTOWRAP_OFF = `${ESC}[?7l`;
+const AUTOWRAP_ON = `${ESC}[?7h`;
 
 /**
  * Terminal output as screen text. A carriage return or a cursor move becomes a line break, so the text of two
@@ -2332,6 +2353,20 @@ class TerminalOmp {
   /** The screen text after the mark `from`. */
   text(from = 0): string {
     return screenText(this.#raw.slice(from));
+  }
+
+  /**
+   * The screen text of each frame, in output order. A diff repaint writes only the rows that changed, so a
+   * row shows twice in one frame only when omp draws it twice. The last frame can be incomplete.
+   */
+  frames(): string[] {
+    return this.#raw
+      .split(AUTOWRAP_OFF)
+      .slice(1)
+      .map((part) => {
+        const end = part.indexOf(AUTOWRAP_ON);
+        return screenText(end === -1 ? part : part.slice(0, end));
+      });
   }
 
   write(bytes: string): void {
@@ -2488,21 +2523,34 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
   let terminalResult: OmpResult | null = null;
   let peer: RpcPeer | null = null;
 
-  /** omp before 19.2.0: one capability notice, no load error, and no `/talk` command. */
+  /** omp before 19.2.0: one capability notice, no load error, no `/talk` command, and no `talk` tool. */
   const oldOmpFlow = async (screen: TerminalOmp): Promise<void> => {
     // `old-omp`: `omp --version` names a version before 19.2.0, and the TUI omp started.
     pass();
 
     step = "old-notice";
     await screen.waitFor(CAPABILITY_NOTICE_END, 0, "talk notice that names omp 19.2.0");
-    const notices = new Set(
-      [...screen.text().matchAll(TALK_NOTICE)].map((match) => match[0].trim()),
+    const others = new Set(
+      [...screen.text().matchAll(TALK_NOTICE)]
+        .map((match) => match[0].trim())
+        .filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START)),
     );
-    const others = [...notices].filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START));
-    if (others.length > 0) failStep(`the screen shows other talk notices: ${others.join(" | ")}`);
-    const capability = [...notices].filter((notice) => notice.includes(CAPABILITY_NOTICE_END));
-    if (capability.length !== 1)
-      failStep(`the screen shows ${capability.length} different capability notices`);
+    if (others.size > 0) failStep(`the screen shows other talk notices: ${[...others].join(" | ")}`);
+    // omp draws the notice again in later frames, so the count of one frame is the count of notices.
+    const perFrame = screen.frames().map((frame) =>
+      [...frame.matchAll(TALK_NOTICE)]
+        .map((match) => match[0].trim())
+        .filter((notice) => notice.includes(CAPABILITY_NOTICE_END)),
+    );
+    const most = Math.max(0, ...perFrame.map((frame) => frame.length));
+    if (most !== 1)
+      failStep(
+        most === 0
+          ? "no frame of the screen shows the capability notice"
+          : `one frame of the screen shows ${most} capability notices`,
+      );
+    const texts = new Set(perFrame.flat());
+    if (texts.size !== 1) failStep(`the screen shows ${texts.size} different capability notices`);
     pass();
 
     // omp gives a line that names no command to the model as a prompt.
@@ -2512,18 +2560,23 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     await screen.waitFor("/talk", typed, "typed /talk");
     screen.write(ENTER_KEY);
     const deadline = Date.now() + STEP_TIMEOUT_MS;
-    while (
-      !run.requests.some(
-        (request) =>
-          request["model"] === UI_MODEL_ID && newUserText(request)?.includes("/talk") === true,
-      )
-    ) {
+    let request: JsonObject | undefined;
+    for (;;) {
+      request = run.requests.find(
+        (sent) => sent["model"] === UI_MODEL_ID && newUserText(sent)?.includes("/talk") === true,
+      );
+      if (request !== undefined) break;
       if (Date.now() > deadline)
         failStep(`omp did not give /talk to the model within ${STEP_TIMEOUT_MS / 1_000} s`);
       await sleep(POLL_MS);
     }
     // The turn of the `/talk` prompt ends with the "ok" answer before ctrl+d can exit omp.
     await screen.waitFor(/\bok\b/, typed, "answer to the /talk prompt");
+    // The tool is off too, not only the command (#251 a8).
+    if (!offersTool(request, BUILTIN_TOOL))
+      failStep(`the request of the /talk prompt offers no ${BUILTIN_TOOL} tool`);
+    if (offersTool(request, TALK_TOOL))
+      failStep(`the request of the /talk prompt offers the ${TALK_TOOL} tool`);
     pass();
   };
 

@@ -210,8 +210,10 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
    * The confirmation reads only the entries appended since its last read:
    * `scanned` is the entry list that it read last, `scannedTo` its length
    * then. Another list, or a shorter one, is a reset and is read again from
-   * the start. The cursor exists only while a watch runs, so it keeps no
-   * list that omp replaced after the last watch.
+   * the start. A new watch batch starts the cursor at the end of the list
+   * before its first send, because no watch waits for an older entry. The
+   * cursor exists only while a watch runs, so it keeps no list that omp
+   * replaced after the last watch.
    */
   let scanned: ReadonlyArray<unknown> | undefined;
   let scannedTo = 0;
@@ -286,7 +288,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
         if (watch !== undefined) found.add(watch);
       }
       scannedTo = entries.length;
-      const now = clock.now();
+      const now = clock.elapsed();
       for (const watch of [...watches.values()]) {
         if (sessionId !== watch.sessionId) endWatch(watch, "not-live");
         else if (found.has(watch)) endWatch(watch, "delivered");
@@ -312,9 +314,27 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     }
   };
 
+  /**
+   * Starts the cursor of a new watch batch at the end of the entry list, so
+   * the first check of an isolated send does not read the whole transcript.
+   * A failed read leaves no cursor: the first check reads from the start.
+   */
+  const startBatch = (): void => {
+    if (watches.size > 0) return;
+    try {
+      const entries = host.entries();
+      scanned = entries;
+      scannedTo = entries.length;
+    } catch {
+      scanned = undefined;
+      scannedTo = 0;
+    }
+  };
+
   /** Hands a message to omp and starts its watch. Call only in the tick of a passed guard. */
   const send = (message: Outgoing, target: Target): Watch => {
     const { record } = message;
+    startBatch();
     try {
       host.sendMessage(
         {
@@ -327,6 +347,11 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       );
     } catch (error) {
       settle(record, "unknown");
+      // A batch that never started keeps no list.
+      if (watches.size === 0) {
+        scanned = undefined;
+        scannedTo = 0;
+      }
       throw error;
     }
     settle(record, "submitted");
@@ -334,7 +359,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     const watch: Watch = {
       record,
       sessionId: target.sessionId,
-      deadline: clock.now() + WATCH_LIMIT_MS,
+      deadline: clock.elapsed() + WATCH_LIMIT_MS,
       ended: promise,
       end: resolve,
     };
@@ -363,7 +388,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   /** Plans the next try of the queue from a fresh task; an earlier plan wins. */
   const scheduleFlush = (delayMs: number): void => {
     if (queue.length === 0) return;
-    const at = clock.now() + delayMs;
+    const at = clock.elapsed() + delayMs;
     if (cancelFlush !== undefined && flushAt <= at) return;
     cancelFlush?.();
     flushAt = at;
@@ -409,8 +434,9 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   const accept = async (target: Target, incoming: Incoming): Promise<AcceptOutcome> => {
     const admission = admit(target);
     if (admission === "not-live" || admission === "busy") return admission;
-    // A full queue refuses before a record or a pending ask exists (E5). Only a
-    // message that joins the queue needs its size, so the count check runs first.
+    // A full queue refuses before a record or a pending ask exists (E5). The
+    // text is measured only on the queue path, after the count check and
+    // before the byte cap, so a message that the count refuses is not measured.
     let bytes = 0;
     if (admission === "queued") {
       if (queue.length >= MAX_QUEUED_MESSAGES) return "busy";

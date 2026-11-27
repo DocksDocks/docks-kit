@@ -30,7 +30,36 @@ export type TalkCardRenderer = (
   theme: unknown,
 ) => JSXNode | undefined;
 
-const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/u;
+const LINE_BREAKS = /\r\n|[\n\r\u2028\u2029]/gu;
+
+/** The cleaned lines that a card shows, and the number of lines after them. */
+interface BodyLines {
+  readonly shown: ReadonlyArray<string>;
+  readonly hidden: number;
+}
+
+/**
+ * The first `limit` lines of `body`, each through `oneLine`, and the count
+ * of the other lines (C9). The text after the shown lines is not split or
+ * cleaned: only its line breaks are counted.
+ */
+const bodyLines = (body: string, limit: number): BodyLines => {
+  const shown: Array<string> = [];
+  if (body === "") return { shown, hidden: 0 };
+  let start = 0;
+  let hidden = 0;
+  for (const match of body.matchAll(LINE_BREAKS)) {
+    if (shown.length === limit) {
+      hidden += 1;
+      continue;
+    }
+    shown.push(oneLine(body.slice(start, match.index)));
+    start = match.index + match[0].length;
+  }
+  if (shown.length === limit) hidden += 1;
+  else shown.push(oneLine(body.slice(start)));
+  return { shown, hidden };
+};
 
 /** The note under the header: the reply hint of an ask, or the ask that a reply answers. */
 const noteOf = (details: TalkDetails): string | undefined => {
@@ -54,10 +83,10 @@ export const makeTalkCardRenderer = (ui: HostUi): TalkCardRenderer => {
       literal(details.from.cwd),
       `${String(sent.hour).padStart(2, "0")}:${String(sent.minute).padStart(2, "0")}`,
     ].join(" · ");
-    const body = content.slice(details.body.start, details.body.end);
-    const lines = body === "" ? [] : body.split(LINE_BREAK).map(oneLine);
-    const shown = expanded ? lines : lines.slice(0, COLLAPSED_BODY_LINES);
-    const hidden = lines.length - shown.length;
+    const { shown, hidden } = bodyLines(
+      content.slice(details.body.start, details.body.end),
+      expanded ? Number.POSITIVE_INFINITY : COLLAPSED_BODY_LINES,
+    );
     const note = noteOf(details);
     const children = [
       ...(note === undefined ? [] : [dim(note)]),
