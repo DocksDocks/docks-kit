@@ -286,7 +286,7 @@ const settledInput = (ui: HostUi, isOpen: () => boolean, end: () => void): HostU
     const onKey = props["onKey"];
     const onEdit = props["onEdit"];
     const onPaste = props["onPaste"];
-    // A node without input handlers keeps its props object, so a reactive redraw copies nothing.
+    // A node without input handlers keeps its props object, so this wrapper adds no props copy.
     if (
       !Predicate.isFunction(onKey) &&
       !Predicate.isFunction(onEdit) &&

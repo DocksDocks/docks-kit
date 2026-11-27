@@ -15,8 +15,9 @@
  *              second omp in print mode, both with `tools.commands` off and a private registry folder. The fake
  *              model scripts the `talk` calls of each session. Prints `ok <name>` or `FAIL <name>: <reason>`.
  *   talk-ui    Run omp in TUI mode in a pseudo-terminal beside an omp RPC peer, with the same talk plugin copy, and
- *              drive `alt+t`, the compose and confirm views, the message card, and `/talk handover` with key
- *              bytes. An omp older than 19.2.0 must show only the talk capability notice and no `/talk` command.
+ *              drive `alt+t`, a resize of the pane below the list size, the compose and confirm views, the message
+ *              card, and `/talk handover` with key bytes. An omp older than 19.2.0 must show only the talk
+ *              capability notice and no `/talk` command.
  *              Prints `ok <name>` or `FAIL <name>: <reason>`.
  *
  * `--omp <binary>` runs that omp binary in place of `omp` from PATH, for every command.
@@ -2173,6 +2174,14 @@ const OMP_VERSION = /\bomp\/(\d+)\.(\d+)\.(\d+)\b/;
 const TERMINAL_TYPE = "xterm-256color";
 const TERMINAL_COLUMNS = 240;
 const TERMINAL_ROWS = 50;
+/**
+ * The narrow pane of the resize check: fewer than 4 columns, where the resize view shows a symbol cue in place
+ * of a word (`RESIZE_TEXTS` in `cli/talk/ui/views.ts`), and a few rows.
+ */
+const NARROW_COLUMNS = 3;
+const NARROW_ROWS = 6;
+/** The resize cue of omp's default `unicode` symbol preset (`RESIZE_SYMBOLS` in `cli/talk/ui/views.ts`). */
+const RESIZE_CUE = "⤢";
 /** The footer shows the name of the fake model when the session has started (#251 F8). */
 const UI_READY_TEXT = "omp smoke fake model";
 /** `alt+t` as `ESC t` in one write (#251 F2); a lone ESC becomes the Escape key after 20 ms. */
@@ -2241,6 +2250,7 @@ const UI_CHECKS = [
   "install",
   "ui-ready",
   "ui-list",
+  "ui-resize",
   "ui-compose-send",
   "ui-card",
   "ui-handover",
@@ -2373,12 +2383,14 @@ class TerminalOmp {
   }
 
   /**
-   * The screen text of each complete frame, in output order: the frame has both its autowrap off and its
-   * autowrap on. A diff repaint writes only the rows that changed, so a row shows twice in one frame only when
-   * omp draws it twice. A frame whose end has not arrived yet is left out, because its count can still grow.
+   * The screen text of each complete frame after the mark `from`, in output order: the frame has both its
+   * autowrap off and its autowrap on. A diff repaint writes only the rows that changed, so a row shows twice in
+   * one frame only when omp draws it twice. A frame whose end has not arrived yet is left out, because its
+   * count can still grow.
    */
-  frames(): string[] {
+  frames(from = 0): string[] {
     return this.#raw
+      .slice(from)
       .split(AUTOWRAP_OFF)
       .slice(1)
       .flatMap((part) => {
@@ -2387,13 +2399,17 @@ class TerminalOmp {
       });
   }
 
-  /** Waits until a complete frame satisfies `matches`; fails when none does in time. */
-  async waitForFrame(matches: (frame: string) => boolean, what: string): Promise<void> {
+  /** Waits until a complete frame after the mark `from` satisfies `matches`; fails when none does in time. */
+  async waitForFrame(
+    matches: (frame: string) => boolean,
+    what: string,
+    from = 0,
+  ): Promise<void> {
     const deadline = Date.now() + STEP_TIMEOUT_MS;
-    while (!this.frames().some(matches)) {
+    while (!this.frames(from).some(matches)) {
       const left = deadline - Date.now();
       if (left <= 0) {
-        const tail = this.text().replace(/\s+/g, " ").trim().slice(-300);
+        const tail = this.text(from).replace(/\s+/g, " ").trim().slice(-300);
         failStep(
           `no complete frame of the screen shows the ${what} within ${STEP_TIMEOUT_MS / 1_000} s; it ends: ${tail}`,
         );
@@ -2423,6 +2439,12 @@ class TerminalOmp {
   write(bytes: string): void {
     if (this.#process.terminal === undefined) failStep("the omp process has no terminal");
     this.#process.terminal.write(bytes);
+  }
+
+  /** Resizes the pseudo-terminal; omp gets SIGWINCH and draws a new frame. */
+  resize(columns: number, rows: number): void {
+    if (this.#process.terminal === undefined) failStep("the omp process has no terminal");
+    this.#process.terminal.resize(columns, rows);
   }
 
   /** The first match of `pattern` in the screen text after `from`; fails when none shows in time. */
@@ -2719,7 +2741,29 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     await screen.waitFor(peerInstance, listed, `peer row with the instance id ${peerInstance}`);
     pass();
 
+    // The list is open. Below the size of one item row it ends, and the resize view paints the symbol cue as
+    // its one row; at the full size again the view lists once more and shows the list.
+    step = "ui-resize";
+    const narrowed = screen.mark();
+    screen.resize(NARROW_COLUMNS, NARROW_ROWS);
+    await screen.waitForFrame(
+      (frame) => frame.split("\n").some((row) => row.trim() === RESIZE_CUE),
+      `row ${RESIZE_CUE} at ${NARROW_COLUMNS} columns`,
+      narrowed,
+    );
+    const widened = screen.mark();
+    screen.resize(TERMINAL_COLUMNS, TERMINAL_ROWS);
+    await screen.waitFor(LIST_TITLE_TEXT, widened, "list title after the resize back");
+    await screen.waitFor(peerInstance, widened, "peer row after the resize back");
+    const closed = screen.mark();
+    screen.write(ALT_T_KEY);
+    await screen.waitFor(UI_READY_TEXT, closed, "footer after alt+t closed the list");
+    pass();
+
     step = "ui-compose-send";
+    const reopened = screen.mark();
+    screen.write(ALT_T_KEY);
+    await screen.waitFor(peerInstance, reopened, "peer row in the list opened again");
     const composing = screen.mark();
     screen.write(ENTER_KEY);
     await screen.waitFor(COMPOSE_PLACEHOLDER, composing, "compose view");
