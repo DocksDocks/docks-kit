@@ -363,49 +363,26 @@ const waitingKeys =
   };
 
 /**
- * The start line that a waiting view must show whole before its flow goes
- * on (#260 H2): `start` leads its text, `narrow` stands in while one row of
- * the pane cannot show `start`, and `drawn` runs each time omp draws the
- * whole start line.
- */
-export interface StartLine {
-  readonly size: SizeReader;
-  readonly start: string;
-  readonly narrow: string;
-  readonly drawn: () => void;
-}
-
-/**
  * A view that holds the focus while one talk step runs, such as the side
  * turn of a handover or a send: one `text` node with `text`. It starts
- * `task` at once and ends with its result. With `line`, the text is an
- * accessor that omp reads on each draw: while the reported size shows the
- * whole start line in one row, the view shows `text` cut to the width and
- * calls `drawn`; otherwise it shows the narrow text, so a tool-started
- * handover can wait until its start line was visible.
+ * `task` at once and ends with its result. With `drawn`, the text is an
+ * accessor that calls `drawn` each time omp draws it, so the start notice of
+ * a tool-started handover can wait for its first frame (#260 H2).
  */
 export const pendingView = <R>(
   ui: HostUi,
   text: string,
   task: () => Promise<R>,
   done: (choice: Waited<R>) => void,
-  line?: StartLine,
+  drawn?: () => void,
 ): JSXNode => {
   settleWith(task, done);
   const shown =
-    line === undefined
+    drawn === undefined
       ? text
       : (): string => {
-          const current = line.size();
-          if (
-            current === undefined ||
-            current.rows < 1 ||
-            ui.visibleWidth(line.start) > current.columns
-          )
-            return line.narrow;
-          line.drawn();
-          // No ellipsis: a cut never takes a cell of the start line.
-          return ui.truncate(text, current.columns, "");
+          drawn();
+          return text;
         };
   return ui.jsx("text", { text: shown, onKey: waitingKeys(done) });
 };

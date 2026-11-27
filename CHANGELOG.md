@@ -13,14 +13,14 @@ The user still reviews the summary and types the confirm code.
   that target: a side turn writes the summary, the review shows the note
   above the draft, the user edits the text and types the confirm code, and
   the text goes to the target with a request for a turn. The side-turn
-  waiting view names the agent and the target, and the review mounts only
-  after omp drew that whole line; a pane too narrow for it shows
-  `talk: make the pane wider to see who started this handover.` until a
-  resize. The first line of the confirm view says
-  that the agent started the handover; a pane too narrow for that line
-  takes no code. The note does not change the template, but the side-turn
-  model sees it. `escape` in the review, `alt+t`, and an abort of the tool
-  call end the flow; `escape` in the confirm view returns to the review.
+  waiting view shows ``talk: agent handover to `<name>` (<instance id>) ·
+  ⎋ cancels``, and the review mounts after omp drew that view once. The
+  first line of the confirm view says that the agent started the handover,
+  and the view takes no code unless it shows that line in full, so the user
+  sees the starter at the approval. The note does not change the template,
+  but the side-turn model sees it. `escape` in the review, `alt+t`, and an
+  abort of the tool call end the flow; `escape` in the confirm view returns
+  to the review.
 - The action refuses before the side turn, and sends nothing, outside an
   interactive session in a terminal or in Tern (RPC, ACP, print, and json,
   or no `ctx.hasUI`), in a subagent, while a `/talk` view is open (that view

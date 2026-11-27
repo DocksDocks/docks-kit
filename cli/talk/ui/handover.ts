@@ -90,25 +90,16 @@ export const HANDOVER_STARTED =
   "talk: a side turn writes the handover summary. In the review, ctrl+s confirms the destination, alt+enter adds a line, and escape cancels.";
 
 /**
- * The start line of a handover that the `talk` tool started (#260 H2): who
- * started it and its target, cleaned as the views clean names. The waiting
- * view shows it whole, or asks for a wider pane.
- */
-export const agentHandoverStart = (destination: Destination): string =>
-  `talk: the agent started a handover to ${shownName(destination)} (instance ${destination.instanceId})`;
-
-/**
  * The waiting view of the side turn of a handover that the `talk` tool
- * started (#260 H2). omp shows a notice of a tool call only after the call
- * ends, so talk's own view says who started the handover and names its
- * target. The confirm view names the agent again at the point of approval.
+ * started (#260 H2): the agent as the starter and the target with its full
+ * instance id, cleaned as the views clean names. omp shows a notice of a
+ * tool call only after the call ends, so talk's own view says it. The line
+ * stays short, so the fallback name of an unnamed session (`session-` and 8
+ * characters) fits 80 columns with the instance id. The confirm view names
+ * the agent again at the point of approval, in full or with no code taken.
  */
 export const agentHandoverWaiting = (destination: Destination): string =>
-  `${agentHandoverStart(destination)} · a side turn writes the summary · ⎋ cancels`;
-
-/** The waiting view of a tool-started handover while one row of the pane cannot show its start line (#260 H2). */
-export const HANDOVER_START_TOO_NARROW =
-  "talk: make the pane wider to see who started this handover.";
+  `talk: agent handover to ${shownName(destination)} (${destination.instanceId}) · ⎋ cancels`;
 
 /**
  * The first text of the review (#260 H1): the note of the agent, cleaned as

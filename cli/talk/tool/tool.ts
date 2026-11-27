@@ -442,6 +442,22 @@ export interface ResolvedTarget {
 const NO_TARGET = "talk: the action needs a target.";
 
 /**
+ * The failure of a call that knows one instance id: the exact selector id,
+ * or the one session that `to` matched (#260 H4). The text stays as it is.
+ */
+const knowing =
+  (instanceId: string | undefined) =>
+  (error: TalkToolFailed): TalkToolFailed =>
+    instanceId === undefined || error.instanceId !== undefined
+      ? error
+      : new TalkToolFailed({
+          message: error.message,
+          instanceId,
+          ...(error.outcome === undefined ? {} : { outcome: error.outcome }),
+          ...(error.diagnostic === undefined ? {} : { diagnostic: error.diagnostic }),
+        });
+
+/**
  * The target resolver of `send`, `ask`, `cancel`, `handover`, and `/talk
  * <target>` (E8, #251 G2). Nothing is sent before it resolves. `signal`
  * reaches the listing, the lookup, and the probes (#260 H5).
@@ -456,11 +472,13 @@ export const resolveTarget = Effect.fnUntraced(function* (
       return yield* fail(NO_TARGET);
     case "Instance": {
       const { instanceId } = selector;
-      const answer = yield* transportCall("the listing", () => context.transport.list(signal));
+      const answer = yield* transportCall("the listing", () => context.transport.list(signal)).pipe(
+        Effect.mapError(knowing(instanceId)),
+      );
       const listing = answer._tag === "Listed" ? answer.peers : [];
       const kept = yield* transportCall("the instance lookup", () =>
         context.transport.known(instanceId, signal),
-      );
+      ).pipe(Effect.mapError(knowing(instanceId)));
       const resolution = resolveInstance(instanceId, listing, kept === undefined ? [] : [kept]);
       if (resolution._tag === "NotFound")
         // A listing that failed established no absence.
@@ -490,7 +508,10 @@ export const resolveTarget = Effect.fnUntraced(function* (
           { ambiguous: true },
         );
       const hostErrors: Array<string> = [];
-      const candidates = yield* probeAll(context, match.peers, signal, hostErrors);
+      const sole = match.peers.length === 1 ? match.peers[0]?.instanceId : undefined;
+      const candidates = yield* probeAll(context, match.peers, signal, hostErrors).pipe(
+        Effect.mapError(knowing(sole)),
+      );
       // #260 H4: a probe that failed in this process, not at the peer, keeps its reason for the caller.
       const host = hostErrors.length === 0 ? {} : { diagnostic: hostErrors.join("; ") };
       const decision = decideTo(candidates);
@@ -508,7 +529,7 @@ export const resolveTarget = Effect.fnUntraced(function* (
         case "NotLive":
           return yield* fail(
             `talk: ${literal(to)} is not live (not-live). Candidates:\n${describeCandidates(candidates)}`,
-            { outcome: "not-live" },
+            { outcome: "not-live", ...(sole === undefined ? {} : { instanceId: sole }) },
           );
         case "Ambiguous": {
           const rows = describeCandidates(candidates);
@@ -1172,6 +1193,7 @@ const withRecovery =
       return new TalkToolFailed({
         message: `${error.message}\n${HANDOVER_PICK_LIVE}`,
         outcome: "not-live",
+        ...(instanceId === undefined ? {} : { instanceId }),
       });
     return error;
   };
@@ -1226,17 +1248,7 @@ const handoverTarget = Effect.fnUntraced(function* (
       context.transport.probeAll([target.target], signal, (_pair, reason) => {
         hostErrors.push(reason);
       }),
-    ).pipe(
-      // The instance id is known, so a failed probe call keeps it.
-      Effect.mapError(
-        (error) =>
-          new TalkToolFailed({
-            message: error.message,
-            instanceId,
-            ...(error.diagnostic === undefined ? {} : { diagnostic: error.diagnostic }),
-          }),
-      ),
-    );
+    ).pipe(Effect.mapError(knowing(instanceId)));
     if (probe !== "ok")
       return yield* fail(
         `talk: the instance ${instanceId} did not answer a probe (${probe ?? "no result"}). Nothing was sent. Check that session, then run the action list again.`,

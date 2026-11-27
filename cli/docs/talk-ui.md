@@ -485,23 +485,21 @@ each tool call of the side turn.
 While the side turn runs, a waiting view at the bottom of the screen holds
 the focus: `talk: a side turn writes the handover summary · ⎋ cancels`, or
 for a tool-started handover
-`talk: the agent started a handover to <name> (instance <instance id>) · a side turn writes the summary · ⎋ cancels`,
-cut to the pane width without an ellipsis.
+``talk: agent handover to `<name>` (<instance id>) · ⎋ cancels``, with
+`(no name)` for a session without a name.
 `escape` and `alt+t` there end the flow; every other key does nothing, so no
 key reaches the composer of omp. When the flow ends during the side turn,
 the flow aborts it, shows no error, and mounts no review. When the reply
 arrives, the flow checks its signal and its session id before it mounts the
 review.
 
-A tool-started handover mounts its review only after omp drew the whole
-start line `talk: the agent started a handover to <name> (instance
-<instance id>)` in one row, so the line that names the agent shows even when
-the side turn ends at once. While one row of the pane cannot show that
-line, the waiting view shows
-`talk: make the pane wider to see who started this handover.` and the review
-does not mount. After a resize that fits, the start line shows and the flow
-goes on. `escape` still ends the flow. When omp closes the waiting view
-before its first frame, the flow ends, and the tool result is `cancelled`.
+A tool-started handover mounts its review only after omp drew the waiting
+view once, whatever the size of the pane, so the line that names the agent
+had a frame even when the side turn ends at once. When omp closes the
+waiting view before that frame, the flow ends, and the tool result is
+`cancelled`. A failed or empty side turn is reported at once. The line that
+the user is sure to see is the first line of the confirm view (see
+[Tool-started handover](#tool-started-handover)).
 
 ### Template
 
@@ -624,8 +622,9 @@ and types the code. The differences:
   side-turn request. The user approves only what goes to the peer.
 - The first line of the confirm view names the agent:
   `Send to <full instance id> (a handover that the agent started): type <code>`.
-  A pane too narrow for it shows
-  `talk: make the pane wider to confirm the destination.` and takes no code.
+  The view draws it in full or takes no code: a pane too narrow for it shows
+  `talk: make the pane wider to confirm the destination.` So this line is
+  where the user sees, at the approval, that the agent started the handover.
 - Right before the send, the flow checks that the pair is not this binding's
   registration: now, at the start of the call, or the pair that the binding
   publishes and has not attached yet. The client asks the same check right

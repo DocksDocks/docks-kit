@@ -3059,10 +3059,10 @@ const EDITED_HANDOVER = "talk-ui smoke pasted summary.\nTyped: Pasted next step.
  * The start of the waiting line of a tool-started handover (`agentHandoverWaiting` in
  * `cli/talk/ui/handover.ts`) and the provenance of its confirm line. Neither is ever sent.
  */
-const AGENT_NOTICE_START = "talk: the agent started a handover to ";
+const AGENT_NOTICE_START = "talk: agent handover to ";
 const AGENT_PROVENANCE = "a handover that the agent started";
-/** The rest of the waiting line after the instance (`agentHandoverWaiting` in `cli/talk/ui/handover.ts`). */
-const AGENT_WAITING_REST = "a side turn writes the summary";
+/** The end of the waiting line after the instance (`agentHandoverWaiting` in `cli/talk/ui/handover.ts`). */
+const AGENT_WAITING_REST = "⎋ cancels";
 /**
  * The outcome texts of a handover that the session accepted, by the word that starts them (`OUTCOME_TEXT` and
  * `dispatchResult` in `cli/talk/tool/tool.ts`).
@@ -3803,7 +3803,7 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       await screen.waitFor(draftLine, asked, "side-turn draft in the agent handover review");
       const shown = screen.text(asked);
       const waiting = new RegExp(
-        `${AGENT_NOTICE_START}[^\\n]* \\(instance ${instance}\\) · ${AGENT_WAITING_REST}`,
+        `${AGENT_NOTICE_START}[^\\n]* \\(${instance}\\) · ${AGENT_WAITING_REST}`,
       ).exec(shown);
       if (waiting === null || waiting.index > shown.indexOf(draftLine))
         failStep(

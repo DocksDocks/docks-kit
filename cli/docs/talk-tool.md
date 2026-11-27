@@ -492,16 +492,12 @@ description says to use the action only when the user asks for a handover
 3. The flow runs the side turn with `HANDOVER_PROMPT`, outside the main
    context. It shows no start notice, because omp shows a notice of a tool
    call only after the call ends. Instead, the side-turn waiting view shows
-   `talk: the agent started a handover to <name> (instance <instance id>) · a
-   side turn writes the summary · ⎋ cancels`, cut to the pane width without
-   an ellipsis. While one row of the pane cannot show the whole start line
-   `talk: the agent started a handover to <name> (instance <instance id>)`,
-   the view shows `talk: make the pane wider to see who started this
-   handover.` instead, and the review does not mount; after a resize that
-   fits, the start line shows and the flow goes on. So the review mounts only
-   after omp drew the whole start line, even when the side turn ends at once.
-   `escape` still ends the flow. When omp closes the waiting view before its
-   first frame, the flow ends as `cancelled`.
+   ``talk: agent handover to `<name>` (<instance id>) · ⎋ cancels``, with
+   `(no name)` for a session without a name; omp draws it as it draws other
+   waiting lines. The review mounts only after omp drew the waiting view
+   once, whatever the size of the pane. When omp closes the waiting view
+   before that frame, the flow ends as `cancelled`. A failed or empty side
+   turn is reported at once.
 4. The review holds only the text that can be sent: the note of `message`,
    cleaned with `safeMultiline` as the draft is, then a blank line, then the
    draft. A note that is blank after the cleaner adds nothing. The note does
@@ -510,8 +506,10 @@ description says to use the action only when the user asks for a handover
    user approves only what goes to the peer.
 5. `ctrl+s` opens the confirm view. Its first line names the agent:
    `Send to <full instance id> (a handover that the agent started): type
-   <code>`. A pane too narrow for that line shows only `talk: make the pane
-   wider to confirm the destination.` and takes no code.
+   <code>`. The view draws that line in full or takes no code: a pane too
+   narrow for it shows only `talk: make the pane wider to confirm the
+   destination.` So this line is where the user sees, at the approval, that
+   the agent started the handover.
 6. After the confirm code, the flow checks the pair against this binding's
    registrations once more, the published one that is not attached yet
    included. The client asks the same check again right before the body
@@ -543,8 +541,11 @@ The keys and the abort of the call:
 
 Each refusal fails the call before the side turn and sends nothing. Its text
 says what the user or the agent can do. Its `details` hold the outcome
-`failed`, or a more specific one such as the probe outcome, and the instance
-id where the action knows it.
+`failed`, or a more specific one such as the probe outcome or `not-live`.
+They hold the instance id whenever the action knows the one instance: the
+exact `instance`, or the single session that `to` matched. That covers an
+own target, a `to` whose one match ended or did not answer, and an
+`instance` that did not answer.
 
 | Case                                                                                                           | Text starts with                                                                         |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -580,7 +581,8 @@ A `to` that names no one target gets recovery text of its own, only for
   instance, using its full instance id from list, or ask the user which
   session takes the handover.`
 - Every match ended (`not-live`): the resolver error, then `Run the action
-  list and name a live session.`
+  list and name a live session.` `details` hold the instance id when `to`
+  matched one session.
 
 When the listing or the instance lookup fails, or a probe fails in this
 process because the lookup of the target's registry entry failed (a trust
@@ -591,9 +593,11 @@ user. Ask the user to check it before a new handover.` The host error, which
 can hold a path, goes only to a local notice: `talk: the agent asked for a
 handover, but talk could not check its target, so nothing was sent. Error:
 <host error>`, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`,
-"Errors"). `details` keep the instance id when the action knows it, for
-example for an `instance`. A peer that does not answer a probe, for example
-with `timeout`, gives the probe refusals above, not this text.
+"Errors"). `details` keep the instance id when the action knows the one
+instance: the exact `instance`, also when its listing, lookup, or probe call
+was rejected, or the single session that `to` matched. A peer that does not
+answer a probe, for example with `timeout`, gives the probe refusals above,
+not this text.
 
 ### Outcomes
 

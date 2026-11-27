@@ -207,6 +207,10 @@ class FakeNetwork {
   probeError: Error | undefined;
   /** Set: each probe fails in this process with this reason, as a registry lookup that fails its trust check. */
   probeHostError: string | undefined;
+  /** Set: each `list` rejects with it, as a defect of the transport runtime. */
+  listError: Error | undefined;
+  /** Set: each `known` rejects with it, as a defect of the transport runtime. */
+  knownError: Error | undefined;
   /** Set: the next `request` waits for it, as a peer handshake does, before its body goes out. */
   handshakeGate: Promise<void> | undefined;
   /** True fails each traced body write, as a socket write that the peer's close rejects (#260 H5). */
@@ -365,6 +369,7 @@ class FakeNetwork {
         const gate = this.knownGate;
         this.knownGate = undefined;
         if (gate !== undefined) await gate;
+        if (this.knownError !== undefined) throw this.knownError;
         return this.kept.get(instanceId);
       },
       list: async (signal): Promise<ListAnswer> => {
@@ -372,6 +377,7 @@ class FakeNetwork {
         const read = this.listReadGate;
         this.listReadGate = undefined;
         if (read !== undefined) await read;
+        if (this.listError !== undefined) throw this.listError;
         if (this.listFails) return { _tag: "ListFailed", reason: this.listReason };
         const peers: Array<ListedPeer> = [...this.entries.values()]
           .filter((entry) => entry.live)
@@ -2387,6 +2393,7 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
       const owner = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
       const prober = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
       let loosened = false;
+      const failures: Array<unknown> = [];
       try {
         const registered = await owner.facade.register({
           sessionId: "s-lookup",
@@ -2412,14 +2419,21 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
         expect(results).toEqual(["unreachable"]);
         expect(reasons).toHaveLength(1);
         expect(reasons[0]).toMatch(/entry lookup failed.*0755/u);
-      } finally {
-        // Restore the mode only when the test changed it; both disposals run even if that fails.
-        try {
-          if (loosened) chmodSync(folder, 0o700);
-        } finally {
-          await Promise.allSettled([prober.dispose(), owner.dispose()]);
-        }
+      } catch (error) {
+        failures.push(error);
       }
+      // Restore the mode only when the test changed it; both disposals run and are awaited even if that fails.
+      try {
+        if (loosened) chmodSync(folder, 0o700);
+      } catch (error) {
+        failures.push(error);
+      }
+      for (const disposal of await Promise.allSettled([prober.dispose(), owner.dispose()]))
+        if (disposal.status === "rejected") failures.push(disposal.reason);
+      // The failure of the test leads; a teardown failure surfaces beside it and masks nothing.
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "the test and its teardown failed");
     },
   );
 
@@ -3122,7 +3136,7 @@ describe("handover action of the talk tool (#260)", () => {
     const { call } = startHandover(alpha, { to: "beta" });
     await until(() => openKind(alpha) === "text");
     expect(nodeProp(alpha.top.node, "text")).toBe(
-      `talk: the agent started a handover to ${literal("beta")} (instance ${betaId}) · a side turn writes the summary · ⎋ cancels`,
+      `talk: agent handover to ${literal("beta")} (${betaId}) · ⎋ cancels`,
     );
     reply.resolve({ replyText: SUMMARY });
     await until(() => openKind(alpha) === "editor");
@@ -3668,7 +3682,7 @@ describe("handover action of the talk tool (#260)", () => {
         `talk: ${literal("gone")} is not live (not-live). Candidates:\n` +
           `- ${literal("gone")} (session ${literal("s-gone")}): instance ${gone.instanceId}, not live\n` +
           "Run the action list and name a live session.",
-        { outcome: "not-live" },
+        { instanceId: gone.instanceId, outcome: "not-live" },
       );
     });
 
@@ -3753,25 +3767,40 @@ describe("handover action of the talk tool (#260)", () => {
       ["the probe of instance", "probe", "instance", `the probe failed: ${CLEAN_REASON}`],
       ["a registry lookup in the probe of to", "lookup", "to", CLEAN_REASON],
       ["a registry lookup in the probe of instance", "lookup", "instance", CLEAN_REASON],
+      [
+        "a rejected listing of instance",
+        "listError",
+        "instance",
+        `the listing failed: ${CLEAN_REASON}`,
+      ],
+      [
+        "a rejected lookup of instance",
+        "knownError",
+        "instance",
+        `the instance lookup failed: ${CLEAN_REASON}`,
+      ],
     ] as const)(
       "gives the model a fixed text and shows the cleaned diagnostic in a notice for a failure of %s",
-      async (name, step, selector, shown) => {
+      async (_name, step, selector, shown) => {
         const { alpha, beta, betaId, turns } = await sessions();
         if (step === "list") {
           network.listFails = true;
           network.listReason = PATH_REASON;
         } else if (step === "lookup") network.probeHostError = PATH_REASON;
+        else if (step === "listError") network.listError = new Error(PATH_REASON);
+        else if (step === "knownError") network.knownError = new Error(PATH_REASON);
         else network.probeError = new Error(PATH_REASON);
         const unseen = "0123456789abcdef";
         const params =
           selector === "to"
             ? { to: "beta" }
             : { instance: selector === "instance" ? betaId : unseen };
-        // The result keeps every instance id that the action knows; only the diagnostic stays local.
+        // The result keeps every instance id that the action knows: the exact selector id, or the
+        // one session that `to` matched. Only the diagnostic stays local.
         const instanceId =
           selector === "unseen"
             ? unseen
-            : selector === "instance" || name === "a registry lookup in the probe of to"
+            : selector === "instance" || step !== "list"
               ? betaId
               : undefined;
         const result = await startHandover(alpha, params).call;

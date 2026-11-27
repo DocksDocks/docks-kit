@@ -28,7 +28,6 @@ import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_PROMPT,
   HANDOVER_STARTED,
-  HANDOVER_START_TOO_NARROW,
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
   agentHandoverWaiting,
@@ -617,8 +616,6 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
 
   it("names the agent and the target in the waiting view and in the first line of the confirm view, shows no notice, and starts the review with the cleaned note and the draft alone", async () => {
     const h = await harness();
-    // Wide enough for the whole waiting line, not only its start.
-    h.tui.size = { columns: 160, rows: 30 };
     const reply = Promise.withResolvers<unknown>();
     h.services.reply = () => reply.promise;
     const { flow } = await agentHandover(h);
@@ -626,9 +623,7 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(h.services.targets).toEqual([]);
     expect(h.services.turns.map((turn) => turn.promptText)).toEqual([HANDOVER_PROMPT]);
     const waiting = agentHandoverWaiting(GAMMA);
-    expect(waiting).toBe(
-      `talk: the agent started a handover to ${literal("gamma")} (instance ${ID_C}) · a side turn writes the summary · ⎋ cancels`,
-    );
+    expect(waiting).toBe(`talk: agent handover to ${literal("gamma")} (${ID_C}) · ⎋ cancels`);
     expect(prop(h.tui.top.node, "text")).toBe(waiting);
     reply.resolve({ replyText: DRAFT });
     await flush();
@@ -827,47 +822,57 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(h.slot.isOpen()).toBe(false);
   });
 
-  it("asks for a wider pane while one row of 40 columns cannot show the start line, and mounts the review after a resize that fits (#260 H2)", async () => {
+  it("mounts the review after the first draw also in a one-row pane of 40 columns: no size holds it (#260 H2)", async () => {
     const h = await harness();
     h.tui.size = { columns: 40, rows: 1 };
-    const { flow, ended } = await agentHandover(h);
-    const waiting = h.tui.views.at(-1);
-    if (waiting === undefined) throw new Error("no waiting view");
-    expect(prop(waiting.node, "text")).toBe(HANDOVER_START_TOO_NARROW);
-    await flush();
-    expect(h.tui.views.at(-1)).toBe(waiting);
-    expect(ended()).toBeUndefined();
-    // The start line fits 80 columns; the key hints after it are cut.
-    h.tui.size = { columns: 80, rows: 1 };
-    const shown = String(prop(waiting.node, "text"));
-    expect(shown).toBe([...agentHandoverWaiting(GAMMA)].slice(0, 80).join(""));
-    expect(
-      shown.startsWith(
-        `talk: the agent started a handover to ${literal("gamma")} (instance ${ID_C})`,
-      ),
-    ).toBe(true);
-    await flush();
+    const { flow } = await agentHandover(h);
     expect(prop(reviewOf(h), "text")).toBe(`${CLEAN_NOTE}\n\n${DRAFT}`);
     press(reviewOf(h), "escape");
     expect(await flow).toEqual({ _tag: "Cancelled" });
   });
 
-  it("ends the flow on escape while the pane is too narrow for the start line", async () => {
-    const h = await harness();
-    h.tui.size = { columns: 40, rows: 1 };
-    const { flow } = await agentHandover(h);
-    const waiting = h.tui.views.at(-1);
-    if (waiting === undefined) throw new Error("no waiting view");
-    expect(prop(waiting.node, "text")).toBe(HANDOVER_START_TOO_NARROW);
-    press(waiting.node, "escape");
-    expect(await flow).toEqual({ _tag: "Cancelled" });
-    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
-  });
+  it.each([
+    [
+      "a failed side turn",
+      () => Promise.reject(new Error("down")),
+      "talk: the handover side turn failed. Nothing was sent. Host error: down",
+    ],
+    ["an empty reply", () => Promise.resolve({ replyText: " " }), HANDOVER_EMPTY],
+  ] as const)(
+    "reports %s at once, before the waiting view drew a frame (#260 H4)",
+    async (_name, reply, notice) => {
+      const h = await harness();
+      h.tui.drawOnMount = false;
+      h.services.reply = reply;
+      const { flow, ended } = await agentHandover(h);
+      await flush();
+      expect(ended()).toEqual({ _tag: "SideTurnFailed" });
+      expect(h.tui.notices).toEqual([{ text: notice, level: "error" }]);
+      expect(await flow).toEqual({ _tag: "SideTurnFailed" });
+    },
+  );
 
-  it("words the request for a wider pane", () => {
-    expect(HANDOVER_START_TOO_NARROW).toBe(
-      "talk: make the pane wider to see who started this handover.",
+  it("fits the whole waiting line of an unnamed peer with its full instance id into 80 columns", async () => {
+    const h = await harness();
+    h.tui.size = { columns: 80, rows: 1 };
+    const reply = Promise.withResolvers<unknown>();
+    h.services.reply = () => reply.promise;
+    // A session without a name lists as `session-` and the first 8 characters of its session id.
+    const unnamed = { ...GAMMA, name: "session-0123abcd" };
+    const flow = h.run({
+      _tag: "AgentHandover",
+      destination: unnamed,
+      note: undefined,
+      isOwn: () => false,
+    });
+    await flush();
+    const text = String(prop(h.tui.top.node, "text"));
+    expect(text).toBe(
+      `talk: agent handover to ${literal("session-0123abcd")} (${ID_C}) · ⎋ cancels`,
     );
+    expect([...text].length).toBeLessThanOrEqual(80);
+    press(h.tui.top.node, "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
   });
 
   it("cleans a host error for a notice: one line, no terminal controls, and a space for each tab", () => {
@@ -945,9 +950,7 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
       const controller = new AbortController();
       const { flow } = await agentHandover(h, controller.signal);
       if (stage === "side turn")
-        expect(prop(h.tui.top.node, "text")).toBe(
-          [...agentHandoverWaiting(GAMMA)].slice(0, h.tui.size.columns).join(""),
-        );
+        expect(prop(h.tui.top.node, "text")).toBe(agentHandoverWaiting(GAMMA));
       if (stage === "review") expect(reviewOf(h).kind).toBe("editor");
       if (stage === "confirm view") {
         press(reviewOf(h), "ctrl+s");
