@@ -12,6 +12,7 @@ import {
   fire,
   flush,
   type Harness,
+  type FakeNode,
   harness,
   itemsOf,
   key,
@@ -33,6 +34,7 @@ import {
   PICKER_ROW_LIMIT,
   drawCode,
   listLayout,
+  LISTING_TEXT,
   resizeText,
 } from "../../../talk/ui/views";
 
@@ -243,7 +245,7 @@ describe("list view (G3)", () => {
       expect(h.tui.views[0]?.result).toMatchObject({ _tag: "TooSmall" });
       const resize = h.tui.top;
       expect(resize.options).toMatchObject(FULL_SCREEN);
-      // One text node, no frame and no chrome: the first screen row holds the request.
+      // One text node, no frame and no chrome; omp's bare sheet centers its one row vertically.
       expect(resize.node.kind).toBe("text");
       expect(Object.keys(resize.node.props).sort()).toEqual(["onKey", "text"]);
       expect(prop(resize.node, "text")).toBe(text);
@@ -251,12 +253,12 @@ describe("list view (G3)", () => {
       for (const id of ["enter", "h", "a"]) expect(press(resize.node, id)).toBe(true);
       await flush();
       expect(h.tui.top).toBe(resize);
-      // The pane grows: the next draw ends the view, and the flow mounts the list.
+      // The pane grows: the view lists again, then ends with the rows, and the flow mounts the list.
       h.tui.size = { columns: 100, rows: 30 };
       prop(resize.node, "text");
       await flush();
       expect(resize.closed).toBe(true);
-      expect(resize.result).toEqual({ _tag: "Fits" });
+      expect(resize.result).toMatchObject({ _tag: "Ready" });
       const list = h.tui.top.node;
       expect(list.kind).toBe("picker");
       expect(itemsOf(list)).toHaveLength(2);
@@ -311,7 +313,7 @@ describe("list view (G3)", () => {
     "enlarge the pane",
     "enlarge",
     "grow",
-    "+",
+    "↔",
   ];
 
   it.each([
@@ -322,8 +324,8 @@ describe("list view (G3)", () => {
     [7, "enlarge"],
     [5, "grow"],
     [4, "grow"],
-    [3, "+"],
-    [1, "+"],
+    [3, "↔"],
+    [1, "↔"],
   ])("fits a whole resize cue to %i columns, never a cut word", async (columns, text) => {
     const ui = await loadUi();
     const shown = resizeText(ui, columns);
@@ -332,28 +334,35 @@ describe("list view (G3)", () => {
     expect([...shown].length).toBeLessThanOrEqual(columns);
   });
 
-  /** Shrinks the pane below the list, lets the list end, then grows it so the resize view ends. */
-  const shrinkAndGrow = async (h: Harness): Promise<void> => {
+  /** Shrinks the pane below the open list; the list ends and the resize view mounts. */
+  const shrink = async (h: Harness): Promise<FakeNode> => {
     const list = h.tui.top.node;
     h.tui.size = { columns: 100, rows: PICKER_FIXED_ROWS };
     itemsOf(list);
     await flush();
     const resize = h.tui.top.node;
     expect(resize.kind).toBe("text");
+    return resize;
+  };
+
+  /** Grows the pane under the resize view and draws it, so it lists again. */
+  const grow = async (h: Harness, resize: FakeNode): Promise<void> => {
     h.tui.size = { columns: 100, rows: 30 };
     prop(resize, "text");
     await flush();
   };
 
-  it("lists again when the list fits after the resize view, so an ended peer leaves and its replacement shows", async () => {
+  it("lists again only when the pane grows, so a peer change while the warning shows reaches the list", async () => {
     const h = await harness();
     const flow = h.run();
     await flush();
     expect(itemsOf(h.tui.top.node).map((item) => item.label.slice(0, 16))).toEqual([ID_A, ID_B]);
     const listings = h.services.lives.length;
-    // beta ends while the resize view is open; gamma registers.
+    const resize = await shrink(h);
+    // beta ends and gamma registers after the warning mounted; the shrink listed nothing.
     h.services.rows = [row(ID_A, "self", { own: true }), row(ID_C, "gamma")];
-    await shrinkAndGrow(h);
+    expect(h.services.lives.length).toBe(listings);
+    await grow(h, resize);
     expect(h.services.lives.length).toBe(listings + 1);
     const list = h.tui.top.node;
     expect(list.kind).toBe("picker");
@@ -370,15 +379,57 @@ describe("list view (G3)", () => {
     const first = h.tui.top.node;
     const gamma = itemsOf(first)[2]?.id;
     fire(first, "onSelect", gamma);
-    await shrinkAndGrow(h);
+    let resize = await shrink(h);
+    await grow(h, resize);
     expect(prop(h.tui.top.node, "selected")).toBe(gamma);
-    // gamma ends during the next resize: the list selects beta, the first row of another session.
+    // gamma ends after the next warning mounted: the list selects beta, the first row of another session.
+    resize = await shrink(h);
     h.services.rows = [row(ID_A, "self", { own: true }), row(ID_B, "beta")];
-    await shrinkAndGrow(h);
+    await grow(h, resize);
     const list = h.tui.top.node;
     expect(prop(list, "selected")).toBe(itemsOf(list)[1]?.id);
     press(list, "escape");
     await flow;
+  });
+
+  it("selects a peer that joined before the first visible list, not a pair of the unmounted list", async () => {
+    const h = await harness();
+    h.services.rows = [row(ID_A, "self", { own: true })];
+    h.tui.size = { columns: 100, rows: PICKER_FIXED_ROWS };
+    const flow = h.run();
+    await flush();
+    const resize = h.tui.top.node;
+    expect(resize.kind).toBe("text");
+    h.services.rows = [row(ID_A, "self", { own: true }), row(ID_B, "beta")];
+    await grow(h, resize);
+    const list = h.tui.top.node;
+    expect(prop(list, "selected")).toBe(itemsOf(list)[1]?.id);
+    press(list, "escape");
+    await flow;
+  });
+
+  it("keeps the resize view focused while the listing after a grow runs; escape ends the flow and its listing, and no list mounts later", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const resize = await shrink(h);
+    const listing = Promise.withResolvers<ListingAnswer>();
+    h.services.listing = listing.promise;
+    await grow(h, resize);
+    // The view stays open and focused while the rows are pending.
+    expect(h.tui.top.node).toBe(resize);
+    expect(prop(resize, "text")).toBe(LISTING_TEXT);
+    const life = h.services.lives.at(-1);
+    expect(life?.signal.aborted).toBe(false);
+    expect(press(resize, "escape")).toBe(true);
+    await flow;
+    expect(life?.signal.aborted).toBe(true);
+    const views = h.tui.views.length;
+    listing.resolve({ _tag: "Listed", rows: h.services.rows });
+    await flush();
+    expect(h.tui.views).toHaveLength(views);
+    expect(h.tui.views.every((view) => view.closed)).toBe(true);
+    expect(h.tui.notices).toEqual([]);
   });
 
   it("keeps the list open at the smallest size that fits", async () => {
@@ -514,7 +565,8 @@ describe("compose and confirm views (G3)", () => {
       },
     ]);
     expect(h.tui.notices).toEqual([{ text: h.services.answer.text, level: "info" }]);
-    expect(h.tui.calls).toEqual(["custom", "custom", "custom", "notify"]);
+    // The send runs under a waiting view, so no gap leaves the composer focused (round 7).
+    expect(h.tui.calls).toEqual(["custom", "custom", "custom", "custom", "notify"]);
   });
 
   it("shows a failed send as an error notice", async () => {
@@ -825,6 +877,29 @@ describe("flow slot (G3)", () => {
     expect(life?.live()).toBe(false);
     gate.resolve();
     await flow;
+    expect(h.tui.notices).toEqual([]);
+  });
+
+  it("keeps a waiting view focused while the send runs; escape ends the flow and shows no notice (round 7)", async () => {
+    const h = await harness();
+    const gate = Promise.withResolvers<void>();
+    h.services.sendGate = gate.promise;
+    const flow = h.run();
+    await flush();
+    const confirm = await confirmTo(h, ID_B, "hello");
+    typeCode(confirm, codeOf(confirm).code);
+    await flush();
+    const waiting = h.tui.top;
+    expect(waiting.node.kind).toBe("text");
+    expect(waiting.options).toMatchObject(DOCKED);
+    expect(prop(waiting.node, "text")).toBe(`talk: sending to ${ID_B} · ⎋ stops waiting`);
+    expect(press(waiting.node, "enter")).toBe(true);
+    const life = h.services.lives.at(-1);
+    expect(press(waiting.node, "escape")).toBe(true);
+    await flow;
+    expect(life?.signal.aborted).toBe(true);
+    gate.resolve();
+    await flush();
     expect(h.tui.notices).toEqual([]);
   });
 

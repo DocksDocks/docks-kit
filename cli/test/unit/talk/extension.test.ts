@@ -2419,7 +2419,8 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     expect(beta.talkTexts()[0]).toContain("hello beta");
     expect(alpha.notices[0]).toContain("Delivered");
     expect(alpha.notices[0]).toContain(`Instance: ${betaId}`);
-    expect(alpha.uiCalls).toEqual(["custom", "custom", "custom", "notify"]);
+    // The send runs under a waiting view, so the call list holds one more custom.
+    expect(alpha.uiCalls).toEqual(["custom", "custom", "custom", "custom", "notify"]);
   });
 
   it("opens compose for /talk <target> after the target resolves by name, and reports a target that does not resolve", async () => {
@@ -2439,7 +2440,7 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     await flow;
     await until(() => beta.talkTexts().length === 1);
     await alpha.command("nobody");
-    expect(alpha.views).toHaveLength(2);
+    expect(alpha.views).toHaveLength(3);
     expect(alpha.notices[1]).toContain("not-found");
   });
 
@@ -2677,7 +2678,8 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
       return { replyText: "## Next task\nShip it.", assistantMessage: {} };
     };
     const flow = alpha.command("handover beta");
-    await until(() => alpha.views.length === 1);
+    // The waiting view of the side turn, then the review.
+    await until(() => alpha.views.length === 2);
     expect(requests).toHaveLength(1);
     const [request] = requests;
     expect(Predicate.isObject(request) ? Object.keys(request).sort() : []).toEqual([
@@ -2694,7 +2696,7 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     const edited = "## Next task\nShip it today.";
     fireNode(review, "onEdit", { from: 0, to: length, text: edited, cursor: 0, len: length });
     pressKey(review, "ctrl+s");
-    await until(() => alpha.views.length === 2);
+    await until(() => alpha.views.length === 3);
     const confirm = alpha.top.node;
     expect(confirmCode(confirm).instanceId).toBe(betaId);
     expect(beta.sent).toEqual([]);

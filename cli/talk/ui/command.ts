@@ -38,7 +38,7 @@ import {
   type ConfirmChoice,
   type Destination,
   type ListChoice,
-  type ResizeChoice,
+  type Waited,
   type ListMode,
   type ListRow,
   type SizeReader,
@@ -47,6 +47,7 @@ import {
   confirmView,
   drawCode,
   listView,
+  pendingView,
   resizeView,
   sizeReader,
 } from "./views";
@@ -242,6 +243,19 @@ export const talkErrorText = (cause: unknown): string => {
 const FULL_SCREEN = true;
 const DOCKED = false;
 
+/** The waiting view of a handover side turn. */
+export const HANDOVER_WAITING = "talk: a side turn writes the handover summary · ⎋ cancels";
+
+/** The waiting view of a send. */
+export const sendingText = (destination: Destination): string =>
+  `talk: sending to ${destination.instanceId} · ⎋ stops waiting`;
+
+/** The result of a waited step: undefined after a close; a rejection goes to the flow's error notice. */
+const resultOf = <R>(waited: Waited<R>): R | undefined => {
+  if (waited._tag === "Failed") throw waited.cause;
+  return waited._tag === "Ready" ? waited.result : undefined;
+};
+
 export interface FlowSlotOptions {
   /** Default: `drawCode` of `views.ts` with `crypto.randomInt`. */
   readonly drawCode?: ((last: string | undefined) => string) | undefined;
@@ -332,6 +346,32 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     return choice;
   };
 
+  /**
+   * Runs one talk step while a docked waiting view holds the focus, so no key
+   * reaches the composer of omp between two talk views. `escape` and `alt+t`
+   * end the flow, whose abort signal stops the step.
+   */
+  const waitFor = <R>(
+    flow: Flow,
+    flowUi: FlowUi,
+    text: string,
+    task: () => Promise<R>,
+  ): Promise<Waited<R>> =>
+    mount<Waited<R>>(
+      flow,
+      flowUi,
+      // omp can run the factory after the flow ended; the step then does not start.
+      (_size, done) =>
+        pendingView(
+          ui,
+          text,
+          () => (live(flow) ? task() : Promise.reject(new Error("the /talk flow ended"))),
+          done,
+        ),
+      { _tag: "Close" },
+      DOCKED,
+    );
+
   /** A view that edits the text of one send: compose, or the handover review. */
   type EditView = (size: SizeReader, text: string, done: (choice: TextChoice) => void) => JSXNode;
 
@@ -373,8 +413,13 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       if (confirmed._tag === "Back") continue;
       if (confirmed._tag !== "Send" || !live(flow)) return;
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
-      const sent = await flow.services.send(pair, text, kind, flow.life);
-      if (!live(flow)) return;
+      // A talk view holds the focus while the send runs; `escape` ends the flow and its signal.
+      const sent = resultOf(
+        await waitFor(flow, flowUi, sendingText(destination), () =>
+          flow.services.send(pair, text, kind, flow.life),
+        ),
+      );
+      if (sent === undefined || !live(flow)) return;
       if (sent.ok) flowUi.notify(sent.text, "info");
       else flowUi.notify(talkErrorText(sent.text), "error");
       return;
@@ -393,7 +438,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       return;
     }
     flowUi.notify(HANDOVER_STARTED, "info");
-    const draft = await untilEnded(flow, requestDraft(sideTurn, flow.controller.signal));
+    // A talk view holds the focus while the side turn runs; `escape` ends the flow and aborts it.
+    const draft = resultOf(
+      await waitFor(flow, flowUi, HANDOVER_WAITING, () =>
+        requestDraft(sideTurn, flow.controller.signal),
+      ),
+    );
     if (draft === undefined || !live(flow)) return;
     if (draft._tag === "Failed") {
       flowUi.notify(draft.text, "error");
@@ -421,12 +471,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       DOCKED,
     );
 
-  /** One listing of the flow's rows; undefined after an end or after the error notice. */
-  const listRows = async (
+  /** The rows of one listing answer; undefined after an end or after the error notice. */
+  const rowsOf = (
     flow: Flow,
     flowUi: FlowUi,
-  ): Promise<ReadonlyArray<ListRow> | undefined> => {
-    const answer = await untilEnded(flow, flow.services.list(flow.life));
+    answer: ListingAnswer | undefined,
+  ): ReadonlyArray<ListRow> | undefined => {
     if (answer === undefined || !live(flow)) return undefined;
     if (answer._tag === "Listed") return answer.rows;
     flowUi.notify(talkErrorText(answer.text), "error");
@@ -434,11 +484,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   };
 
   const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
-    let rows = await listRows(flow, flowUi);
+    let rows = rowsOf(flow, flowUi, await untilEnded(flow, flow.services.list(flow.life)));
     let preferred: Target | undefined;
     // G3: while the list does not fit, the resize view stands in for it. When the list fits
-    // again, the flow lists again, so the rows leave out ended registrations, and the list
-    // selects the pair that it selected before, while that pair is listed.
+    // again, the resize view lists again and stays open until the rows are ready, so a talk
+    // view keeps the focus; the rows leave out ended registrations, and the list selects
+    // the pair that it selected before, while that pair is listed.
     while (rows !== undefined) {
       const shown = rows;
       const choice = await mount<ListChoice>(
@@ -452,16 +503,15 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         case "Close":
           return;
         case "TooSmall": {
-          const resized = await mount<ResizeChoice>(
+          const resized = await mount<Waited<ListingAnswer>>(
             flow,
             flowUi,
-            (size, done) => resizeView(ui, size, done),
+            (size, done) => resizeView(ui, size, () => flow.services.list(flow.life), done),
             { _tag: "Close" },
             FULL_SCREEN,
           );
-          if (resized._tag !== "Fits") return;
           preferred = choice.selected;
-          rows = await listRows(flow, flowUi);
+          rows = rowsOf(flow, flowUi, resultOf(resized));
           continue;
         }
         case "Handover":

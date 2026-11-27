@@ -222,7 +222,7 @@ view in place of the list:
   v19.2.1:24-27), so the request is the middle row of the screen, and the
   only row of a one-row pane. On each draw, it shows the longest of these
   cues that fits the width from `ui.size()`. Each cue is whole: no word is
-  cut, and `+` fits one column.
+  cut. Below 4 columns the cue is the one-cell expand symbol `↔` (U+2194).
 
 ```text
 talk: enlarge the pane to see the session list
@@ -230,15 +230,20 @@ talk: enlarge the pane
 enlarge the pane
 enlarge
 grow
-+
+↔
 ```
 
-- When the list fits again, the resize view ends at its next draw. The flow
-  lists the registry again, with the abort signal and the session checks of
-  the flow, and mounts the list with the fresh rows: a registration that
-  ended while the resize view was open is gone, and a new one shows. The
-  list selects the pair that it selected before the resize while that pair
-  is still listed, else the first row of another session.
+- When the list fits again, the resize view stays open and focused, shows
+  `talk: listing sessions`, and lists the registry again with the abort
+  signal and the session checks of the flow. It ends only when the rows are
+  ready, so no key reaches the composer of omp between the warning and the
+  list; `escape` and `alt+t` during the listing end the flow and abort the
+  listing, and no list mounts later. The flow mounts the list with the fresh
+  rows: a registration that ended while the warning showed is gone, and a
+  new one shows. The list selects the pair that the operator selected in a
+  list that showed before the resize, while that pair is still listed, else
+  the first row of another session. A list that ended before it showed
+  creates no selection to restore.
 - In the resize view, Enter, `h`, and every other key do nothing; `escape`
   and `alt+t` end the flow. Enter and `h` never act on a list that does not
   fit.
@@ -428,9 +433,13 @@ cuts a reply above 4096 bytes of UTF-8, which it ends with the line
 `[…truncated]`. omp keeps its tool list in the request and discards
 each tool call of the side turn.
 
-When the flow ends during the side turn, the flow aborts it, shows no error,
-and mounts no review. When the reply arrives, the flow checks its signal and
-its session id before it mounts the review.
+While the side turn runs, a waiting view at the bottom of the screen holds
+the focus: `talk: a side turn writes the handover summary · ⎋ cancels`.
+`escape` and `alt+t` there end the flow; every other key does nothing, so no
+key reaches the composer of omp. When the flow ends during the side turn,
+the flow aborts it, shows no error, and mounts no review. When the reply
+arrives, the flow checks its signal and its session id before it mounts the
+review.
 
 ### Template
 
@@ -482,6 +491,13 @@ empty, the review shows this line in place of omp's `[…truncated]`:
 The review starts with the caret at the start of the draft.
 
 ### Send
+
+While a send runs, from compose or from the handover review, a waiting view
+at the bottom of the screen holds the focus:
+`talk: sending to <instance id> · ⎋ stops waiting`. `escape` and `alt+t`
+there end the flow and its abort signal: a send whose body did not go out
+sends nothing, a body that went out can reach the peer, and the flow shows no
+notice either way.
 
 After the confirm code, the flow sends the reviewed text to the exact pair as
 a `deliver` request with `kind: "handover"`, no attachments, and a request

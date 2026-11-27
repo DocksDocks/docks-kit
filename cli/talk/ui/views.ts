@@ -137,7 +137,7 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 /**
  * The texts of the resize view, longest first (G3): the view shows the
  * longest one that fits the width, so one screen row holds a whole cue and
- * no word is cut. `+` fits one cell.
+ * no word is cut. Below 4 cells, the one-cell expand symbol `↔` asks for room.
  */
 export const RESIZE_TEXTS = [
   "talk: enlarge the pane to see the session list",
@@ -145,7 +145,7 @@ export const RESIZE_TEXTS = [
   "enlarge the pane",
   "enlarge",
   "grow",
-  "+",
+  "↔",
 ] as const;
 const LIST_EMPTY = "No live talk sessions.";
 
@@ -226,8 +226,9 @@ export const listView = (
         row === undefined ? undefined : { instanceId: row.instanceId, sessionId: row.sessionId },
     });
   };
-  // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1).
-  if (!layout().fits) tooSmall();
+  // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1). The
+  // operator saw no selection of this picker, so it carries forward only an earlier pair.
+  if (!layout().fits) done({ _tag: "TooSmall", selected: preferred });
   return ui.jsx("picker", {
     title: LIST_TITLE[mode],
     noun: "sessions",
@@ -272,10 +273,62 @@ export const listView = (
   });
 };
 
+// ── Waiting views ──
+
+/**
+ * How a view that waits for a talk step ends: the result of the step, its
+ * rejection, or a close by the operator. A close ends the flow, and the
+ * flow's abort signal stops the step.
+ */
+export type Waited<R> =
+  | { readonly _tag: "Ready"; readonly result: R }
+  | { readonly _tag: "Failed"; readonly cause: unknown }
+  | { readonly _tag: "Close" };
+
+/** Runs `task` once and ends the view with its result; `done` runs once only. */
+const settleWith = <R>(task: () => Promise<R>, done: (choice: Waited<R>) => void): void => {
+  task().then(
+    (result) => {
+      done({ _tag: "Ready", result });
+    },
+    (cause: unknown) => {
+      done({ _tag: "Failed", cause });
+    },
+  );
+};
+
+/**
+ * The keys of a waiting view: `escape` and `alt+t` end the flow; every other
+ * key does nothing. The view keeps the focus, so no key reaches the
+ * composer of omp while a talk step runs.
+ */
+const waitingKeys =
+  <R>(done: (choice: Waited<R>) => void) =>
+  (key: ViewKey): boolean => {
+    if (key.kind !== "release" && (key.id === CLOSE_KEY || key.id === TALK_SHORTCUT))
+      done({ _tag: "Close" });
+    return true;
+  };
+
+/**
+ * A view that holds the focus while one talk step runs, such as the side
+ * turn of a handover or a send: one `text` node with `text`. It starts
+ * `task` at once and ends with its result.
+ */
+export const pendingView = <R>(
+  ui: HostUi,
+  text: string,
+  task: () => Promise<R>,
+  done: (choice: Waited<R>) => void,
+): JSXNode => {
+  settleWith(task, done);
+  return ui.jsx("text", { text, onKey: waitingKeys(done) });
+};
+
 // ── Resize view ──
 
-/** How the resize view ends: the list fits again, or the operator closed the flow. */
-export type ResizeChoice = { readonly _tag: "Fits" } | { readonly _tag: "Close" };
+/** The text of the resize view while it lists the registry again. */
+export const LISTING_TEXT = "talk: listing sessions";
 
 /** The resize text for `columns` cells: the longest whole cue that fits; none below one cell. */
 export const resizeText = (ui: HostUi, columns: number | undefined): string => {
@@ -285,33 +338,36 @@ export const resizeText = (ui: HostUi, columns: number | undefined): string => {
 
 /**
  * The resize view (G3): a full-screen overlay whose root is one `text` node,
- * with no frame, no title, and no hint, so the first screen row holds the
- * request for a larger pane even in a one-row pane. It reads `ui.size()` on
- * each draw; when the list fits again, it ends with `Fits`, and the flow
- * mounts the list. Enter, `h`, and every other key do nothing; `escape` and
- * `alt+t` end the flow.
+ * with no frame, no title, and no hint. omp's bare sheet centers the one row
+ * vertically on the screen, so a one-row pane shows only it. It reads
+ * `ui.size()` on each draw. When the list fits again, the view stays open,
+ * shows `talk: listing sessions`, and runs `relist` once; it ends with the
+ * fresh listing, so a talk view holds the focus until the list mounts.
+ * Enter, `h`, and every other key do nothing; `escape` and `alt+t` end the
+ * flow, whose abort signal stops the listing.
  */
-export const resizeView = (
+export const resizeView = <R>(
   ui: HostUi,
   size: SizeReader,
-  done: (choice: ResizeChoice) => void,
+  relist: () => Promise<R>,
+  done: (choice: Waited<R>) => void,
 ): JSXNode => {
-  // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1).
-  if (listLayout(size()).fits) done({ _tag: "Fits" });
+  const listing = ui.signal(false);
+  const start = (): void => {
+    if (listing.peek()) return;
+    listing.set(true);
+    settleWith(relist, done);
+  };
+  if (listLayout(size()).fits) start();
   return ui.jsx("text", {
     text: () => {
+      if (listing()) return LISTING_TEXT;
       const current = size();
-      if (listLayout(current).fits)
-        queueMicrotask(() => {
-          done({ _tag: "Fits" });
-        });
+      // A draw at a size that fits starts the listing after the draw.
+      if (listLayout(current).fits) queueMicrotask(start);
       return resizeText(ui, current?.columns);
     },
-    onKey: (key: ViewKey): boolean => {
-      if (key.kind !== "release" && (key.id === CLOSE_KEY || key.id === TALK_SHORTCUT))
-        done({ _tag: "Close" });
-      return true;
-    },
+    onKey: waitingKeys(done),
   });
 };
 

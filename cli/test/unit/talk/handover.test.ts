@@ -29,6 +29,7 @@ import {
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
 } from "../../../talk/ui/handover";
+import { HANDOVER_WAITING } from "../../../talk/ui/command";
 
 // The handover flows of plan #251 G6 against the fake TUI host of
 // `cli/test/lib/talkFlowHost.ts`: `/talk handover <target>`, the
@@ -146,7 +147,8 @@ describe("/talk handover <target> (G2, G6)", () => {
       { text: HANDOVER_STARTED, level: "info" },
       { text: h.services.answer.text, level: "info" },
     ]);
-    expect(h.tui.calls).toEqual(["notify", "custom", "custom", "notify"]);
+    // The side turn and the send each run under a waiting view: no gap leaves the composer focused.
+    expect(h.tui.calls).toEqual(["notify", "custom", "custom", "custom", "custom", "notify"]);
   });
 
   it("returns from the confirm view to the review with the edited text kept", async () => {
@@ -253,7 +255,7 @@ describe("/talk handover <target> (G2, G6)", () => {
       h.services.reply = () => Promise.resolve({ replyText: `${kept}${OMP_CUT_MARK}` });
       const { flow } = await handoverToGamma(h);
       // No review mounts, so the flow ends without a key.
-      expect(h.tui.calls).toEqual(["notify", "notify"]);
+      expect(h.tui.calls).toEqual(["notify", "custom", "notify"]);
       await flow;
       expect(h.tui.notices.at(-1)).toEqual({ text: HANDOVER_EMPTY, level: "error" });
       expect(h.services.sends).toEqual([]);
@@ -321,7 +323,8 @@ describe("handover errors (G6)", () => {
     const { flow } = await handoverToGamma(h);
     await flow;
     expect(h.services.sends).toEqual([]);
-    expect(h.tui.views).toEqual([]);
+    // No review: at most the waiting view of the side turn mounted, and it closed.
+    expect(h.tui.views.every((view) => view.node.kind === "text" && view.closed)).toBe(true);
     const last = h.tui.notices.at(-1);
     expect(last?.level).toBe("error");
     if (typeof text === "string") expect(last?.text).toBe(text);
@@ -434,7 +437,9 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     const { flow } = await handoverToGamma(h);
     const signal = h.services.turns[0]?.signal;
     if (signal === undefined) throw new Error("no side turn");
-    expect(h.tui.views).toEqual([]);
+    // The waiting view holds the focus while the side turn runs.
+    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
+    expect(prop(h.tui.top.node, "text")).toBe(HANDOVER_WAITING);
     return { flow, reply, signal };
   };
 
@@ -488,7 +493,7 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     h.services.session = "s-2";
     reply.resolve({ replyText: DRAFT });
     await flow;
-    expect(h.tui.views).toEqual([]);
+    expect(h.tui.views.every((view) => view.node.kind !== "editor")).toBe(true);
     expect(h.services.sends).toEqual([]);
   });
 
@@ -500,5 +505,18 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     await flow;
     await flush();
     expect(h.tui.notices).toEqual([{ text: HANDOVER_STARTED, level: "info" }]);
+  });
+
+  it("ends the flow and aborts the side turn on escape in its waiting view, and no review mounts later (round 7)", async () => {
+    const h = await harness();
+    const { flow, reply, signal } = await pending(h);
+    expect(press(h.tui.top.node, "a")).toBe(true);
+    expect(press(h.tui.top.node, "escape")).toBe(true);
+    await flow;
+    expect(signal.aborted).toBe(true);
+    reply.resolve({ replyText: DRAFT });
+    await flush();
+    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
+    expect(h.services.sends).toEqual([]);
   });
 });
