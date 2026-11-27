@@ -3,12 +3,10 @@
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
-  chmodSync,
   closeSync,
   copyFileSync,
   cpSync,
   existsSync,
-  lstatSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -21,7 +19,14 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { hostOs } from "../../src/engine-native/os";
 
 import { BUN_RUNTIME, cliEntry } from "./cliEntry";
-import { FIXTURES_DIR, REPO_DIR, childHostId, readStubHost, temporaryDir } from "./goldenResources";
+import {
+  FIXTURES_DIR,
+  REPO_DIR,
+  childHostId,
+  readStubHost,
+  removeTree,
+  temporaryDir,
+} from "./goldenResources";
 import { normalizeOutput, writeSeededTree, type SeededTree } from "./goldenSnapshot";
 
 const BUN_INSTALL_CACHE_DIR = temporaryDir("golden-bun-cache-");
@@ -285,33 +290,17 @@ export function readArgvLog(run: EngineRun): string {
 }
 
 /**
- * Give the owner read, write, and search permission on `path` and on each
- * folder below it, so a recursive removal can list them: a sync can leave a
- * nonempty folder at mode 000. A symbolic link is not followed.
- */
-function restoreFolderPermissions(path: string): void {
-  const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (stat?.isDirectory() !== true) return;
-  if ((stat.mode & 0o700) !== 0o700) chmodSync(path, stat.mode | 0o700);
-  for (const name of readdirSync(path)) restoreFolderPermissions(join(path, name));
-}
-
-/**
- * Remove the home of each run, after it restores the folder permissions below
- * it on POSIX. Returns one problem line for each home that it cannot remove,
- * so a case keeps its result and reports the problem; it never throws.
+ * Remove the home of each run with `goldenResources.ts removeTree`, which
+ * repairs folder permissions after a permission error. Returns one problem
+ * line for each home that stays, so a case keeps its result and reports the
+ * problem; it never throws.
  */
 export function cleanupProblems(runs: ReadonlyArray<Pick<EngineRun, "home">>): Array<string> {
   const problems: Array<string> = [];
   for (const run of runs) {
-    try {
-      if (process.platform !== "win32") restoreFolderPermissions(run.home);
-      rmSync(run.home, { recursive: true, force: true });
-    } catch (error) {
-      problems.push(
-        `  the run home ${run.home} cannot be removed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    const problem = removeTree(run.home);
+    if (problem !== undefined)
+      problems.push(`  the run home ${run.home} cannot be removed: ${problem}`);
   }
   return problems;
 }

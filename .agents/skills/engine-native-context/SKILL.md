@@ -125,9 +125,12 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
   no partial snapshot, and `--update-goldens` writes nothing. The checks that
   read the tree again (`seededTreeProblems` and the kit plugin checks of a
   cutover case) also turn a read error into a problem line of the case, not a
-  throw. The run home goes through `goldenExecution.ts cleanupProblems`, which
-  restores the folder permissions first: a home that it cannot remove fails
-  the case, and the case keeps its result.
+  throw. Each run home, also of the channel checks, goes through
+  `goldenExecution.ts cleanupProblems` and `goldenResources.ts removeTree`,
+  which repairs folder permissions only after a permission error and then
+  tries once more: a home that stays fails its case or the channel check, and
+  the case keeps its result. The exit sweep (`removeTemporaryDirs`) prints
+  each temporary folder that stays and goes on with the next.
 
 ## JSON Helpers
 

@@ -56,6 +56,7 @@ vi.mock("node:os", async () => {
 import {
   childEnv,
   cleanupTemporaryDirs,
+  removeTemporaryDirs,
   makeStubDir,
   sweepStaleTemporaryDirs,
   temporaryDir,
@@ -218,6 +219,24 @@ describe("golden temporary resources", () => {
 
     expect(mocks.rmSync).toHaveBeenCalledWith(path, { recursive: true, force: true });
     expect(mocks.rmSync).toHaveBeenCalledWith(`${path}.owner-pid`, { force: true });
+  });
+
+  it("reports each temporary folder that it cannot remove and goes on with the next", () => {
+    const stuck = temporaryDir("golden-home-stuck-");
+    const next = temporaryDir("golden-stubs-next-");
+    mocks.rmSync.mockImplementation((path) => {
+      if (path === stuck) throw Object.assign(new Error("removal denied"), { code: "EPERM" });
+    });
+
+    const problems = removeTemporaryDirs();
+
+    expect(problems).toEqual([
+      `golden: temporary folder ${stuck} cannot be removed: removal denied`,
+    ]);
+    // The marker of a folder that stays lets a later stale sweep find its owner.
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(`${stuck}.owner-pid`, expect.anything());
+    expect(mocks.rmSync).toHaveBeenCalledWith(next, { recursive: true, force: true });
+    expect(mocks.rmSync).toHaveBeenCalledWith(`${next}.owner-pid`, { force: true });
   });
 
   it("skips foreign directories and continues after a removal failure", () => {

@@ -11,7 +11,7 @@
  *   bun cli/test/golden-mutation.ts
  *   bun cli/test/golden-mutation.ts --prove-red
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { isObject, parseJson } from "../src/engine-native/jq";
@@ -304,7 +304,7 @@ function channelInvariantProblems(): Array<string> {
     }
     if (bare.stdout !== "")
       problems.push(`  modifiers: public ${label} wrote error data to stdout`);
-    rmSync(bare.home, { recursive: true, force: true });
+    problems.push(...cleanupProblems([bare]));
   }
 
   // Before this guard, an invocation that read as a dry run performed a real mutating sync.
@@ -318,7 +318,7 @@ function channelInvariantProblems(): Array<string> {
   if (booleanWithValue.stdout !== "") {
     problems.push("  modifiers: public --dry-run=false wrote error data to stdout");
   }
-  rmSync(booleanWithValue.home, { recursive: true, force: true });
+  problems.push(...cleanupProblems([booleanWithValue]));
 
   // The kit refuses these flags outright so Effect 4 cannot negate a declared boolean into a real mutating sync.
   for (const flag of ["--no-dry-run", "--no-verbose"] as const) {
@@ -328,7 +328,7 @@ function channelInvariantProblems(): Array<string> {
     }
     if (bare.stdout !== "")
       problems.push(`  modifiers: public negated ${flag} wrote error data to stdout`);
-    rmSync(bare.home, { recursive: true, force: true });
+    problems.push(...cleanupProblems([bare]));
   }
 
   // Verbosity contract: default second run is quiet about the status quo;
@@ -366,11 +366,8 @@ function channelInvariantProblems(): Array<string> {
     }
   }
 
-  rmSync(syncSplit.home, { recursive: true, force: true });
-  rmSync(warnSplit.home, { recursive: true, force: true });
-  rmSync(drySplit.home, { recursive: true, force: true });
-  rmSync(second.home, { recursive: true, force: true }); // first/second/secondVerbose share one home
-  rmSync(pubFirst.home, { recursive: true, force: true }); // all public forwarding legs reuse this home
+  // first/second/secondVerbose share one home, and all public forwarding legs reuse pubFirst's.
+  problems.push(...cleanupProblems([syncSplit, warnSplit, drySplit, second, pubFirst]));
   return problems;
 }
 

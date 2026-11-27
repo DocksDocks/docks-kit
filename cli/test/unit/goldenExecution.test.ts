@@ -25,10 +25,10 @@ describe("run home cleanup", () => {
    */
   function withLockedHome(run: (home: EngineRun) => void): void {
     const home = mkdtempSync(join(tmpdir(), "golden-cleanup-test-"));
-    const outer = join(home, ".pi", "agent", "intercom");
-    const inner = join(outer, "notes");
+    const outer = join(home, "locked", "outer");
+    const inner = join(outer, "inner");
     mkdirSync(inner, { recursive: true });
-    writeFileSync(join(outer, "config.json"), "{}\n");
+    writeFileSync(join(outer, "file.json"), "{}\n");
     writeFileSync(join(inner, "marker"), "kept\n");
     chmodSync(inner, 0o000);
     chmodSync(outer, 0o000);

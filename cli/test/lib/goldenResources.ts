@@ -155,20 +155,103 @@ export function registeredTemporaryDirs(): ReadonlyArray<string> {
   return [...TEMP_DIRS];
 }
 
+/** True for the error codes that a missing permission gives. */
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EPERM";
+}
+
 /**
- * Keep TEMP_DIRS path strings after deletion for snapshot normalization.
- * Cleanup removes each sibling owner marker after its directory.
+ * Give the owner read, write, and search permission on `folder` and on each
+ * folder below it, so a recursive removal can list them. Only folders get a
+ * stat; a symbolic link is not followed.
  */
-export function cleanupTemporaryDirs(): void {
-  for (const dir of TEMP_DIRS) {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(`${dir}${OWNER_PID_SUFFIX}`, { force: true });
+function restoreFolderPermissions(folder: string): void {
+  const { mode } = lstatSync(folder);
+  if ((mode & 0o700) !== 0o700) chmodSync(folder, mode | 0o700);
+  for (const entry of readdirSync(folder, { withFileTypes: true })) {
+    if (entry.isDirectory()) restoreFolderPermissions(join(folder, entry.name));
   }
+}
+
+/**
+ * Remove `path` and everything below it. A sync can leave a nonempty folder
+ * at mode 000: after a permission error on POSIX, this gives the folders
+ * below `path` their owner permissions and tries once more. Returns the
+ * message of the last failed removal when `path` stays, else undefined; it
+ * never throws.
+ */
+export function removeTree(path: string): string | undefined {
+  try {
+    rmSync(path, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    if (process.platform === "win32" || !isPermissionError(error)) return errorMessage(error);
+  }
+  try {
+    restoreFolderPermissions(path);
+  } catch {
+    // The second removal reports what still blocks it.
+  }
+  try {
+    rmSync(path, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+/** The message of a thrown value, for a problem line. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Remove each registered temporary folder and its owner marker, and return
+ * one problem line for each folder that stays; it never throws, so one
+ * folder that stays does not keep the next ones. A folder that stays keeps
+ * its marker, so a later stale sweep can find its owner. TEMP_DIRS keeps the
+ * path strings for snapshot normalization.
+ */
+export function removeTemporaryDirs(): Array<string> {
+  const problems: Array<string> = [];
+  for (const dir of TEMP_DIRS) {
+    const problem = removeTree(dir);
+    if (problem === undefined) {
+      problems.push(...removeOwnerMarker(dir));
+    } else {
+      problems.push(`golden: temporary folder ${dir} cannot be removed: ${problem}`);
+    }
+  }
+  return problems;
+}
+
+/** `removeTemporaryDirs` for a test hook: after every removal, a folder that stays throws. */
+export function cleanupTemporaryDirs(): void {
+  const problems = removeTemporaryDirs();
+  if (problems.length > 0) throw new Error(problems.join("\n"));
+}
+
+/** Remove the owner marker of `dir`; a problem line when it stays. */
+function removeOwnerMarker(dir: string): Array<string> {
+  try {
+    rmSync(`${dir}${OWNER_PID_SUFFIX}`, { force: true });
+    return [];
+  } catch (error) {
+    return [
+      `golden: owner marker ${dir}${OWNER_PID_SUFFIX} cannot be removed: ${errorMessage(error)}`,
+    ];
+  }
+}
+
+/** Run the exit sweep and print each folder that stays. */
+function reportTemporaryDirCleanup(): void {
+  for (const problem of removeTemporaryDirs()) console.error(problem);
 }
 
 function handleSigint(): void {
   try {
-    cleanupTemporaryDirs();
+    reportTemporaryDirCleanup();
   } finally {
     process.off("SIGINT", handleSigint);
     process.kill(process.pid, "SIGINT");
@@ -177,7 +260,7 @@ function handleSigint(): void {
 
 function handleSigterm(): void {
   try {
-    cleanupTemporaryDirs();
+    reportTemporaryDirCleanup();
   } finally {
     process.off("SIGTERM", handleSigterm);
     process.kill(process.pid, "SIGTERM");
@@ -185,7 +268,7 @@ function handleSigterm(): void {
 }
 
 sweepStaleTemporaryDirs();
-process.on("exit", cleanupTemporaryDirs);
+process.on("exit", reportTemporaryDirCleanup);
 process.on("SIGINT", handleSigint);
 process.on("SIGTERM", handleSigterm);
 
