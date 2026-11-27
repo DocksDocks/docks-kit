@@ -14,10 +14,14 @@
  *   talk       Build the `talk` extension into a copy of the plugin, start one omp as an RPC peer and drive a
  *              second omp in print mode, both with `tools.commands` off and a private registry folder. The fake
  *              model scripts the `talk` calls of each session. Prints `ok <name>` or `FAIL <name>: <reason>`.
+ *   talk-ui    Run omp in TUI mode in a pseudo-terminal beside an omp RPC peer, with the same talk plugin copy, and
+ *              drive `alt+t`, the compose and confirm views, the message card, and `/talk handover` with key
+ *              bytes. An omp older than 19.2.0 must show only the talk capability notice and no `/talk` command.
+ *              Prints `ok <name>` or `FAIL <name>: <reason>`.
  *
  * `--omp <binary>` runs that omp binary in place of `omp` from PATH, for every command.
  *
- * Usage: bun .agents/skills/verify/scripts/omp-smoke.ts [hooks|talk] [--repo <path>] [--omp <binary>]
+ * Usage: bun .agents/skills/verify/scripts/omp-smoke.ts [hooks|talk|talk-ui] [--repo <path>] [--omp <binary>]
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -76,7 +80,7 @@ const REAL_GATE_LOG = join(
   "docks",
   "verify-gate.jsonl",
 );
-const COMMANDS = ["hooks", "talk"];
+const COMMANDS = ["hooks", "talk", "talk-ui"];
 
 // ---------- JSON narrowing ----------
 
@@ -123,7 +127,7 @@ if (
   positionals.length > 1 ||
   (command !== null && !COMMANDS.includes(command))
 ) {
-  console.log("usage: omp-smoke.ts [hooks|talk] [--repo <path>] [--omp <binary>]");
+  console.log("usage: omp-smoke.ts [hooks|talk|talk-ui] [--repo <path>] [--omp <binary>]");
   process.exit(args.help === true ? 0 : 2);
 }
 // omp resolves the home folder from HOME only on Linux and macOS. On Windows the scratch home would not
@@ -149,8 +153,10 @@ const ompBinary =
 // ---------- process and scratch lifecycle ----------
 
 const children = new Set<ChildProcess>();
+/** The omp processes that run in a pseudo-terminal (the `talk-ui` mode). */
+const terminalChildren = new Set<Bun.Subprocess>();
 let scratch: string | null = null;
-/** The private registry folder of the talk mode. It lies outside the scratch folder; cleanup removes it too. */
+/** The private registry folder of a talk mode. It lies outside the scratch folder; cleanup removes it too. */
 let talkDir: string | null = null;
 let server: Server | null = null;
 
@@ -170,6 +176,8 @@ function removeFolder(path: string): boolean {
 function cleanup(): string[] {
   for (const child of children) child.kill("SIGKILL");
   children.clear();
+  for (const child of terminalChildren) child.kill("SIGKILL");
+  terminalChildren.clear();
   server?.closeAllConnections();
   server?.close();
   server = null;
@@ -281,13 +289,15 @@ interface ToolCall {
   readonly arguments: Readonly<Record<string, string>>;
 }
 type Turn = readonly ToolCall[] | ((request: JsonObject) => readonly ToolCall[]);
+/** The answer of the fake model to one request: tool calls, or a text; an empty list is a plain "ok" answer. */
+type Answer = readonly ToolCall[] | string;
 interface Script {
   turns: readonly Turn[];
   /**
-   * When set, answers every request in place of `turns`; an empty list is a plain "ok" answer. The answer can
-   * wait for the driver, so a turn of a session lasts until the driver has acted on another session.
+   * When set, answers every request in place of `turns`. The answer can wait for the driver, so a turn of a
+   * session lasts until the driver has acted on another session.
    */
-  respond?: (request: JsonObject) => Promise<readonly ToolCall[]>;
+  respond?: (request: JsonObject) => Promise<Answer>;
 }
 
 function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): string {
@@ -295,26 +305,23 @@ function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): stri
 }
 
 /**
- * The tool calls of the scripted turn for one request, or null for a plain "ok" answer.
+ * The answer of the scripted turn for one request: tool calls, or a text ("ok" when the turn has no call).
  * `script.turns[n]` answers a request that holds n assistant messages, unless `script.respond` is set.
  */
-async function scriptedCalls(
-  script: Script,
-  request: JsonObject,
-): Promise<readonly ToolCall[] | null> {
-  let calls: readonly ToolCall[] | undefined;
-  if (script.respond !== undefined) calls = await script.respond(request);
+async function scriptedAnswer(script: Script, request: JsonObject): Promise<Answer> {
+  let answer: Answer | undefined;
+  if (script.respond !== undefined) answer = await script.respond(request);
   else {
     const index = objects(request["messages"]).filter(
       (message) => message["role"] === "assistant",
     ).length;
     const turn = script.turns[index];
-    calls = typeof turn === "function" ? turn(request) : turn;
+    answer = typeof turn === "function" ? turn(request) : turn;
   }
-  return calls !== undefined && calls.length > 0 ? calls : null;
+  return answer === undefined || answer.length === 0 ? "ok" : answer;
 }
 
-/** Fake OpenAI-compatible model: records each request body and answers with the scripted tool calls, else with "ok" and a stop. */
+/** Fake OpenAI-compatible model: records each request body and answers with the scripted tool calls or text, else with "ok" and a stop. */
 function startFakeModel(requests: JsonObject[], script: Script): Promise<Server> {
   const fake = createServer((req, res) => {
     let body = "";
@@ -336,13 +343,13 @@ function startFakeModel(requests: JsonObject[], script: Script): Promise<Server>
       const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
       if (parsed["stream"] === true) {
         res.writeHead(200, { "content-type": "text/event-stream" });
-        void scriptedCalls(script, parsed)
-          .catch(() => null)
-          .then((calls) => {
+        void scriptedAnswer(script, parsed)
+          .catch((): Answer => "ok")
+          .then((answer) => {
             // Cleanup closes the connection of a turn that still waits.
             if (res.destroyed) return;
-            if (calls) {
-              const toolCalls = calls.map((call, index) => ({
+            if (typeof answer !== "string") {
+              const toolCalls = answer.map((call, index) => ({
                 index,
                 id: call.id,
                 type: "function",
@@ -362,7 +369,7 @@ function startFakeModel(requests: JsonObject[], script: Script): Promise<Server>
               res.write(
                 sseChunk(model, {
                   index: 0,
-                  delta: { role: "assistant", content: "ok" },
+                  delta: { role: "assistant", content: answer },
                   finish_reason: null,
                 }),
               );
@@ -1568,6 +1575,19 @@ async function startRpcOmp(
   return { send, close };
 }
 
+/**
+ * Makes the private registry folder (mode 0700) of a talk mode in the system temporary root, and keeps it for
+ * the cleanup. A wrong mode adds a failure.
+ */
+function privateRegistry(failures: string[]): string {
+  const registry = mkdtempSync(join(tmpdir(), TALK_DIR_PREFIX));
+  talkDir = registry;
+  const mode = statSync(registry).mode & PERMISSION_BITS;
+  if (mode !== PRIVATE_FOLDER_MODE)
+    failures.push(`the registry folder ${registry} has mode ${mode.toString(8)}, expected 700`);
+  return registry;
+}
+
 /** Whether `path` is a symbolic link; false when nothing is at `path`. */
 function isSymlink(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
@@ -1781,13 +1801,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     configYaml: TALK_CONFIG_YAML,
     pluginFolder: talkPluginCopy,
   });
-  const registry = mkdtempSync(join(tmpdir(), TALK_DIR_PREFIX));
-  talkDir = registry;
-  const mode = statSync(registry).mode & PERMISSION_BITS;
-  if (mode !== PRIVATE_FOLDER_MODE)
-    installFailures.push(
-      `the registry folder ${registry} has mode ${mode.toString(8)}, expected 700`,
-    );
+  const registry = privateRegistry(installFailures);
   results.set("install", installFailures.join("; "));
   if (installFailures.length > 0) return { lines: lines(), registry };
 
@@ -2130,14 +2144,599 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
   return { lines: lines(), registry };
 }
 
+// ---------- talk-ui ----------
+
+/** The model id of the omp in the pseudo-terminal. */
+const UI_MODEL_ID = "talk-ui";
+/** The talk config, and no first-run setup wizard (#251 F8), update check, or marketplace update. */
+const UI_CONFIG_YAML = `${TALK_CONFIG_YAML}startup:\n  setupWizard: false\n  checkUpdate: false\nmarketplace:\n  autoUpdate: "off"\n`;
+/** The first omp release with the reactive UI of talk (`OMP_VERSION_NEEDED` in `cli/talk/extension.ts`). */
+const UI_OMP_NEEDED = "19.2.0";
+const OMP_VERSION = /\bomp\/(\d+)\.(\d+)\.(\d+)\b/;
+/** The pseudo-terminal: wide enough for the card header with the scratch folder, and for the notice. */
+const TERMINAL_TYPE = "xterm-256color";
+const TERMINAL_COLUMNS = 240;
+const TERMINAL_ROWS = 50;
+/** The footer shows the name of the fake model when the session has started (#251 F8). */
+const UI_READY_TEXT = "omp smoke fake model";
+/** `alt+t` as `ESC t` in one write (#251 F2); a lone ESC becomes the Escape key after 20 ms. */
+const ALT_T_KEY = "\x1bt";
+const ENTER_KEY = "\r";
+const CTRL_S_KEY = "\x13";
+/** `ctrl+d` on an empty editor exits omp with code 0 (#251 F8). */
+const CTRL_D_KEY = "\x04";
+/** The title of the list view (`LIST_TITLE` in `cli/talk/ui/views.ts`). */
+const LIST_TITLE_TEXT = "talk sessions";
+/** The placeholder of the compose view (`composeView` in `cli/talk/ui/views.ts`). */
+const COMPOSE_PLACEHOLDER = "the message; ⏎ confirms the destination";
+/** The first line of the confirm view (`confirmLine` in `cli/talk/ui/views.ts`): the instance id and the code. */
+const CONFIRM_LINE = /Send to (\S+): type ([a-z])([a-z])/;
+const COMPOSED_TEXT = "talk-ui smoke: composed hello";
+/** The peer message of the card check: four lines, so the collapsed card hides one (#251 G5). */
+const CARD_LINES = [
+  "talk-ui card line 1",
+  "talk-ui card line 2",
+  "talk-ui card line 3",
+  "talk-ui card line 4",
+];
+/** The last row of a collapsed card that hides one line; omp's default card does not draw it. */
+const CARD_MORE = "… 1 more lines";
+/**
+ * The card header (`makeTalkCardRenderer` in `cli/talk/ui/card.ts`): the name and the folder are code spans
+ * (`literal`), then the local time.
+ */
+const CARD_HEADER = /talk message from `[^`\n]+` · `([^`\n]+)` · \d\d:\d\d/;
+/** The first line of the handover template (`HANDOVER_PROMPT` in `cli/talk/ui/handover.ts`). */
+const HANDOVER_PROMPT_TEXT = "Write a handover of the work in this session";
+/** The reply of the fake model to the handover side turn, and the text that the flow types before it. */
+const HANDOVER_DRAFT = "talk-ui smoke draft: run the next check.\nRisks: none.";
+const HANDOVER_EDIT = "edited ";
+const HANDOVER_KIND = "handover";
+/** The end of the capability notice (`capabilityNotice` in `cli/talk/extension.ts`). */
+const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the talk tool is off.`;
+const CAPABILITY_NOTICE_START = "talk: this omp has no ";
+/** A talk notice on the screen: `talk:` and the rest of its row. */
+const TALK_NOTICE = /talk: [^\n]*/g;
+/** A prompt with one of these markers makes the fake model of the RPC peer call `talk` once. */
+const PEER_LIST_MARKER = "SMOKE-LIST";
+const PEER_CARD_MARKER = "SMOKE-CARD";
+
+/** The checks of the talk-ui mode on omp 19.2.0 or later, in output order. */
+const UI_CHECKS = [
+  "install",
+  "ui-ready",
+  "ui-list",
+  "ui-compose-send",
+  "ui-card",
+  "ui-handover",
+  "extensions-loaded",
+  "sessions",
+  "isolated",
+  "real-state",
+] as const;
+/** The checks of the talk-ui mode on an omp older than 19.2.0 (#251 a8, #248 a11). */
+const OLD_OMP_CHECKS = [
+  "install",
+  "old-omp",
+  "old-notice",
+  "old-no-command",
+  "extensions-loaded",
+  "sessions",
+  "isolated",
+  "real-state",
+] as const;
+type UiCheck = (typeof UI_CHECKS)[number] | (typeof OLD_OMP_CHECKS)[number];
+
+const ESC = "\u001b";
+/** The final characters of the cursor moves CUP, HVP, CUD, CNL, CPL, CHA, and VPA. */
+const CURSOR_MOVE_FINALS = "HfBEFGd";
+/** The second characters of the ESC sequences that run to a string terminator: DCS, SOS, PM, APC, and OSC. */
+const STRING_SEQUENCE_KINDS = "P^_X]";
+
+/**
+ * Terminal output as screen text. A carriage return or a cursor move becomes a line break, so the text of two
+ * screen rows stays apart. Escape sequences (CSI, the string sequences, which OSC can also end with BEL, and
+ * the short ESC sequences) and the other control characters are removed.
+ */
+function screenText(raw: string): string {
+  const parts: string[] = [];
+  const within = (at: number, low: number, high: number): boolean => {
+    const code = raw.charCodeAt(at);
+    return code >= low && code <= high;
+  };
+  let start = 0;
+  let index = 0;
+  while (index < raw.length) {
+    const code = raw.charCodeAt(index);
+    if (code === 0x0a || (code >= 0x20 && code !== 0x7f)) {
+      index += 1;
+      continue;
+    }
+    parts.push(raw.slice(start, index));
+    const kind = raw.charAt(index + 1);
+    if (code === 0x0d) {
+      parts.push("\n");
+      index += kind === "\n" ? 2 : 1;
+    } else if (code !== 0x1b) index += 1;
+    else if (kind === "[") {
+      let end = index + 2;
+      while (within(end, 0x30, 0x3f)) end += 1;
+      while (within(end, 0x20, 0x2f)) end += 1;
+      if (end < raw.length && CURSOR_MOVE_FINALS.includes(raw.charAt(end))) parts.push("\n");
+      index = end + 1;
+    } else if (kind !== "" && STRING_SEQUENCE_KINDS.includes(kind)) {
+      const terminator = raw.indexOf(`${ESC}\\`, index + 2);
+      const bell = kind === "]" ? raw.indexOf("\u0007", index + 2) : -1;
+      const ends = [terminator === -1 ? raw.length : terminator + 2];
+      if (bell !== -1) ends.push(bell + 1);
+      index = Math.min(...ends);
+    } else {
+      let end = index + 1;
+      while (within(end, 0x20, 0x2f)) end += 1;
+      index = end + 1;
+    }
+    start = index;
+  }
+  parts.push(raw.slice(start));
+  return parts.join("");
+}
+
+/** Whether the version in an `omp/<x>.<y>.<z>` match comes before `needed`. */
+function olderThan(version: RegExpExecArray, needed: string): boolean {
+  const have = version.slice(1, 4).map(Number);
+  const want = needed.split(".").map(Number);
+  for (const [index, part] of want.entries()) {
+    const own = have[index] ?? 0;
+    if (own !== part) return own < part;
+  }
+  return false;
+}
+
+/**
+ * omp in TUI mode in a pseudo-terminal (#251 F8). The driver writes key bytes and waits for screen text after
+ * a mark that it takes before the key. omp repaints by diff, so a search from an older mark could match a
+ * stale frame.
+ */
+class TerminalOmp {
+  readonly #argv: readonly string[];
+  readonly #process: Bun.Subprocess;
+  readonly #decoder = new TextDecoder();
+  #raw = "";
+  #waiters: Array<() => void> = [];
+
+  constructor(argv: readonly string[], cwd: string, env: Record<string, string>) {
+    this.#argv = argv;
+    const child = Bun.spawn([ompBinary, ...argv], {
+      cwd,
+      env,
+      terminal: {
+        cols: TERMINAL_COLUMNS,
+        rows: TERMINAL_ROWS,
+        name: TERMINAL_TYPE,
+        data: (_terminal, data) => {
+          this.#raw += this.#decoder.decode(data, { stream: true });
+          for (const wake of this.#waiters.splice(0)) wake();
+        },
+      },
+    });
+    this.#process = child;
+    terminalChildren.add(child);
+    void child.exited.then(() => terminalChildren.delete(child));
+  }
+
+  /** A position in the output; `waitFor` searches the output after it. */
+  mark(): number {
+    return this.#raw.length;
+  }
+
+  /** The screen text after the mark `from`. */
+  text(from = 0): string {
+    return screenText(this.#raw.slice(from));
+  }
+
+  write(bytes: string): void {
+    if (this.#process.terminal === undefined) failStep("the omp process has no terminal");
+    this.#process.terminal.write(bytes);
+  }
+
+  /** The first match of `pattern` in the screen text after `from`; fails when none shows in time. */
+  async waitFor(pattern: RegExp | string, from: number, what: string): Promise<RegExpExecArray> {
+    const search =
+      typeof pattern === "string"
+        ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"))
+        : pattern;
+    const deadline = Date.now() + STEP_TIMEOUT_MS;
+    for (;;) {
+      const shown = this.text(from);
+      const match = search.exec(shown);
+      if (match !== null) return match;
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        const tail = shown.replace(/\s+/g, " ").trim().slice(-300);
+        failStep(`the screen shows no ${what} within ${STEP_TIMEOUT_MS / 1_000} s; it ends: ${tail}`);
+      }
+      await this.#nextOutput(left);
+    }
+  }
+
+  /** Resolves on the next output, or after `ms`. */
+  #nextOutput(ms: number): Promise<void> {
+    const { promise, resolve: wake } = Promise.withResolvers<void>();
+    const timer = setTimeout(wake, ms);
+    this.#waiters.push(() => {
+      clearTimeout(timer);
+      wake();
+    });
+    return promise;
+  }
+
+  /** Writes `ctrl+d` and waits for the exit; SIGKILL when omp does not exit in time. The screen text is `stderr`. */
+  async close(): Promise<OmpResult> {
+    if (this.#process.exitCode === null) this.write(CTRL_D_KEY);
+    const code = await withTimeout(this.#process.exited, PEER_CLOSE_MS, "the exit").catch(
+      (): "timeout" => {
+        this.#process.kill("SIGKILL");
+        return "timeout";
+      },
+    );
+    return { argv: this.#argv, code, stdout: "", stderr: this.text() };
+  }
+}
+
+/** One `talk` call of the RPC peer that the driver waits for. */
+interface MarkedCall {
+  readonly marker: string;
+  readonly call: ToolCall;
+  readonly result: Deferred<string>;
+  issued: boolean;
+}
+
+/**
+ * The fake model of the RPC peer in the talk-ui mode: the turn of a prompt with the marker of the expected
+ * call makes that `talk` call, and the driver gets its tool result. Every other turn answers "ok".
+ */
+class PeerCalls {
+  #pending: MarkedCall | null = null;
+  #count = 0;
+
+  /** Makes the turn of the next prompt with `marker` call `talk` with `toolArgs`; gives its tool result. */
+  expect(marker: string, toolArgs: Readonly<Record<string, string>>): Promise<string> {
+    this.#count += 1;
+    const result = Promise.withResolvers<string>();
+    this.#pending = {
+      marker,
+      call: { id: `peer-${this.#count}`, name: TALK_TOOL, arguments: toolArgs },
+      result,
+      issued: false,
+    };
+    return withTimeout(
+      result.promise,
+      STEP_TIMEOUT_MS,
+      `the ${toolArgs["action"] ?? TALK_TOOL} call of the peer`,
+    );
+  }
+
+  async respond(request: JsonObject): Promise<Answer> {
+    const pending = this.#pending;
+    if (pending === null) return [];
+    if (!pending.issued) {
+      if (newUserText(request)?.includes(pending.marker) !== true) return [];
+      pending.issued = true;
+      return [pending.call];
+    }
+    const result = toolResultText(request, pending.call.id);
+    if (result !== undefined) {
+      this.#pending = null;
+      pending.result.resolve(result);
+    }
+    return [];
+  }
+}
+
+/**
+ * The talk-ui mode (#251 G8): omp in TUI mode in a pseudo-terminal beside an omp RPC peer, both with the talk
+ * plugin copy and a private registry folder. On an omp older than 19.2.0, the TUI omp must show the one
+ * capability notice and have no `/talk` command (#251 a8).
+ */
+async function talkUiMode(): Promise<{ lines: string[]; registry: string | null }> {
+  const results = new Map<UiCheck, string>();
+  let checks: readonly UiCheck[] = UI_CHECKS;
+  const lines = (): string[] =>
+    checks.map((name) => {
+      const problem = results.get(name);
+      if (problem === undefined) return `FAIL ${name}: not run, because an earlier check failed`;
+      return problem ? `FAIL ${name}: ${problem}` : `ok ${name}`;
+    });
+  if (!existsSync(pluginDir)) {
+    results.set("install", `plugin folder ${pluginDir} does not exist`);
+    return { lines: lines(), registry: null };
+  }
+  const realBefore = realStateSnapshot();
+  const installFailures: string[] = [];
+  const run = await install(installFailures, {
+    modelIds: [PEER_MODEL_ID, UI_MODEL_ID],
+    configYaml: UI_CONFIG_YAML,
+    pluginFolder: talkPluginCopy,
+  });
+  const registry = privateRegistry(installFailures);
+  // The version decides the flow: omp before 19.2.0 has no reactive UI, so talk only shows its notice.
+  const versionText = (await run.omp(["--version"])).stdout;
+  const version = OMP_VERSION.exec(versionText);
+  if (version === null) installFailures.push(`omp --version names no version: ${short(versionText)}`);
+  else if (olderThan(version, UI_OMP_NEEDED)) checks = OLD_OMP_CHECKS;
+  results.set("install", installFailures.join("; "));
+  if (installFailures.length > 0) return { lines: lines(), registry };
+
+  const env: Record<string, string> = {
+    ...run.env,
+    [TALK_DIR_ENV]: registry,
+    TERM: TERMINAL_TYPE,
+  };
+  const peerCalls = new PeerCalls();
+  run.script.respond = async (request) => {
+    if (request["model"] === PEER_MODEL_ID) return peerCalls.respond(request);
+    if (request["model"] !== UI_MODEL_ID) return [];
+    // The handover side turn gets the draft; every other turn of the TUI omp answers "ok".
+    return newUserText(request)?.includes(HANDOVER_PROMPT_TEXT) === true ? HANDOVER_DRAFT : [];
+  };
+
+  let step: UiCheck = checks[1] ?? "install";
+  const pass = (): void => {
+    results.set(step, "");
+  };
+  let terminal: TerminalOmp | null = null;
+  let terminalResult: OmpResult | null = null;
+  let peer: RpcPeer | null = null;
+
+  /** omp before 19.2.0: one capability notice, no load error, and no `/talk` command. */
+  const oldOmpFlow = async (screen: TerminalOmp): Promise<void> => {
+    // `old-omp`: `omp --version` names a version before 19.2.0, and the TUI omp started.
+    pass();
+
+    step = "old-notice";
+    await screen.waitFor(CAPABILITY_NOTICE_END, 0, "talk notice that names omp 19.2.0");
+    const notices = new Set(
+      [...screen.text().matchAll(TALK_NOTICE)].map((match) => match[0].trim()),
+    );
+    const others = [...notices].filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START));
+    if (others.length > 0) failStep(`the screen shows other talk notices: ${others.join(" | ")}`);
+    const capability = [...notices].filter((notice) => notice.includes(CAPABILITY_NOTICE_END));
+    if (capability.length !== 1)
+      failStep(`the screen shows ${capability.length} different capability notices`);
+    pass();
+
+    // omp gives a line that names no command to the model as a prompt.
+    step = "old-no-command";
+    const typed = screen.mark();
+    screen.write("/talk");
+    await screen.waitFor("/talk", typed, "typed /talk");
+    screen.write(ENTER_KEY);
+    const deadline = Date.now() + STEP_TIMEOUT_MS;
+    while (
+      !run.requests.some(
+        (request) =>
+          request["model"] === UI_MODEL_ID && newUserText(request)?.includes("/talk") === true,
+      )
+    ) {
+      if (Date.now() > deadline)
+        failStep(`omp did not give /talk to the model within ${STEP_TIMEOUT_MS / 1_000} s`);
+      await sleep(POLL_MS);
+    }
+    // The turn of the `/talk` prompt ends with the "ok" answer before ctrl+d can exit omp.
+    await screen.waitFor(/\bok\b/, typed, "answer to the /talk prompt");
+    pass();
+  };
+
+  /** omp 19.2.0 or later: the list, compose and confirm, the card, and handover (#251 G8). */
+  const currentFlow = async (screen: TerminalOmp, rpc: RpcPeer): Promise<void> => {
+    const peerState = async (): Promise<JsonObject> => {
+      const data = await rpc.send({ type: "get_state" });
+      return isObject(data) ? data : {};
+    };
+    const waitFor = async (what: string, probe: () => Promise<boolean>): Promise<void> => {
+      const deadline = Date.now() + STEP_TIMEOUT_MS;
+      while (!(await probe())) {
+        if (Date.now() > deadline) failStep(`no ${what} within ${STEP_TIMEOUT_MS / 1_000} s`);
+        await sleep(POLL_MS);
+      }
+    };
+    const waitPeerIdle = (): Promise<void> =>
+      waitFor("idle peer", async () => (await peerState())["isStreaming"] === false);
+    /** One prompt of the peer whose turn makes the expected `talk` call; gives its tool result. */
+    const peerCall = async (
+      marker: string,
+      toolArgs: Readonly<Record<string, string>>,
+    ): Promise<string> => {
+      const result = peerCalls.expect(marker, toolArgs);
+      result.catch(() => undefined);
+      await rpc.send({ type: "prompt", message: `${marker}: do the scripted step.` });
+      const output = await result;
+      await waitPeerIdle();
+      return output;
+    };
+    /** Waits until the peer session holds a talk entry that `matches`, and then until the peer is idle. */
+    const peerTalkEntry = async (
+      what: string,
+      matches: (entry: JsonObject) => boolean,
+    ): Promise<void> => {
+      await waitFor(what, async () =>
+        checkedEntries(await rpc.send({ type: "get_entries" })).entries.some(
+          (entry) =>
+            entry["type"] === "custom_message" &&
+            entry["customType"] === TALK_ENTRY_TYPE &&
+            matches(entry),
+        ),
+      );
+      await waitPeerIdle();
+    };
+    /** Reads the code from the confirm line, checks the instance id, and types the code as two key presses. */
+    const confirm = async (from: number, instance: string, kind: string): Promise<void> => {
+      const line = await screen.waitFor(CONFIRM_LINE, from, "confirm line");
+      const [, shownInstance = "", first = "", second = ""] = line;
+      if (shownInstance !== instance)
+        failStep(`the confirm line names ${shownInstance}, expected the peer instance ${instance}`);
+      await screen.waitFor(`Kind: ${kind}`, from, `kind ${kind} in the confirm view`);
+      const typed = screen.mark();
+      screen.write(first);
+      await screen.waitFor(`Typed: ${first}_`, typed, "first typed code letter");
+      screen.write(second);
+    };
+
+    // The peer lists until it sees the TUI omp; its own row gives the peer instance id.
+    let uiInstance: string | undefined;
+    let peerInstance: string | undefined;
+    for (let attempt = 1; uiInstance === undefined; attempt += 1) {
+      const listing = await peerCall(PEER_LIST_MARKER, { action: "list" });
+      const sessions = listedSessions(listing);
+      const others = sessions.filter((session) => !session.own);
+      if (others.length > 1) failStep(`the peer lists more than one other session: ${short(listing)}`);
+      const own = sessions.find((session) => session.own);
+      if (own !== undefined && others[0] !== undefined) {
+        peerInstance = own.instance;
+        uiInstance = others[0].instance;
+      } else if (attempt >= LIST_ATTEMPTS)
+        failStep(`${attempt} lists of the peer show no other session: ${short(listing)}`);
+      else await sleep(LIST_RETRY_MS);
+    }
+    if (peerInstance === undefined) return failStep("the peer list has no own row");
+    pass();
+
+    step = "ui-list";
+    const listed = screen.mark();
+    screen.write(ALT_T_KEY);
+    await screen.waitFor(LIST_TITLE_TEXT, listed, "list title");
+    await screen.waitFor(peerInstance, listed, `peer row with the instance id ${peerInstance}`);
+    pass();
+
+    step = "ui-compose-send";
+    const composing = screen.mark();
+    screen.write(ENTER_KEY);
+    await screen.waitFor(COMPOSE_PLACEHOLDER, composing, "compose view");
+    const typing = screen.mark();
+    screen.write(COMPOSED_TEXT);
+    await screen.waitFor(COMPOSED_TEXT, typing, "typed message");
+    const confirming = screen.mark();
+    screen.write(ENTER_KEY);
+    await confirm(confirming, peerInstance, "message");
+    await peerTalkEntry(
+      "talk entry with the composed message",
+      (entry) => text(entry["content"])?.includes(COMPOSED_TEXT) === true,
+    );
+    pass();
+
+    step = "ui-card";
+    const carded = screen.mark();
+    const cardResult = await peerCall(PEER_CARD_MARKER, {
+      action: "send",
+      instance: uiInstance,
+      message: CARD_LINES.join("\n"),
+    });
+    if (!cardResult.includes("Delivered:"))
+      failStep(`the send of the peer did not read Delivered: ${short(cardResult)}`);
+    const header = await screen.waitFor(CARD_HEADER, carded, "card header");
+    const folders = new Set([run.workDir, realpathSync(run.workDir)]);
+    if (!folders.has(header[1] ?? ""))
+      failStep(`the card header names the folder ${header[1]}, expected ${run.workDir}`);
+    for (const line of CARD_LINES.slice(0, 3))
+      await screen.waitFor(line, carded, `card line ${JSON.stringify(line)}`);
+    await screen.waitFor(CARD_MORE, carded, `card row ${JSON.stringify(CARD_MORE)}`);
+    const hidden = CARD_LINES[3] ?? "";
+    if (screen.text(carded).includes(hidden))
+      failStep(`the collapsed card shows its fourth line ${JSON.stringify(hidden)}`);
+    pass();
+
+    step = "ui-handover";
+    const sessionId =
+      text((await peerState())["sessionId"]) ?? failStep("RPC get_state gives no sessionId");
+    const commandText = `/talk handover ${sessionId}`;
+    const commanded = screen.mark();
+    screen.write(commandText);
+    await screen.waitFor(commandText, commanded, "typed handover command");
+    const started = screen.mark();
+    screen.write(ENTER_KEY);
+    const [draftFirst = ""] = HANDOVER_DRAFT.split("\n");
+    await screen.waitFor(draftFirst, started, "side-turn draft in the review");
+    const editing = screen.mark();
+    screen.write(HANDOVER_EDIT);
+    await screen.waitFor(`${HANDOVER_EDIT}${draftFirst}`, editing, "edited draft");
+    const approving = screen.mark();
+    screen.write(CTRL_S_KEY);
+    await confirm(approving, peerInstance, HANDOVER_KIND);
+    const edited = `${HANDOVER_EDIT}${HANDOVER_DRAFT}`;
+    await peerTalkEntry(`talk entry of kind ${HANDOVER_KIND} with the edited draft`, (entry) => {
+      const details = entry["details"];
+      return (
+        isObject(details) &&
+        details["kind"] === HANDOVER_KIND &&
+        text(entry["content"])?.includes(edited) === true
+      );
+    });
+    pass();
+  };
+
+  try {
+    const screen = new TerminalOmp(
+      ["--model", `${MODEL_PROVIDER}/${UI_MODEL_ID}`, "--no-title"],
+      run.workDir,
+      env,
+    );
+    terminal = screen;
+    // `step` is the first check after `install`: the TUI omp must start. The peer starts only after it, so
+    // the two omp processes do not set up the fresh state folder at the same time.
+    await screen.waitFor(UI_READY_TEXT, 0, "footer with the model name");
+    if (checks === OLD_OMP_CHECKS) await oldOmpFlow(screen);
+    else {
+      peer = await startRpcOmp(
+        ["--mode", "rpc", "--model", `${MODEL_PROVIDER}/${PEER_MODEL_ID}`, "--no-title"],
+        run.workDir,
+        env,
+      );
+      await currentFlow(screen, peer);
+    }
+    terminalResult = await screen.close();
+  } catch (error) {
+    results.set(step, error instanceof Error ? error.message : String(error));
+  }
+
+  if (terminal !== null && terminalResult === null) terminalResult = await terminal.close();
+  const peerResult = peer === null ? null : await peer.close();
+  const sessionFailures: string[] = [];
+  const sessions: Array<readonly [string, OmpResult | null]> = [["TUI", terminalResult]];
+  if (checks === UI_CHECKS) sessions.push(["peer", peerResult]);
+  for (const [name, result] of sessions) {
+    if (result === null) sessionFailures.push(`the ${name} omp did not run`);
+    else if (result.code !== 0)
+      sessionFailures.push(
+        `the ${name} omp exited ${result.code}: ${short(result.stderr.slice(-600))}`,
+      );
+  }
+  for (const result of [terminalResult, peerResult]) if (result !== null) run.results.push(result);
+  const warnings = countWarnings(
+    [],
+    run.results,
+    run.isolation.stateDir,
+    pluginMarkers(run.plugin),
+  );
+  results.set(
+    "extensions-loaded",
+    warnings.length > 0
+      ? `omp reported ${warnings.length} warning(s) about the plugin: ${warnings.join(" | ")}`
+      : "",
+  );
+  results.set("sessions", sessionFailures.join("; "));
+  results.set("isolated", isolationProblems(run).join("; "));
+  results.set("real-state", realStateChanges(realBefore).join("; "));
+  return { lines: lines(), registry };
+}
+
 let exitCode = 1;
 try {
   if (command === "hooks") {
     const checks = await hooks();
     for (const line of checks) console.log(line);
     exitCode = checks.some((line) => line.startsWith("FAIL")) ? 1 : 0;
-  } else if (command === "talk") {
-    const talk = await talkMode();
+  } else if (command === "talk" || command === "talk-ui") {
+    const talk = command === "talk" ? await talkMode() : await talkUiMode();
     for (const line of talk.lines) console.log(line);
     // The registry folder lies outside the scratch folder, so the check runs after the cleanup.
     const removed = reportCleanup();
