@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   decodeAttribution,
   decodeFinal,
-  timeoutScanChoice,
+  sessionRegistryChecks,
 } from "../../../.agents/skills/verify/scripts/smokeScan.ts";
 
 /** A valid instance id: 16 lowercase hex digits. */
@@ -54,12 +54,57 @@ describe("decodeFinal", () => {
   });
 });
 
-describe("timeoutScanChoice", () => {
-  it("starts a fresh scan when the final scan ended", () => {
-    expect(timeoutScanChoice(true)).toBe("fresh");
+describe("sessionRegistryChecks", () => {
+  /** A fake scan that gives the next problem of `problems` on each call. */
+  const fakeScan = (...problems: string[]) => {
+    const queue = [...problems];
+    return vi.fn(() => Promise.resolve(queue.shift() ?? ""));
+  };
+
+  it("runs a fresh scan at the timeout after the final scan ended, and reports its leak", async () => {
+    const scanFinal = fakeScan("", "leak");
+    const checks = sessionRegistryChecks({ attribution: Promise.resolve(""), scanFinal });
+    expect(await checks.finalAnswer()).toBe("");
+    expect(await checks.timeout()).toBe("leak");
+    expect(scanFinal).toHaveBeenCalledTimes(2);
+    expect(await checks.problem()).toBe("leak");
   });
 
-  it("reuses the final scan when it did not end", () => {
-    expect(timeoutScanChoice(false)).toBe("reuse");
+  it("reuses a final scan that did not end at the timeout", async () => {
+    const pending = Promise.withResolvers<string>();
+    const scanFinal = vi.fn(() => pending.promise);
+    const checks = sessionRegistryChecks({ attribution: Promise.resolve(""), scanFinal });
+    const final = checks.finalAnswer();
+    const atTimeout = checks.timeout();
+    expect(atTimeout).toBe(final);
+    expect(scanFinal).toHaveBeenCalledTimes(1);
+    pending.resolve("leak");
+    expect(await checks.problem()).toBe("leak");
+  });
+
+  it("starts the final scan at the timeout when no final answer came", async () => {
+    const scanFinal = fakeScan("leak");
+    const checks = sessionRegistryChecks({ attribution: Promise.resolve(""), scanFinal });
+    expect(await checks.timeout()).toBe("leak");
+    expect(scanFinal).toHaveBeenCalledTimes(1);
+    expect(await checks.problem()).toBe("leak");
+  });
+
+  it("keeps the problems of the attribution and of both scans, without exact duplicates", async () => {
+    const distinct = sessionRegistryChecks({
+      attribution: Promise.resolve("attribution"),
+      scanFinal: fakeScan("first", "second"),
+    });
+    await distinct.finalAnswer();
+    await distinct.timeout();
+    expect(await distinct.problem()).toBe("attribution; first; second");
+
+    const repeated = sessionRegistryChecks({
+      attribution: Promise.resolve(""),
+      scanFinal: fakeScan("leak", "leak"),
+    });
+    await repeated.finalAnswer();
+    await repeated.timeout();
+    expect(await repeated.problem()).toBe("leak");
   });
 });

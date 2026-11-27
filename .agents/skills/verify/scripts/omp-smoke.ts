@@ -74,7 +74,8 @@ import {
   type Attribution,
   decodeAttribution,
   decodeFinal,
-  timeoutScanChoice,
+  type SessionRegistryChecks,
+  sessionRegistryChecks,
 } from "./smokeScan.ts";
 
 /** The `name` of the kit plugin package, and of its npm row in `omp plugin list --json`. */
@@ -1142,12 +1143,11 @@ async function attributionProblem(checks: readonly Promise<string>[]): Promise<s
 }
 
 /**
- * The registry checks of one `omp -p` session of the load mode or the `hooks` mode. `onSpawn` starts the
- * attribution, and the fake model holds each answer until it ends. The final scan of the default folder runs
- * while the session is live: the fake model holds the text answer that ends the session until it ends. At the
- * command timeout (`beforeTimeoutKill`), a session without that scan gets it; a session that is still live after
- * its final scan ended gets a fresh scan, because it can have written an entry since. `problem` gives the
- * problems of all checks after the session, or an empty text.
+ * The registry checks of one `omp -p` session of the load mode or the `hooks` mode (`sessionRegistryChecks`).
+ * `onSpawn` starts the attribution, and the fake model holds each answer until it ends. The fake model holds the
+ * text answer that ends the session until the final scan of the default folder ends, and the command timeout
+ * (`beforeTimeoutKill`) uses the timeout hook. `problem` gives the problems of all checks after the session, or
+ * an empty text.
  */
 function printSessionRegistry(
   run: Run,
@@ -1158,41 +1158,24 @@ function printSessionRegistry(
   beforeTimeoutKill: () => Promise<string>;
   problem: () => Promise<string>;
 } {
-  let attribution = Promise.resolve(`${label}: the omp session did not start`);
-  let processId: number | undefined;
-  let final: Promise<string> | undefined;
-  let finalEnded = false;
-  let timeoutScan: Promise<string> | undefined;
-  const scanDefault = (): Promise<string> =>
-    processId === undefined
-      ? Promise.resolve("")
-      : finalLeakProblem(run, [{ label, registration: { processId, cwd } }]);
-  const finalScan = (): Promise<string> => {
-    if (final === undefined) {
-      final = scanDefault();
-      void final.then(() => {
-        finalEnded = true;
-      });
-    }
-    return final;
-  };
+  let checks: SessionRegistryChecks | undefined;
   return {
     onSpawn: (pid) => {
-      processId = pid;
-      attribution = sessionAttribution(run, label, pid, cwd);
-      run.script.hold = attribution;
-      run.script.final = finalScan;
+      checks = sessionRegistryChecks({
+        attribution: sessionAttribution(run, label, pid, cwd),
+        scanFinal: () =>
+          pid === undefined
+            ? Promise.resolve("")
+            : finalLeakProblem(run, [{ label, registration: { processId: pid, cwd } }]),
+      });
+      run.script.hold = checks.attribution;
+      run.script.final = checks.finalAnswer;
     },
-    beforeTimeoutKill: () => {
-      if (timeoutScanChoice(finalEnded) === "reuse") return finalScan();
-      timeoutScan = scanDefault();
-      return timeoutScan;
-    },
+    beforeTimeoutKill: () => checks?.timeout() ?? Promise.resolve(""),
     problem: async () => {
       run.script.hold = undefined;
       run.script.final = undefined;
-      const problems = [await attribution, await (final ?? ""), await (timeoutScan ?? "")];
-      return [...new Set(problems.filter(Boolean))].join("; ");
+      return checks === undefined ? `${label}: the omp session did not start` : checks.problem();
     },
   };
 }

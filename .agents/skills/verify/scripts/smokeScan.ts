@@ -1,7 +1,7 @@
 /**
- * The pure decisions of the registry scans of `omp-smoke.ts`: the decoders of the replies of the scan child, and
- * the choice that the command timeout of a print session makes about its final scan. The module uses no Bun API
- * and has no side effect at import, so unit tests can load it (`cli/test/unit/verifySmokeScan.test.ts`).
+ * The pure parts of the registry checks of `omp-smoke.ts`: the decoders of the replies of the scan child, and the
+ * check state of one print session, with its final-answer hook and its command-timeout hook. The module uses no
+ * Bun API and has no side effect at import, so unit tests can load it (`cli/test/unit/verifySmokeScan.test.ts`).
  */
 import { Schema } from "effect";
 
@@ -42,11 +42,53 @@ export function decodeFinal(reply: ScanReply): string | undefined {
     : undefined;
 }
 
+/** The registry checks of one print session of the load mode or the `hooks` mode. */
+export interface SessionRegistryChecks {
+  /** The attribution of the session; the fake model holds each answer until it ends. */
+  readonly attribution: Promise<string>;
+  /** The final-answer hook: starts the final scan of the default folder once, and gives it. */
+  readonly finalAnswer: () => Promise<string>;
+  /**
+   * The command-timeout hook, while the session is still live. When the final scan did not end yet, it gives that
+   * scan (and starts it when none started). When the final scan ended, it starts a fresh scan, because the session
+   * can have written an entry since.
+   */
+  readonly timeout: () => Promise<string>;
+  /** The problems of the attribution and of each scan, without exact duplicates, or an empty text. */
+  readonly problem: () => Promise<string>;
+}
+
 /**
- * What the command timeout of a live print session does about its final scan: `"reuse"` the final scan when it
- * did not end yet (it starts the final scan when none started), or start a `"fresh"` scan when the final scan
- * ended, because the session can have written an entry since.
+ * The check state of one print session. `scanFinal` runs one bounded scan of the default folder for the session
+ * and gives its problem, or an empty text.
  */
-export function timeoutScanChoice(finalScanEnded: boolean): "reuse" | "fresh" {
-  return finalScanEnded ? "fresh" : "reuse";
+export function sessionRegistryChecks(options: {
+  readonly attribution: Promise<string>;
+  readonly scanFinal: () => Promise<string>;
+}): SessionRegistryChecks {
+  let final: Promise<string> | undefined;
+  let finalEnded = false;
+  let timeoutScan: Promise<string> | undefined;
+  const finalAnswer = (): Promise<string> => {
+    if (final === undefined) {
+      final = options.scanFinal();
+      void final.then(() => {
+        finalEnded = true;
+      });
+    }
+    return final;
+  };
+  return {
+    attribution: options.attribution,
+    finalAnswer,
+    timeout: () => {
+      if (!finalEnded) return finalAnswer();
+      timeoutScan = options.scanFinal();
+      return timeoutScan;
+    },
+    problem: async () => {
+      const problems = [await options.attribution, await (final ?? ""), await (timeoutScan ?? "")];
+      return [...new Set(problems.filter(Boolean))].join("; ");
+    },
+  };
 }
