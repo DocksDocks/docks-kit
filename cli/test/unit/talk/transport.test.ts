@@ -2072,11 +2072,14 @@ describe("talk transport between spawned Bun peers", () => {
               ).toMatchObject(ended);
               expect(yield* promised(() => b.send("probe", { target }))).toMatchObject(ended);
               yield* promised(() => waitFor(() => gauge.open === 0, SETTLE_MS, "the closes of B"));
-              // Eight probes of this client keep every slot on the silent socket; the test clock
-              // holds their deadline while the test looks.
+              // A batch of eight probes of this client keeps every slot on the silent socket; the
+              // test clock holds their deadline while the test looks. The batch reads the socket
+              // names once (on macOS that read waits for an `ls -led` child), so all eight probes
+              // take their slots in the same turn, before the process-id route of any probe can
+              // dial the rebound listener.
               const before = silent.accepted();
-              const probes = yield* Effect.forEach(Array.from({ length: DIAL_SLOTS }), () =>
-                Effect.forkChild(Effect.flip(probeOne(client, target))),
+              const probes = yield* Effect.forkChild(
+                client.probeAll(Array.from({ length: DIAL_SLOTS }, () => target)),
               );
               yield* promised(() =>
                 waitFor(() => gauge.open === DIAL_SLOTS, SETTLE_MS, "eight silent dials"),
@@ -2085,10 +2088,12 @@ describe("talk transport between spawned Bun peers", () => {
               expect(silent.accepted() - before).toBe(DIAL_SLOTS);
               expect((yield* promised(() => status(r))).unauthenticated).toBe(0);
               yield* TestClock.adjust(TRANSPORT_DEFAULTS.probeTimeoutMs);
-              const failures = yield* Effect.forEach(probes, Fiber.join);
-              expect(failures.map((failure) => failure.outcome)).toEqual(
-                Array.from({ length: DIAL_SLOTS }, () => "timeout"),
-              );
+              const results = yield* Fiber.join(probes);
+              expect(
+                results.map((result) =>
+                  result._tag === "Failure" ? result.failure.outcome : "answered",
+                ),
+              ).toEqual(Array.from({ length: DIAL_SLOTS }, () => "timeout"));
               // With free slots, the same client gets the proof of the end.
               expect((yield* Effect.flip(probeOne(client, target))).outcome).toBe("not-live");
             }),
