@@ -2386,6 +2386,7 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
       const folder = join(base, "reg-lookup");
       const owner = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
       const prober = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
+      let loosened = false;
       try {
         const registered = await owner.facade.register({
           sessionId: "s-lookup",
@@ -2398,6 +2399,7 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
         const absent = { instanceId: "00000000000000fe", sessionId: "none" };
         expect(await prober.facade.probeAll([absent])).toEqual(["not-found"]);
         chmodSync(folder, 0o755);
+        loosened = true;
         const reasons: Array<string> = [];
         const results = await prober.facade.probeAll(
           [registration],
@@ -2411,9 +2413,12 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
         expect(reasons).toHaveLength(1);
         expect(reasons[0]).toMatch(/entry lookup failed.*0755/u);
       } finally {
-        chmodSync(folder, 0o700);
-        await prober.dispose();
-        await owner.dispose();
+        // Restore the mode only when the test changed it; both disposals run even if that fails.
+        try {
+          if (loosened) chmodSync(folder, 0o700);
+        } finally {
+          await Promise.allSettled([prober.dispose(), owner.dispose()]);
+        }
       }
     },
   );
@@ -3580,7 +3585,7 @@ describe("handover action of the talk tool (#260)", () => {
       expect(handover.alpha.notices).toEqual([]);
     });
 
-    it("tells the user to check the one session that did not answer and to run list again", async () => {
+    it("tells the user to check the one session that did not answer and to run list again, with its instance id", async () => {
       const handover = await sessions();
       const slow = network.addForeign("slow", "s-slow", "timeout");
       await refuses(
@@ -3588,10 +3593,31 @@ describe("handover action of the talk tool (#260)", () => {
         { to: "slow" },
         `talk: ${literal("slow")} did not answer a probe (timeout). Nothing was sent. Check that session, then run the action list again:\n` +
           `- ${literal("slow")} (session ${literal("s-slow")}): instance ${slow.instanceId}, timeout`,
-        { outcome: "timeout" },
+        { instanceId: slow.instanceId, outcome: "timeout" },
       );
       expect(handover.alpha.notices).toEqual([]);
     });
+
+    it.each([
+      ["no session answered", "timeout", "unreachable"],
+      ["only one of two sessions answered", "ok", "timeout"],
+    ] as const)(
+      "tells the user to check the listed sessions and to run list again when %s",
+      async (_name, first, second) => {
+        const handover = await sessions();
+        const one = network.addForeign("pair", "s-pair-1", first);
+        const two = network.addForeign("pair", "s-pair-2", second);
+        const shown = { ok: "answered", timeout: "timeout", unreachable: "unreachable" };
+        await refuses(
+          handover,
+          { to: "pair" },
+          `talk: ${literal("pair")} names sessions that did not answer a probe. Nothing was sent. Check the listed sessions, then run the action list again:\n` +
+            `- ${literal("pair")} (session ${literal("s-pair-1")}): instance ${one.instanceId}, ${shown[first]}\n` +
+            `- ${literal("pair")} (session ${literal("s-pair-2")}): instance ${two.instanceId}, ${shown[second]}`,
+        );
+        expect(handover.alpha.notices).toEqual([]);
+      },
+    );
 
     it("refuses a to that resolves to no session", async () => {
       await refuses(
@@ -3729,19 +3755,32 @@ describe("handover action of the talk tool (#260)", () => {
       ["a registry lookup in the probe of instance", "lookup", "instance", CLEAN_REASON],
     ] as const)(
       "gives the model a fixed text and shows the cleaned diagnostic in a notice for a failure of %s",
-      async (_name, step, selector, shown) => {
+      async (name, step, selector, shown) => {
         const { alpha, beta, betaId, turns } = await sessions();
         if (step === "list") {
           network.listFails = true;
           network.listReason = PATH_REASON;
         } else if (step === "lookup") network.probeHostError = PATH_REASON;
         else network.probeError = new Error(PATH_REASON);
+        const unseen = "0123456789abcdef";
         const params =
           selector === "to"
             ? { to: "beta" }
-            : { instance: selector === "instance" ? betaId : "0123456789abcdef" };
+            : { instance: selector === "instance" ? betaId : unseen };
+        // The result keeps every instance id that the action knows; only the diagnostic stays local.
+        const instanceId =
+          selector === "unseen"
+            ? unseen
+            : selector === "instance" || name === "a registry lookup in the probe of to"
+              ? betaId
+              : undefined;
         const result = await startHandover(alpha, params).call;
-        expect(result).toEqual(failed(REGISTRY_FAILED, { outcome: "failed" }));
+        expect(result).toEqual(
+          failed(REGISTRY_FAILED, {
+            ...(instanceId === undefined ? {} : { instanceId }),
+            outcome: "failed",
+          }),
+        );
         expect(result.text).not.toContain("/home/user");
         expect(alpha.notices).toEqual([`${NOTICE}${shown}`]);
         expect(turns).toEqual([]);
@@ -3759,5 +3798,21 @@ describe("handover action of the talk tool (#260)", () => {
     await until(() => beta.talkTexts().length === 1);
     expect(alpha.notices[0]).not.toContain("the agent started");
     expect(alpha.notices[1]).toContain("Delivered");
+  });
+
+  it("keeps the refusal of send, ask, cancel, and /talk handover as it was at 0ba9e061 for a to whose one session did not answer", async () => {
+    const { alpha } = await sessions();
+    const slow = network.addForeign("slow", "s-slow", "timeout");
+    const old =
+      `talk: ${literal("slow")} does not name exactly one live session. Nothing was sent. Use instance with one full instance id:\n` +
+      `- ${literal("slow")} (session ${literal("s-slow")}): instance ${slow.instanceId}, timeout`;
+    for (const params of [
+      { action: "send", to: "slow", message: "hi" },
+      { action: "ask", to: "slow", message: "hi" },
+      { action: "cancel", to: "slow", messageId: "0123456789abcdef" },
+    ])
+      expect(await alpha.tool(params)).toEqual({ ok: false, text: old });
+    await alpha.command("handover slow");
+    expect(alpha.notices.at(-1)).toBe(old);
   });
 });

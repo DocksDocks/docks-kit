@@ -28,6 +28,7 @@ import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_PROMPT,
   HANDOVER_STARTED,
+  HANDOVER_START_TOO_NARROW,
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
   agentHandoverWaiting,
@@ -616,6 +617,8 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
 
   it("names the agent and the target in the waiting view and in the first line of the confirm view, shows no notice, and starts the review with the cleaned note and the draft alone", async () => {
     const h = await harness();
+    // Wide enough for the whole waiting line, not only its start.
+    h.tui.size = { columns: 160, rows: 30 };
     const reply = Promise.withResolvers<unknown>();
     h.services.reply = () => reply.promise;
     const { flow } = await agentHandover(h);
@@ -807,6 +810,66 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
   });
 
+  it("ends the flow when omp closes the waiting view without done before its first frame (#260 H2)", async () => {
+    const h = await harness();
+    h.tui.drawOnMount = false;
+    const { flow, ended } = await agentHandover(h);
+    const waiting = h.tui.views.at(-1);
+    if (waiting === undefined) throw new Error("no waiting view");
+    // The side turn answered; the flow waits for the first frame.
+    await flush();
+    expect(ended()).toBeUndefined();
+    waiting.hostClose();
+    // The repair timer of the binding checks the open flow.
+    h.slot.check();
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
+    expect(h.slot.isOpen()).toBe(false);
+  });
+
+  it("asks for a wider pane while one row of 40 columns cannot show the start line, and mounts the review after a resize that fits (#260 H2)", async () => {
+    const h = await harness();
+    h.tui.size = { columns: 40, rows: 1 };
+    const { flow, ended } = await agentHandover(h);
+    const waiting = h.tui.views.at(-1);
+    if (waiting === undefined) throw new Error("no waiting view");
+    expect(prop(waiting.node, "text")).toBe(HANDOVER_START_TOO_NARROW);
+    await flush();
+    expect(h.tui.views.at(-1)).toBe(waiting);
+    expect(ended()).toBeUndefined();
+    // The start line fits 80 columns; the key hints after it are cut.
+    h.tui.size = { columns: 80, rows: 1 };
+    const shown = String(prop(waiting.node, "text"));
+    expect(shown).toBe([...agentHandoverWaiting(GAMMA)].slice(0, 80).join(""));
+    expect(
+      shown.startsWith(
+        `talk: the agent started a handover to ${literal("gamma")} (instance ${ID_C})`,
+      ),
+    ).toBe(true);
+    await flush();
+    expect(prop(reviewOf(h), "text")).toBe(`${CLEAN_NOTE}\n\n${DRAFT}`);
+    press(reviewOf(h), "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+  });
+
+  it("ends the flow on escape while the pane is too narrow for the start line", async () => {
+    const h = await harness();
+    h.tui.size = { columns: 40, rows: 1 };
+    const { flow } = await agentHandover(h);
+    const waiting = h.tui.views.at(-1);
+    if (waiting === undefined) throw new Error("no waiting view");
+    expect(prop(waiting.node, "text")).toBe(HANDOVER_START_TOO_NARROW);
+    press(waiting.node, "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
+  });
+
+  it("words the request for a wider pane", () => {
+    expect(HANDOVER_START_TOO_NARROW).toBe(
+      "talk: make the pane wider to see who started this handover.",
+    );
+  });
+
   it("cleans a host error for a notice: one line, no terminal controls, and a space for each tab", () => {
     expect(safeDiagnostic("open\t/home/u/x\u001b[31m failed\nretry")).toBe(
       "open /home/u/x failed retry",
@@ -882,7 +945,9 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
       const controller = new AbortController();
       const { flow } = await agentHandover(h, controller.signal);
       if (stage === "side turn")
-        expect(prop(h.tui.top.node, "text")).toBe(agentHandoverWaiting(GAMMA));
+        expect(prop(h.tui.top.node, "text")).toBe(
+          [...agentHandoverWaiting(GAMMA)].slice(0, h.tui.size.columns).join(""),
+        );
       if (stage === "review") expect(reviewOf(h).kind).toBe("editor");
       if (stage === "confirm view") {
         press(reviewOf(h), "ctrl+s");

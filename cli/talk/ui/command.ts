@@ -32,7 +32,9 @@ import type { Target } from "../transport/request";
 import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_STARTED,
+  HANDOVER_START_TOO_NARROW,
   type SideTurn,
+  agentHandoverStart,
   agentHandoverWaiting,
   requestDraft,
   reviewText,
@@ -332,6 +334,8 @@ const OPERATOR: SendOrigin = { byAgent: false, isOwn: () => false };
 interface HandoverStart {
   readonly notice: string | undefined;
   readonly waiting: string;
+  /** The line that the waiting view must show whole before the review mounts; none for `/talk`. */
+  readonly startLine: string | undefined;
   readonly note: string | undefined;
   readonly origin: SendOrigin;
 }
@@ -340,6 +344,7 @@ interface HandoverStart {
 const OPERATOR_HANDOVER: HandoverStart = {
   notice: HANDOVER_STARTED,
   waiting: HANDOVER_WAITING,
+  startLine: undefined,
   note: undefined,
   origin: OPERATOR,
 };
@@ -467,6 +472,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     ) => JSXNode,
     ended: T,
     fullscreen: boolean,
+    tracked?: Promise<void>,
   ): Promise<T> => {
     if (!live(flow)) return Promise.resolve(ended);
     const { controller } = flow;
@@ -485,7 +491,19 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
             if (!open) return;
             open = false;
             signal.removeEventListener("abort", onAbort);
-            if (flow.view === view) flow.view = undefined;
+            if (flow.view === view) {
+              if (tracked === undefined) flow.view = undefined;
+              else {
+                // #260 H2: the view stays the tracked view after its choice until `tracked` settles,
+                // so a close by omp without `done` still ends the flow.
+                view.cancel = () => {
+                  controller.abort();
+                };
+                void tracked.finally(() => {
+                  if (flow.view === view) flow.view = undefined;
+                });
+              }
+            }
             if (tagOf(value) === tagOf(ended)) controller.abort();
             // omp mounts no view whose `done` ran while its factory ran, and an ended flow mounts
             // no next view: both close at once. Otherwise the view waits for the next one.
@@ -538,30 +556,39 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   /**
    * Runs one talk step while a docked waiting view holds the focus, so no key
    * reaches the composer of omp between two talk views. `escape` and `alt+t`
-   * end the flow, whose abort signal stops the step. `drawn` runs when omp
-   * draws the view.
+   * end the flow, whose abort signal stops the step. With `start`, the view
+   * shows that start line whole or asks for a wider pane, and `drawn` settles
+   * once omp drew the whole line; the view stays tracked until then (#260 H2).
    */
   const waitFor = <R>(
     flow: Flow,
     flowUi: FlowUi,
     text: string,
     task: () => Promise<R>,
-    drawn?: () => void,
+    start?: { readonly line: string; readonly drawn: () => void; readonly first: Promise<void> },
   ): Promise<Waited<R>> =>
     mount<Waited<R>>(
       flow,
       flowUi,
       // omp can run the factory after the flow ended; the step then does not start.
-      (viewUi, _size, done) =>
+      (viewUi, size, done) =>
         pendingView(
           viewUi,
           text,
           () => (live(flow) ? task() : Promise.reject(new Error("the /talk flow ended"))),
           done,
-          drawn,
+          start === undefined
+            ? undefined
+            : {
+                size,
+                start: start.line,
+                narrow: HANDOVER_START_TOO_NARROW,
+                drawn: start.drawn,
+              },
         ),
       { _tag: "Close" },
       DOCKED,
+      start?.first,
     );
 
   /** A view that edits the text of one send: compose, or the handover review. */
@@ -670,15 +697,25 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     }
     if (start.notice !== undefined) flowUi.notify(start.notice, "info");
     // A talk view holds the focus while the side turn runs; `escape` ends the flow and aborts it.
+    // The start line of a tool-started handover must be drawn whole before the review mounts.
     const drawn = Promise.withResolvers<void>();
+    const line = start.startLine;
     const waited = await waitFor(
       flow,
       flowUi,
       start.waiting,
       () => requestDraft(sideTurn, flow.controller.signal),
-      start.origin.byAgent ? drawn.resolve : undefined,
+      line === undefined
+        ? undefined
+        : {
+            line,
+            drawn: () => {
+              drawn.resolve();
+            },
+            first: drawn.promise,
+          },
     );
-    if (start.origin.byAgent) await untilEnded(flow, drawn.promise);
+    if (line !== undefined) await untilEnded(flow, drawn.promise);
     const draft = resultOf(waited);
     if (draft === undefined || !live(flow)) return CANCELLED;
     if (draft._tag === "Failed") {
@@ -794,6 +831,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         return handover(flow, flowUi, command.destination, {
           notice: undefined,
           waiting: agentHandoverWaiting(command.destination),
+          startLine: agentHandoverStart(command.destination),
           note: command.note,
           origin: { byAgent: true, isOwn: command.isOwn },
         });

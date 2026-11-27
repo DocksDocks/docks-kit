@@ -3051,6 +3051,8 @@ const CTRL_K_KEY = "\x0b";
 const CTRL_Y_KEY = "\x19";
 const PASTED_TEXT = "talk-ui smoke pasted summary.\nPasted next step.";
 const TYPED_INSERT = "Typed: ";
+/** The caret that omp's editor draws at the end of a row in this terminal. */
+const EDITOR_CARET = "▏";
 /** The text that the review holds after the editing, which the peer must receive exactly. */
 const EDITED_HANDOVER = "talk-ui smoke pasted summary.\nTyped: Pasted next step.";
 /**
@@ -3838,18 +3840,34 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       peerInstance,
     );
     // Select all, then a bracketed paste replaces the draft. On the last line: line start, a cut to the line
-    // end, a typed insertion, and a yank of the cut text.
+    // end, a typed insertion, and a yank of the cut text. omp repaints the whole edited row, so after each key
+    // a complete frame must show that row with exactly the expected text and the caret at its end.
     const pasting = screen.mark();
     screen.write(SELECT_ALL_KEY);
     screen.write(`${PASTE_START}${PASTED_TEXT}${PASTE_END}`);
     const [, pastedLast = ""] = PASTED_TEXT.split("\n");
     await screen.waitFor(pastedLast, pasting, "pasted text in the agent handover review");
-    const cutting = screen.mark();
+    const homed = screen.mark();
     screen.write(CTRL_A_KEY);
-    screen.write(CTRL_K_KEY);
-    screen.write(TYPED_INSERT);
-    screen.write(CTRL_Y_KEY);
-    await screen.waitFor(`${TYPED_INSERT}${pastedLast}`, cutting, "typed insertion and the yanked line");
+    await screen.waitForFrame(
+      (frame) => frame.split("\n").some((row) => row.trim() === pastedLast),
+      "pasted last line after ctrl+a",
+      homed,
+    );
+    const editedRows: ReadonlyArray<readonly [string, string, string]> = [
+      [CTRL_K_KEY, EDITOR_CARET, "last line cut by ctrl+k"],
+      [TYPED_INSERT, `${TYPED_INSERT}${EDITOR_CARET}`, "typed text alone on the last line"],
+      [CTRL_Y_KEY, `${TYPED_INSERT}${pastedLast}${EDITOR_CARET}`, "last line restored by ctrl+y"],
+    ];
+    for (const [keys, row, what] of editedRows) {
+      const before = screen.mark();
+      screen.write(keys);
+      await screen.waitForFrame(
+        (frame) => frame.split("\n").some((shown) => shown.trim() === row),
+        `${what} (${JSON.stringify(row)})`,
+        before,
+      );
+    }
     const sending = screen.mark();
     screen.write(CTRL_S_KEY);
     await confirm(sending, peerInstance, HANDOVER_KIND, true);

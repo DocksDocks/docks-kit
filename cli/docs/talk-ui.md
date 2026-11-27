@@ -485,14 +485,23 @@ each tool call of the side turn.
 While the side turn runs, a waiting view at the bottom of the screen holds
 the focus: `talk: a side turn writes the handover summary · ⎋ cancels`, or
 for a tool-started handover
-`talk: the agent started a handover to <name> (instance <instance id>) · a side turn writes the summary · ⎋ cancels`.
+`talk: the agent started a handover to <name> (instance <instance id>) · a side turn writes the summary · ⎋ cancels`,
+cut to the pane width without an ellipsis.
 `escape` and `alt+t` there end the flow; every other key does nothing, so no
 key reaches the composer of omp. When the flow ends during the side turn,
 the flow aborts it, shows no error, and mounts no review. When the reply
 arrives, the flow checks its signal and its session id before it mounts the
-review. A tool-started handover also waits until omp drew the waiting view
-once, so the line that names the agent shows even when the side turn ends
-at once.
+review.
+
+A tool-started handover mounts its review only after omp drew the whole
+start line `talk: the agent started a handover to <name> (instance
+<instance id>)` in one row, so the line that names the agent shows even when
+the side turn ends at once. While one row of the pane cannot show that
+line, the waiting view shows
+`talk: make the pane wider to see who started this handover.` and the review
+does not mount. After a resize that fits, the start line shows and the flow
+goes on. `escape` still ends the flow. When omp closes the waiting view
+before its first frame, the flow ends, and the tool result is `cancelled`.
 
 ### Template
 

@@ -236,11 +236,6 @@ not see yet. The outcomes:
 | Exactly one match answered, and each other match is proven ended | The message goes to that match                                                                     |
 | Any other case                                                   | The call fails, lists each candidate with its full instance id and probe result, and sends nothing |
 
-When only one match is not proven ended and its probe did not answer, there
-is no choice between sessions, so the text says what to do instead:
-``talk: `<to>` did not answer a probe (<outcome>). Nothing was sent. Check
-that session, then run the action list again:`` and the candidate rows.
-
 Only `ok` answers, and only `not-live` proves an end. `not-found`,
 `auth-failed`, `timeout`, `unreachable`, and `unknown-kind` prove neither.
 The probes share the dial limit of the transport: at most 8 connections at a
@@ -498,9 +493,15 @@ description says to use the action only when the user asks for a handover
    context. It shows no start notice, because omp shows a notice of a tool
    call only after the call ends. Instead, the side-turn waiting view shows
    `talk: the agent started a handover to <name> (instance <instance id>) · a
-   side turn writes the summary · ⎋ cancels`. The review mounts only after
-   omp drew this view once, so the user sees who started the handover even
-   when the side turn ends at once.
+   side turn writes the summary · ⎋ cancels`, cut to the pane width without
+   an ellipsis. While one row of the pane cannot show the whole start line
+   `talk: the agent started a handover to <name> (instance <instance id>)`,
+   the view shows `talk: make the pane wider to see who started this
+   handover.` instead, and the review does not mount; after a resize that
+   fits, the start line shows and the flow goes on. So the review mounts only
+   after omp drew the whole start line, even when the side turn ends at once.
+   `escape` still ends the flow. When omp closes the waiting view before its
+   first frame, the flow ends as `cancelled`.
 4. The review holds only the text that can be sent: the note of `message`,
    cleaned with `safeMultiline` as the draft is, then a blank line, then the
    draft. A note that is blank after the cleaner adds nothing. The note does
@@ -560,12 +561,26 @@ view, so the action also needs `ctx.hasUI`. The registration of this
 session is the exact pair at the start of the call, the current one, or the
 one that the binding publishes and has not attached yet; a session id alone
 proves nothing. An `instance` whose probe does not answer ends with
-`Nothing was sent. Check that session, then run the action list again.` A
-`to` that starts more than one session id, or that leaves more than one
-session that did not answer, gets the line `Name one session with instance,
-using its full instance id from list, or ask the user which session takes
-the handover.` after the resolver error. A `to` whose every match ended
-(`not-live`) gets `Run the action list and name a live session.`
+`Nothing was sent. Check that session, then run the action list again.`
+
+A `to` that names no one target gets recovery text of its own, only for
+`handover` (the other actions and `/talk` keep the resolver error of
+[Targets](#targets)):
+
+- One session that is not proven ended, and its probe did not answer:
+  ``talk: `<to>` did not answer a probe (<outcome>). Nothing was sent. Check
+  that session, then run the action list again:`` and the candidate rows.
+  `details` hold its instance id and the probe outcome.
+- Several sessions, and fewer than two answered: ``talk: `<to>` names
+  sessions that did not answer a probe. Nothing was sent. Check the listed
+  sessions, then run the action list again:`` and the candidate rows, with
+  the outcome `failed` and no ids.
+- A choice between sessions (a prefix of several session ids, or two or more
+  sessions that answered): the resolver error, then `Name one session with
+  instance, using its full instance id from list, or ask the user which
+  session takes the handover.`
+- Every match ended (`not-live`): the resolver error, then `Run the action
+  list and name a live session.`
 
 When the listing or the instance lookup fails, or a probe fails in this
 process because the lookup of the target's registry entry failed (a trust
@@ -576,8 +591,9 @@ user. Ask the user to check it before a new handover.` The host error, which
 can hold a path, goes only to a local notice: `talk: the agent asked for a
 handover, but talk could not check its target, so nothing was sent. Error:
 <host error>`, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`,
-"Errors"). A peer that does not answer a probe, for example with `timeout`,
-gives the probe refusal above, not this text.
+"Errors"). `details` keep the instance id when the action knows it, for
+example for an `instance`. A peer that does not answer a probe, for example
+with `timeout`, gives the probe refusals above, not this text.
 
 ### Outcomes
 

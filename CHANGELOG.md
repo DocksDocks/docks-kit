@@ -14,7 +14,9 @@ The user still reviews the summary and types the confirm code.
   above the draft, the user edits the text and types the confirm code, and
   the text goes to the target with a request for a turn. The side-turn
   waiting view names the agent and the target, and the review mounts only
-  after omp drew that view once. The first line of the confirm view says
+  after omp drew that whole line; a pane too narrow for it shows
+  `talk: make the pane wider to see who started this handover.` until a
+  resize. The first line of the confirm view says
   that the agent started the handover; a pane too narrow for that line
   takes no code. The note does not change the template, but the side-turn
   model sees it. `escape` in the review, `alt+t`, and an abort of the tool
@@ -27,12 +29,15 @@ The user still reviews the summary and types the confirm code.
   one that the session still publishes; checked again before the side turn,
   before the send, and at the body write), and for an `instance` that does
   not answer a probe. It takes no `attachments`, not even an empty list, and
-  no `noWake: true`. Each refusal says what to do: an ambiguous or ended
-  `to` says how to pick a live session, and a session that did not answer
-  says to check it, then run `list` again. When the registry cannot be read,
-  also for the entry lookup of a probe, the agent gets a fixed text and the
-  user a notice with the error. A refusal's details hold the outcome
-  `failed` or a more specific one.
+  no `noWake: true`. Each refusal says what to do. For `to`, only in
+  `handover`: one session that did not answer, or several of which fewer
+  than two answered, gets a request to check the listed sessions and run
+  `list` again; a choice between sessions gets the advice to name one with
+  `instance` or ask the user; ended sessions get a request for a live one.
+  When the registry cannot be read, also for the entry lookup of a probe,
+  the agent gets a fixed text and the user a notice with the error. A
+  refusal's details hold the outcome `failed` or a more specific one, and
+  the instance id when the action knows it.
 - The result gives the outcome of the send: `delivered`, `queued`, or
   `submitted`; a refusal such as `busy` or `not-live`; `unknown` when the
   text may have gone out and no usable answer settled the outcome; `failed`;
@@ -56,8 +61,6 @@ The user still reviews the summary and types the confirm code.
   line, without terminal controls or tabs, for `/talk handover` too.
 - The `/talk` notice in RPC, ACP, print, and json mode says that the tool's
   `handover` action needs an interactive session too.
-- A `to` whose only session did not answer a probe now says to check that
-  session, then run `list` again, for every action.
 - The tool description, the `messageId` help, and its error say that
   `cancel` takes the id of the message to check or withdraw, from a `send`,
   `ask`, or `handover` result.

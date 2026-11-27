@@ -265,8 +265,14 @@ export class TalkToolFailed extends Schema.TaggedError<
    * (#260 H4). The message holds it too; `handover` keeps it out of its result.
    */
   diagnostic: Schema.optionalKey(Schema.String),
-  /** `to` matched more than one session, so the caller must choose one (#260 H3). */
+  /** `to` matched sessions that a choice of one can resolve: several session ids, or two that answered (#260 H3). */
   ambiguous: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * The rows of the sessions of `to` when fewer than two of them answered
+   * their probe (#260 H3). The shared text keeps its wording; `handover`
+   * tells the user to check those sessions instead.
+   */
+  unanswered: Schema.optionalKey(Schema.String),
 }) {}
 
 /** The ask request reached no answer: the transport failure of the request. */
@@ -505,19 +511,21 @@ export const resolveTarget = Effect.fnUntraced(function* (
             { outcome: "not-live" },
           );
         case "Ambiguous": {
+          const rows = describeCandidates(candidates);
+          const answered = candidates.filter(({ probe }) => probeState(probe) === "answered");
           const unended = candidates.filter(({ probe }) => probeState(probe) !== "ended");
           const [only] = unended;
-          // One session that did not answer is no choice between sessions: the user checks it.
-          if (unended.length === 1 && only !== undefined)
-            return yield* fail(
-              `talk: ${literal(to)} did not answer a probe (${only.probe}). Nothing was sent. ` +
-                `Check that session, then run the action list again:\n${describeCandidates(candidates)}`,
-              { outcome: only.probe, ...host },
-            );
+          // #260 H3: fewer than two answers leave no choice that resolves the refusal; one session keeps its ids.
+          const classified =
+            answered.length >= 2
+              ? { ambiguous: true as const }
+              : unended.length === 1 && only !== undefined
+                ? { unanswered: rows, instanceId: only.peer.instanceId, outcome: only.probe }
+                : { unanswered: rows };
           return yield* fail(
             `talk: ${literal(to)} does not name exactly one live session. Nothing was sent. ` +
-              `Use instance with one full instance id:\n${describeCandidates(candidates)}`,
-            { ambiguous: true, ...host },
+              `Use instance with one full instance id:\n${rows}`,
+            { ...classified, ...host },
           );
         }
       }
@@ -1133,27 +1141,46 @@ const refuseHandover = (flow: HandoverFlow): Effect.Effect<void, TalkToolFailed>
   }).pipe(Effect.flatMap((refusal) => (refusal === undefined ? Effect.void : fail(refusal))));
 
 /**
- * H3: an ambiguous or ended `to` of a handover says what the agent can do.
- * Every other refusal of the resolver, and a failure of this process with
- * its diagnostic, keeps its text.
+ * H3: the recovery of the `handover` action for a `to` that named no one
+ * target. Sessions that did not answer get a request to check them and to
+ * list again, with the instance id and the probe result of a single one; a
+ * choice between sessions gets the instance advice; ended sessions get a
+ * request for a live one. Every other refusal of the resolver, and a
+ * failure of this process with its diagnostic, keeps its text. The shared
+ * resolver keeps its texts for `send`, `ask`, `cancel`, and `/talk`.
  */
-const withRecovery = (error: TalkToolFailed): TalkToolFailed => {
-  if (error.diagnostic !== undefined) return error;
-  if (error.ambiguous === true)
-    return new TalkToolFailed({ message: `${error.message}\n${HANDOVER_CHOOSE_ONE}` });
-  if (error.outcome === "not-live")
-    return new TalkToolFailed({
-      message: `${error.message}\n${HANDOVER_PICK_LIVE}`,
-      outcome: "not-live",
-    });
-  return error;
-};
+const withRecovery =
+  (selector: Selector) =>
+  (error: TalkToolFailed): TalkToolFailed => {
+    if (error.diagnostic !== undefined) return error;
+    const { unanswered, instanceId, outcome } = error;
+    if (unanswered !== undefined && selector._tag === "To") {
+      const to = literal(selector.to);
+      return instanceId === undefined || outcome === undefined
+        ? new TalkToolFailed({
+            message: `talk: ${to} names sessions that did not answer a probe. Nothing was sent. Check the listed sessions, then run the action list again:\n${unanswered}`,
+          })
+        : new TalkToolFailed({
+            message: `talk: ${to} did not answer a probe (${outcome}). Nothing was sent. Check that session, then run the action list again:\n${unanswered}`,
+            instanceId,
+            outcome,
+          });
+    }
+    if (error.ambiguous === true)
+      return new TalkToolFailed({ message: `${error.message}\n${HANDOVER_CHOOSE_ONE}` });
+    if (outcome === "not-live")
+      return new TalkToolFailed({
+        message: `${error.message}\n${HANDOVER_PICK_LIVE}`,
+        outcome: "not-live",
+      });
+    return error;
+  };
 
 /**
  * A check before the side turn failed (H4, H5): after an abort of the call,
  * the action reports `cancelled`; a failed listing, lookup, or probe shows
- * its host error in a local notice and gives a fixed text; every other
- * refusal keeps its text.
+ * its host error in a local notice and gives a fixed text with the instance
+ * id that the action knows; every other refusal keeps its text.
  */
 const preflightFailed = (
   flow: HandoverFlow,
@@ -1161,13 +1188,16 @@ const preflightFailed = (
   error: TalkToolFailed,
 ): Effect.Effect<never, TalkToolFailed> => {
   if (signal?.aborted === true) return fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
-  const { diagnostic } = error;
+  const { diagnostic, instanceId } = error;
   if (diagnostic === undefined) return Effect.fail(error);
   return Effect.andThen(
     Effect.sync(() => {
       flow.hostError(diagnostic);
     }),
-    fail(HANDOVER_REGISTRY_FAILED, { outcome: "failed" }),
+    fail(HANDOVER_REGISTRY_FAILED, {
+      ...(instanceId === undefined ? {} : { instanceId }),
+      outcome: "failed",
+    }),
   );
 };
 
@@ -1185,7 +1215,7 @@ const handoverTarget = Effect.fnUntraced(function* (
   signal: AbortSignal | undefined,
 ) {
   const target = yield* resolveTarget(context, selector, signal).pipe(
-    Effect.mapError(withRecovery),
+    Effect.mapError(withRecovery(selector)),
   );
   const { instanceId } = target.target;
   if (flow.isOwn(target.target)) return yield* fail(HANDOVER_OWN_TARGET, { instanceId });
@@ -1196,6 +1226,16 @@ const handoverTarget = Effect.fnUntraced(function* (
       context.transport.probeAll([target.target], signal, (_pair, reason) => {
         hostErrors.push(reason);
       }),
+    ).pipe(
+      // The instance id is known, so a failed probe call keeps it.
+      Effect.mapError(
+        (error) =>
+          new TalkToolFailed({
+            message: error.message,
+            instanceId,
+            ...(error.diagnostic === undefined ? {} : { diagnostic: error.diagnostic }),
+          }),
+      ),
     );
     if (probe !== "ok")
       return yield* fail(
