@@ -916,8 +916,9 @@ function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, Talk
       Effect.map(
         (attribution): JsonObject =>
           attribution === undefined
-            ? { status: "none" }
+            ? { kind: "attribution", status: "none" }
             : {
+                kind: "attribution",
                 status: "done",
                 problem: attribution.problem,
                 instanceId: attribution.instanceId ?? null,
@@ -935,17 +936,19 @@ function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, Talk
     attributed.push({ label, registration });
   }
   return finalScanProblem(defaultFolder, attributed).pipe(
-    Effect.map((problem): JsonObject => ({ status: "done", problem })),
+    Effect.map((problem): JsonObject => ({ kind: "final", status: "done", problem })),
   );
 }
 
 /**
  * The scan child (`SCAN_COMMAND`): runs the scan of the JSON request `source` with the trust checks of talk and
- * prints one JSON result line. It only reads the registry folders. Gives the exit code.
+ * prints one JSON result line with the kind of the request. It only reads the registry folders. Gives the exit
+ * code.
  */
 async function runScanChild(source: string): Promise<number> {
   const request = parseJsonText(source);
-  const program = isObject(request) ? scanProgram(request) : undefined;
+  if (!isObject(request)) return 2;
+  const program = scanProgram(request);
   if (program === undefined) return 2;
   const result = await Effect.runPromise(
     program.pipe(Effect.provide(TalkPosixSystem.layer), Effect.result),
@@ -953,6 +956,7 @@ async function runScanChild(source: string): Promise<number> {
   const answer: JsonObject = Result.isSuccess(result)
     ? result.success
     : {
+        kind: request["kind"] ?? null,
         status: "done",
         problem: `the talk registry folders could not be read: ${describeFailure(result.failure)}`,
         instanceId: null,
@@ -1045,9 +1049,10 @@ const isInstanceId = Schema.is(InstanceId);
 
 /**
  * The attribution of a JSON result of the scan child, `"none"` when no poll found a valid entry, or undefined for
- * a result of another shape. A passed check must name a valid instance id.
+ * a result of another shape or of another kind. A passed check must name a valid instance id.
  */
 function decodeAttribution(result: JsonObject): Attribution | "none" | undefined {
+  if (result["kind"] !== "attribution") return undefined;
   if (result["status"] === "none") return "none";
   const problem = text(result["problem"]);
   const instanceId = text(result["instanceId"]);
@@ -1106,7 +1111,8 @@ async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Pr
         registration: registrationJson(registration),
       })),
     },
-    (result) => (result["status"] === "done" ? text(result["problem"]) : undefined),
+    (result) =>
+      result["kind"] === "final" && result["status"] === "done" ? text(result["problem"]) : undefined,
   );
   return "failure" in outcome
     ? `the final scan of the default talk registry folder ${run.defaultRegistry} ${outcome.failure}`
@@ -1154,10 +1160,11 @@ async function attributionProblem(checks: readonly Promise<string>[]): Promise<s
 
 /**
  * The registry checks of one `omp -p` session of the load mode or the `hooks` mode. `onSpawn` starts the
- * attribution, and the fake model holds each answer until it ends. The final scan of the default folder runs once,
- * while the session is live: the fake model holds the text answer that ends the session until it ends, and a
- * session that reaches the command timeout without that answer gets it before the kill (`beforeTimeoutKill`).
- * `problem` gives the problems of both checks after the session, or an empty text.
+ * attribution, and the fake model holds each answer until it ends. The final scan of the default folder runs
+ * while the session is live: the fake model holds the text answer that ends the session until it ends. At the
+ * command timeout (`beforeTimeoutKill`), a session without that scan gets it; a session that is still live after
+ * its final scan ended gets a fresh scan, because it can have written an entry since. `problem` gives the
+ * problems of all checks after the session, or an empty text.
  */
 function printSessionRegistry(
   run: Run,
@@ -1171,10 +1178,20 @@ function printSessionRegistry(
   let attribution = Promise.resolve(`${label}: the omp session did not start`);
   let processId: number | undefined;
   let final: Promise<string> | undefined;
+  let finalEnded = false;
+  let timeoutScan: Promise<string> | undefined;
+  const scanDefault = (): Promise<string> =>
+    processId === undefined
+      ? Promise.resolve("")
+      : finalLeakProblem(run, [{ label, registration: { processId, cwd } }]);
   const finalScan = (): Promise<string> => {
-    if (final === undefined && processId !== undefined)
-      final = finalLeakProblem(run, [{ label, registration: { processId, cwd } }]);
-    return final ?? Promise.resolve("");
+    if (final === undefined) {
+      final = scanDefault();
+      void final.then(() => {
+        finalEnded = true;
+      });
+    }
+    return final;
   };
   return {
     onSpawn: (pid) => {
@@ -1183,11 +1200,16 @@ function printSessionRegistry(
       run.script.hold = attribution;
       run.script.final = finalScan;
     },
-    beforeTimeoutKill: finalScan,
+    beforeTimeoutKill: () => {
+      if (!finalEnded) return finalScan();
+      timeoutScan = scanDefault();
+      return timeoutScan;
+    },
     problem: async () => {
       run.script.hold = undefined;
       run.script.final = undefined;
-      return [await attribution, await (final ?? "")].filter(Boolean).join("; ");
+      const problems = [await attribution, await (final ?? ""), await (timeoutScan ?? "")];
+      return [...new Set(problems.filter(Boolean))].join("; ");
     },
   };
 }

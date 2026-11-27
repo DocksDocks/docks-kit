@@ -164,11 +164,13 @@ function isPermissionError(error: unknown): boolean {
 /**
  * Give the owner read, write, and search permission on `folder` and on each
  * folder below it, so a recursive removal can list them. Only folders get a
- * stat; a symbolic link is not followed.
+ * stat; a path that `lstat` does not show as a folder, such as a symbolic
+ * link, keeps its mode and is not entered.
  */
 function restoreFolderPermissions(folder: string): void {
-  const { mode } = lstatSync(folder);
-  if ((mode & 0o700) !== 0o700) chmodSync(folder, mode | 0o700);
+  const stat = lstatSync(folder);
+  if (!stat.isDirectory()) return;
+  if ((stat.mode & 0o700) !== 0o700) chmodSync(folder, stat.mode | 0o700);
   for (const entry of readdirSync(folder, { withFileTypes: true })) {
     if (entry.isDirectory()) restoreFolderPermissions(join(folder, entry.name));
   }

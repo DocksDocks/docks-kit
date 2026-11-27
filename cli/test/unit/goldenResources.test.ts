@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const ownerUid = process.getuid?.() ?? -1;
   const entries: Array<{ name: string; isDirectory: () => boolean }> = [];
-  const stats = new Map<string, { uid: number; mtimeMs: number }>();
+  const stats = new Map<
+    string,
+    { uid: number; mtimeMs: number; mode?: number; isDirectory?: () => boolean }
+  >();
   const ownerFiles = new Map<string, string>();
   const lstatSync = vi.fn((path: string) => {
     const stat = stats.get(path);
@@ -22,7 +25,9 @@ const mocks = vi.hoisted(() => {
   const readdirSync = vi.fn(() => entries);
   const rmSync = vi.fn();
   const writeFileSync = vi.fn();
+  const chmodSync = vi.fn();
   return {
+    chmodSync,
     entries,
     lstatSync,
     mkdtempSync,
@@ -40,6 +45,7 @@ vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof FsModule>("node:fs");
   return {
     ...actual,
+    chmodSync: mocks.chmodSync,
     lstatSync: mocks.lstatSync,
     mkdtempSync: mocks.mkdtempSync,
     readFileSync: mocks.readFileSync,
@@ -57,6 +63,7 @@ import {
   childEnv,
   cleanupTemporaryDirs,
   removeTemporaryDirs,
+  removeTree,
   makeStubDir,
   sweepStaleTemporaryDirs,
   temporaryDir,
@@ -237,6 +244,23 @@ describe("golden temporary resources", () => {
     expect(mocks.rmSync).not.toHaveBeenCalledWith(`${stuck}.owner-pid`, expect.anything());
     expect(mocks.rmSync).toHaveBeenCalledWith(next, { recursive: true, force: true });
     expect(mocks.rmSync).toHaveBeenCalledWith(`${next}.owner-pid`, { force: true });
+  });
+
+  it("changes no permission and does not descend when lstat shows no folder", () => {
+    const link = "/golden-test-tmp/golden-home-link";
+    mocks.stats.set(link, {
+      uid: mocks.ownerUid,
+      mtimeMs: NOW_MS,
+      mode: 0,
+      isDirectory: () => false,
+    });
+    mocks.rmSync.mockImplementation(() => {
+      throw Object.assign(new Error("removal denied"), { code: "EACCES" });
+    });
+
+    expect(removeTree(link)).toBe("removal denied");
+    expect(mocks.chmodSync).not.toHaveBeenCalled();
+    expect(mocks.readdirSync).not.toHaveBeenCalled();
   });
 
   it("skips foreign directories and continues after a removal failure", () => {
