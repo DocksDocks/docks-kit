@@ -268,6 +268,31 @@ describe("golden temporary resources", () => {
     },
   );
 
+  // macOS reports ENOTEMPTY when a folder below holds entries that it cannot list.
+  it.skipIf(process.platform === "win32")(
+    "repairs folder permissions and tries once more after ENOTEMPTY",
+    () => {
+      const home = "/golden-test-tmp/golden-home-locked";
+      mocks.stats.set(home, {
+        uid: mocks.ownerUid,
+        mtimeMs: NOW_MS,
+        mode: 0o040000,
+        isDirectory: () => true,
+      });
+      let removals = 0;
+      mocks.rmSync.mockImplementation(() => {
+        removals += 1;
+        if (removals === 1) {
+          throw Object.assign(new Error("Directory not empty"), { code: "ENOTEMPTY" });
+        }
+      });
+
+      expect(removeTree(home)).toBeUndefined();
+      expect(mocks.chmodSync).toHaveBeenCalledWith(home, 0o040700);
+      expect(removals).toBe(2);
+    },
+  );
+
   it("skips foreign directories and continues after a removal failure", () => {
     const deadPid = 41_003;
     const ownedPath = addDirectory("golden-home-owned", {

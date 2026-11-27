@@ -155,10 +155,14 @@ export function registeredTemporaryDirs(): ReadonlyArray<string> {
   return [...TEMP_DIRS];
 }
 
-/** True for the error codes that a missing permission gives. */
-function isPermissionError(error: unknown): boolean {
+/**
+ * True for the error codes of a removal that a missing folder permission can
+ * block: `EACCES` and `EPERM`, and `ENOTEMPTY`, which macOS reports when a
+ * folder below holds entries that it cannot list.
+ */
+function mayNeedPermissionRepair(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === "EACCES" || code === "EPERM";
+  return code === "EACCES" || code === "EPERM" || code === "ENOTEMPTY";
 }
 
 /**
@@ -178,17 +182,17 @@ function restoreFolderPermissions(folder: string): void {
 
 /**
  * Remove `path` and everything below it. A sync can leave a nonempty folder
- * at mode 000: after a permission error on POSIX, this gives the folders
- * below `path` their owner permissions and tries once more. Returns the
- * message of the last failed removal when `path` stays, else undefined; it
- * never throws.
+ * at mode 000: after a removal error that a missing folder permission can
+ * cause on POSIX, this gives the folders below `path` their owner permissions
+ * and tries once more. Returns the message of the last failed removal when
+ * `path` stays, else undefined; it never throws.
  */
 export function removeTree(path: string): string | undefined {
   try {
     rmSync(path, { recursive: true, force: true });
     return undefined;
   } catch (error) {
-    if (process.platform === "win32" || !isPermissionError(error)) return errorMessage(error);
+    if (process.platform === "win32" || !mayNeedPermissionRepair(error)) return errorMessage(error);
   }
   try {
     restoreFolderPermissions(path);
