@@ -552,8 +552,9 @@ exact `instance`, or the single session that `to` matched. That covers the
 session checks of an `instance` call (mode, UI, subagent, open view, no
 side turn), the same checks right before the side turn once the target
 resolved, an own target, a `to` whose one match ended or did not answer,
-and an `instance` that did not answer. A `to` refusal before the target
-resolved and an argument error carry no id.
+and an `instance` that did not answer. An argument error, a session check
+of a `to` call before the lookup, and a `to` refusal that knows no unique
+instance (no match, several sessions) carry no id.
 
 | Case                                                                                                           | Text starts with                                                                         |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
