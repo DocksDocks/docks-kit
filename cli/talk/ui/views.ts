@@ -113,7 +113,8 @@ const SHORT_SESSION_LENGTH = 8;
 /** The length of a full instance id: 16 hex digits. */
 export const INSTANCE_ID_LENGTH = 16;
 
-const shownName = (destination: Destination): string =>
+/** The name of a destination as a literal, for the views and the start notice of a handover (#260 H2). */
+export const shownName = (destination: Destination): string =>
   destination.name === undefined ? "(no name)" : literal(destination.name);
 const shownFolder = (destination: Destination): string =>
   destination.cwd === undefined ? "(no folder)" : literal(destination.cwd);
@@ -364,16 +365,26 @@ const waitingKeys =
 /**
  * A view that holds the focus while one talk step runs, such as the side
  * turn of a handover or a send: one `text` node with `text`. It starts
- * `task` at once and ends with its result.
+ * `task` at once and ends with its result. With `drawn`, the text is an
+ * accessor that calls `drawn` each time omp draws it, so the start notice of
+ * a tool-started handover can wait for its first frame (#260 H2).
  */
 export const pendingView = <R>(
   ui: HostUi,
   text: string,
   task: () => Promise<R>,
   done: (choice: Waited<R>) => void,
+  drawn?: () => void,
 ): JSXNode => {
   settleWith(task, done);
-  return ui.jsx("text", { text, onKey: waitingKeys(done) });
+  const shown =
+    drawn === undefined
+      ? text
+      : (): string => {
+          drawn();
+          return text;
+        };
+  return ui.jsx("text", { text: shown, onKey: waitingKeys(done) });
 };
 
 // ── Resize view ──
@@ -551,9 +562,15 @@ export const drawCode = (
   }
 };
 
-/** The first line of the confirm view (G3). */
-export const confirmLine = (instanceId: string, code: string): string =>
-  `Send to ${instanceId}: type ${code}`;
+/**
+ * The first line of the confirm view (G3). A handover that the `talk` tool
+ * started names the agent as its starter on this line, so the user sees who
+ * started it at the point of approval (#260 H2).
+ */
+export const confirmLine = (instanceId: string, code: string, byAgent: boolean): string =>
+  byAgent
+    ? `Send to ${instanceId} (a handover that the agent started): type ${code}`
+    : `Send to ${instanceId}: type ${code}`;
 
 export const CONFIRM_TOO_SMALL = "talk: make the pane wider to confirm the destination.";
 
@@ -568,6 +585,8 @@ export interface ConfirmContent {
   readonly kind: string;
   readonly text: string;
   readonly code: string;
+  /** The `talk` tool started the handover (#260 H2). */
+  readonly byAgent: boolean;
 }
 
 const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/u;
@@ -575,12 +594,13 @@ const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/u;
 /**
  * The confirm view: a `col` root whose first line names the full instance
  * id and the code, then the name and folder, the kind, and the first line of
- * the text, each cut to one row (G3). Only the two code letters, typed as two
- * separate presses, send. A repeat event, a paste, a key after a paste, or
- * any other key clears the typed letters; `enter` sends nothing. While the
- * first line does not fit the width, the view shows only a request for a
- * wider pane, and no key sends. `escape` returns to the compose view;
- * `alt+t` closes the flow.
+ * the text, each cut to one row (G3). The first line of a handover that the
+ * `talk` tool started also says that the agent started it (#260 H2). Only
+ * the two code letters, typed as two separate presses, send. A repeat event,
+ * a paste, a key after a paste, or any other key clears the typed letters;
+ * `enter` sends nothing. While the first line does not fit the width, the
+ * view shows only a request for a wider pane, and no key sends. `escape`
+ * returns to the compose view; `alt+t` closes the flow.
  */
 export const confirmView = (
   ui: HostUi,
@@ -590,7 +610,7 @@ export const confirmView = (
   done: (choice: ConfirmChoice) => void,
 ): JSXNode => {
   const typed = ui.signal("");
-  const first = confirmLine(destination.instanceId, content.code);
+  const first = confirmLine(destination.instanceId, content.code, content.byAgent);
   /** The current size while the first line fits its width; undefined otherwise. */
   const space = (): ViewSize | undefined => {
     const current = size();

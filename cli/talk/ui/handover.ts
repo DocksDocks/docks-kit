@@ -1,12 +1,15 @@
 /**
- * Handover (plan #251 G6): the template of the side turn, the reading of its
- * reply, and the review view.
+ * Handover (plan #251 G6, #260 H2): the template of the side turn, the
+ * reading of its reply, and the review view.
  *
  * The flow in `command.ts` resolves the destination to one registration
  * pair, asks `ctx.runEphemeralTurn` for a summary with `HANDOVER_PROMPT`,
  * and opens the review view with the reply. The operator edits the draft
  * there; `ctrl+s` goes to the confirm view of `views.ts`. The send carries
- * `kind: "handover"` and a wake, so the receiver acts on the summary.
+ * `kind: "handover"` and a wake, so the receiver acts on the summary. The
+ * `handover` action of the `talk` tool starts the same flow for an exact
+ * pair; its waiting view and the first line of its confirm view name the
+ * agent as the starter, and the note of the agent starts the text.
  *
  * This module runs no effect.
  */
@@ -18,6 +21,7 @@ import { safeMultiline } from "../tool/attachments";
 import type { HostUi } from "./host";
 import {
   CLOSE_KEY,
+  type Destination,
   type SizeReader,
   TALK_SHORTCUT,
   type TextChoice,
@@ -25,10 +29,19 @@ import {
   type ViewKey,
   type ViewSize,
   applyEdit,
+  safeOneLine,
+  shownName,
 } from "./views";
 
 /** omp caps the reply of a side turn at 4 KiB (F7); the template stays inside it too. */
 export const MAX_HANDOVER_BYTES = 4096;
+
+/**
+ * A host error for a notice (#260 H4): one line without terminal controls,
+ * and each tab a space, so the notice shows it as plain text. The draft
+ * keeps its tabs.
+ */
+export const safeDiagnostic = (text: string): string => safeOneLine(text).replaceAll("\t", " ");
 
 /**
  * The prompt of the side turn (G6). The side turn runs on a copy of this
@@ -76,6 +89,30 @@ export type SideTurn = (request: SideTurnRequest) => Promise<unknown>;
 export const HANDOVER_STARTED =
   "talk: a side turn writes the handover summary. In the review, ctrl+s confirms the destination, alt+enter adds a line, and escape cancels.";
 
+/**
+ * The waiting view of the side turn of a handover that the `talk` tool
+ * started (#260 H2): the agent as the starter, the full instance id of the
+ * target, then its name, cleaned as the views clean names. omp shows a
+ * notice of a tool call only after the call ends, so talk's own view says
+ * it. The origin and the id come first and take 40 columns, so a row that
+ * the pane cuts still shows them; the optional name follows. The confirm
+ * view names the agent again at the point of approval, in full or with no
+ * code taken.
+ */
+export const agentHandoverWaiting = (destination: Destination): string => {
+  const name = destination.name === undefined ? "(no name)" : `(${shownName(destination)})`;
+  return `talk: agent handover to ${destination.instanceId} ${name} · ⎋ cancels`;
+};
+
+/**
+ * The first text of the review (#260 H1): the note of the agent, cleaned as
+ * the draft is, above the draft. A note without text adds nothing.
+ */
+export const reviewText = (note: string | undefined, draft: string): string => {
+  const lead = note === undefined ? "" : safeMultiline(note).trim();
+  return lead === "" ? draft : `${lead}\n\n${draft}`;
+};
+
 export const HANDOVER_NO_SIDE_TURN =
   "talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover. Nothing was sent.";
 
@@ -115,7 +152,8 @@ export const requestDraft = async (
     if (body === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
     return { _tag: "Draft", text: cut ? `${body}\n${HANDOVER_CUT_LINE}` : body };
   } catch (cause) {
-    const hostError = Predicate.isError(cause) ? cause.message : String(cause);
+    // H4: the host error is one line without terminal controls or tabs, on every path of the flow.
+    const hostError = safeDiagnostic(Predicate.isError(cause) ? cause.message : String(cause));
     return {
       _tag: "Failed",
       text: `talk: the handover side turn failed. Nothing was sent. Host error: ${hostError}`,
@@ -134,7 +172,8 @@ export const reviewFits = (size: ViewSize | undefined): boolean =>
  * `ctrl+s` with text goes to the confirm view while an editable row fits;
  * `alt+enter`, `shift+enter`, and `ctrl+j` reach the widget, which adds a
  * line; `enter` from `\r` adds nothing; `escape` and `alt+t` cancel. The
- * view shows a window of screen rows around the caret.
+ * view shows a window of screen rows around the caret. The field holds only
+ * the text that can be sent, so the send is exactly what the editor holds.
  */
 export const reviewView = (
   ui: HostUi,

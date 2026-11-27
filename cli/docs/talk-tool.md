@@ -22,6 +22,7 @@ decisions (E1 to E14) that this document names.
 - [Messages and attachments](#messages-and-attachments)
 - [Delivery](#delivery)
 - [Results](#results)
+- [Handover](#handover)
 - [Queue and busy rules](#queue-and-busy-rules)
 - [Transition hold](#transition-hold)
 - [Asks and replies](#asks-and-replies)
@@ -117,29 +118,31 @@ them.
 
 ### Fields
 
-| Field         | Used by                 | Value                                                                              |
-| ------------- | ----------------------- | ---------------------------------------------------------------------------------- |
-| `action`      | all                     | `list`, `send`, `ask`, `reply`, `pending`, `status`, or `cancel`                   |
-| `to`          | `send`, `ask`, `cancel` | A session name, a full session id, or a session id prefix of at least 4 characters |
-| `instance`    | `send`, `ask`, `cancel` | A full instance id: 16 lowercase hex digits                                        |
-| `message`     | `send`, `ask`, `reply`  | The text; it must not be blank                                                     |
-| `attachments` | `send`, `ask`, `reply`  | A list of `{ type, name, content, language? }`; see [Attachments](#attachments)    |
-| `replyTo`     | `reply`                 | The id of the ask to answer                                                        |
-| `messageId`   | `cancel`                | The message id from a `send` or `ask` result: 16 lowercase hex digits              |
-| `noWake`      | `send`, `ask`, `reply`  | `true` appends the message without a request for a turn                            |
+| Field         | Used by                             | Value                                                                                                           |
+| ------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `action`      | all                                 | `list`, `send`, `ask`, `reply`, `pending`, `status`, `cancel`, or `handover`                                    |
+| `to`          | `send`, `ask`, `cancel`, `handover` | A session name, a full session id, or a session id prefix of at least 4 characters                              |
+| `instance`    | `send`, `ask`, `cancel`, `handover` | A full instance id: 16 lowercase hex digits                                                                     |
+| `message`     | `send`, `ask`, `reply`, `handover`  | `send`, `ask`, `reply`: the text, not blank. `handover`: an optional note above the draft                       |
+| `attachments` | `send`, `ask`, `reply`              | A list of `{ type, name, content, language? }`; see [Attachments](#attachments)                                 |
+| `replyTo`     | `reply`                             | The id of the ask to answer                                                                                     |
+| `messageId`   | `cancel`                            | The id of the message to check or withdraw, from a `send`, `ask`, or `handover` result: 16 lowercase hex digits |
+| `noWake`      | `send`, `ask`, `reply`              | `true` appends the message without a request for a turn                                                         |
 
 The tool ignores unknown fields. A blank `to` or `instance` counts as unset.
 The field rules:
 
 - `send` and `ask` need exactly one of `to` and `instance`.
+- `handover` needs exactly one of `to` and `instance`. It takes no
+  `attachments` field, not even an empty list, and no `noWake: true`,
+  because a handover carries no attachment and always asks the target for a
+  turn.
 - `cancel` needs `messageId` and exactly one of `to` and `instance`.
 - `reply`, `list`, `pending`, and `status` take neither `to` nor
   `instance`. `reply` takes its target from the ask.
 
 A call that breaks a rule fails before it sends anything. The tool has no
-broker, Herdr, cross-machine, `list-cwd`, or `handover` fields. A handover
-comes only from the `/talk` views: `/talk handover`, or `h` in the list that
-`/talk` or `alt+t` opens (see `cli/docs/talk-ui.md`, "Handover").
+broker, Herdr, cross-machine, or `list-cwd` fields.
 
 ### Actions
 
@@ -177,18 +180,26 @@ comes only from the `/talk` views: `/talk handover`, or `h` in the list that
   `unknown` with the reason.
 - `cancel` withdraws a queued message, or reads the current outcome of
   another message. See [Results](#results).
+- `handover` starts the handover flow of `/talk` for the target: a side turn
+  writes the summary, and the user reviews it and confirms the send in the
+  talk views. See [Handover](#handover).
 
-The result of `send`, `ask`, `reply`, and `cancel` names the message id and
-the full instance id of the registration that received the request, and the
-name of the target when the tool knows it. So the model can cancel with
-`instance` and `messageId`, also after the peer renamed itself. Once the body
-of a request went out, every failure names the message id and the instance id
-too, also a transport failure or an answer that does not decode, because the
-target can hold the message.
+The result of `send`, `ask`, `reply`, and `cancel`, and of a `handover`
+whose send started, names the message id and the full instance id of the
+registration that received the request, and the name of the target when the
+tool knows it. So the model can cancel with `instance` and `messageId`, also
+after the peer renamed itself. Once the body of a request went out, every
+failure names the message id and the instance id too, also a transport
+failure or an answer that does not decode, because the target can hold the
+message.
 
-A call that fails throws an error whose message names the reason, so omp
-shows a tool error. Each result also carries `details`: the action and, where
-present, the message id, the instance id, and the outcome.
+A successful call returns its text and `details`: the action and, where
+present, the message id, the instance id, and the outcome. A failed call of
+`send`, `ask`, `reply`, `cancel`, `list`, `pending`, or `status` throws an
+error whose message names the reason and the ids where the result has them,
+so omp shows a tool error; omp keeps only the text of a thrown error, so its
+`details` do not reach omp. A failed `handover` returns its text and its
+`details` as a result with `isError: true`, which omp shows as an error too.
 
 ## Targets
 
@@ -289,10 +300,11 @@ sender's text in the text. The confirmation watch looks for
 details; a message with `details` that hold only `messageId`, from plan
 DocksDocks/docks-kit#250, gets omp's default card.
 
-A `deliver` body has an optional `kind`: `message` or `handover`. The tool
-leaves it out, so its body is the body of plan DocksDocks/docks-kit#250; a
-body without `kind` is a plain message. Only the `/talk` handover sends
-`kind: "handover"`. An ask with `kind: "handover"` does not decode.
+A `deliver` body has an optional `kind`: `message` or `handover`. A body
+without `kind` is a plain message, as in plan DocksDocks/docks-kit#250, and
+`send` sends its body that way. The `/talk` handover flow sends
+`kind: "handover"`; the `handover` action of the tool starts that flow (see
+[Handover](#handover)). An ask with `kind: "handover"` does not decode.
 
 ### Size limit
 
@@ -455,6 +467,192 @@ sender's session id.
 Each of these outcomes is a successful call: the text says whether the
 message was cancelled. A transport failure fails the call. After the
 registration ended, every request, `cancel` included, reads `not-live`.
+
+## Handover
+
+The `handover` action starts the handover flow of `/talk handover <target>`
+(see `cli/docs/talk-ui.md`, "Handover") for one exact registration pair, and
+waits until the flow ends. The user reviews the summary and types the confirm
+code in the talk views; the agent cannot skip either step. The tool
+description says to use the action only when the user asks for a handover
+(plan DocksDocks/docks-kit#260).
+
+### Flow
+
+1. The action checks its fields (see [Fields](#fields)) and the first four
+   refusals below. Then it resolves the target with the rules of
+   [Targets](#targets), with the abort signal of the call on the listing, the
+   instance lookup, and the probes. An `instance` resolves without a probe,
+   so the action probes it here.
+2. It checks the first four refusals again, and that the pair is not this
+   binding's registration: not the one at the start of the call, not the
+   current one, and not the one that the binding publishes and has not
+   attached yet. In the same tick it starts the flow, so no `/talk` flow
+   opens in between.
+3. The flow runs the side turn with `HANDOVER_PROMPT`, outside the main
+   context. It shows no start notice, because omp shows a notice of a tool
+   call only after the call ends. Instead, the side-turn waiting view shows
+   ``talk: agent handover to <instance id> (`<name>`) · ⎋ cancels``, with the
+   16-hex instance id; omp draws it as it draws other waiting lines. The
+   first 40 columns always read `talk: agent handover to <instance id>`, so a
+   row that the pane cuts still shows the origin and the target. A listed
+   peer without a name that its user set shows its fallback name
+   `session-<prefix>` (see [Names](#names)); `(no name)`, without a code
+   span, shows only when an exact `instance` resolves from a pair that this
+   process kept without listing metadata. The review mounts only after omp
+   drew the waiting view once, whatever the size of the pane. When omp
+   closes the waiting view before that frame, the flow ends as `cancelled`.
+   A failed or empty side turn is reported at once.
+4. The review holds only the text that can be sent: the note of `message`,
+   cleaned with `safeMultiline` as the draft is, then a blank line, then the
+   draft. A note that is blank after the cleaner adds nothing. The note does
+   not change the template, but the side-turn model sees it: omp copies the
+   pending tool call, with its arguments, into the side-turn request. The
+   user approves only what goes to the peer.
+5. `ctrl+s` opens the confirm view. Its first line names the agent:
+   `Send to <full instance id> (a handover that the agent started): type
+   <code>`. The view draws that line in full or takes no code: a pane too
+   narrow for it shows only `talk: make the pane wider to confirm the
+   destination.` So this line is where the user sees, at the approval, that
+   the agent started the handover.
+6. After the confirm code, the flow checks the pair against this binding's
+   registrations once more, the published one that is not attached yet
+   included. The client asks the same check again right before the body
+   write. When the pair is now this session, the flow shows the notice
+   `talk: the destination of this handover is now this session, so talk sent
+   nothing.` and sends nothing. Otherwise it sends the reviewed text with
+   `kind: "handover"` and a wake, and shows the send result as a notice, as
+   `/talk handover` does.
+
+The keys and the abort of the call:
+
+- `escape` in the side-turn waiting view or in the review ends the flow:
+  `cancelled`.
+- `escape` in the confirm view returns to the review with the text kept, and
+  the tool call still waits.
+- `alt+t` in any view of the flow ends it: `cancelled` before the body
+  write.
+- An abort of the tool call during the checks of step 1 gives `cancelled`.
+  During the side turn, the review, or the confirm view, it ends the flow
+  and nothing is sent: `cancelled`. The client checks the flow once more
+  right before the body write, so an abort during the handshake also keeps
+  the body back. After the body write started, the result follows the
+  dispatch record: the answer when one came, `failed` when the write failed,
+  else `unknown`.
+- A call that is already aborted starts no flow. A `/talk` command during
+  the flow ends it, because a new flow ends the open one.
+
+### Refusals
+
+Each refusal fails the call before the side turn and sends nothing. Its text
+says what the user or the agent can do. Its `details` hold the outcome
+`failed`, or a more specific one such as the probe outcome or `not-live`.
+They hold the instance id whenever the action knows the one instance: the
+exact `instance`, or for `to`, the one registration that remains after the
+probes, which is the one registration that the probes did not prove ended.
+That covers the session checks of an `instance` call (mode, UI, subagent,
+open view, no side turn), the same checks right before the side turn once
+the target resolved, an own target, an `instance` that did not answer, a
+`to` whose one remaining registration did not answer, and a `to` that
+matched only one registration, which ended. An argument error, a session
+check of a `to` call before the lookup, and a `to` refusal that knows no
+unique instance carry no id: no match, a prefix of several session ids,
+several registrations that ended, or two or more registrations that remain.
+
+| Case                                                                                                           | Text starts with                                                                         |
+| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Mode is not `tui` (RPC, ACP, print, json), `ctx.hasUI` is not `true`, or no `ctx.ui.custom` or `ctx.ui.notify` | `talk: the handover action needs an interactive omp session in a terminal or in Tern`    |
+| A subagent session                                                                                             | `talk: a subagent session cannot start a handover.`                                      |
+| A `/talk` flow is open in this binding; it stays open                                                          | `talk: a /talk view is open in this session, and the handover action does not close it.` |
+| No `ctx.runEphemeralTurn`                                                                                      | `talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover.`         |
+| `to` or `instance` names the registration of this session                                                      | `talk: the target is this session.`                                                      |
+| An `instance` whose probe does not answer `ok`                                                                 | `talk: the instance <id> did not answer a probe (<outcome>).`                            |
+| A `to` that does not resolve                                                                                   | The resolver error of [Targets](#targets)                                                |
+
+omp's no-op UI has `custom` and `notify`, but its `custom` never opens a
+view, so the action also needs `ctx.hasUI`. The registration of this
+session is the exact pair at the start of the call, the current one, or the
+one that the binding publishes and has not attached yet; a session id alone
+proves nothing. An `instance` whose probe does not answer ends with
+`Nothing was sent. Check that session, then run the action list again.`
+
+A `to` that names no one target gets recovery text of its own, only for
+`handover` (the other actions and `/talk` keep the resolver error of
+[Targets](#targets)):
+
+- One registration remains, which means that the probes did not prove it
+  ended, and its probe did not answer: ``talk: `<to>` did not answer a probe
+  (<outcome>). Nothing was sent. Check that session, then run the action
+  list again:`` and the candidate rows. `details` hold the instance id and
+  the probe outcome of that registration, also when `to` matched other
+  registrations that the probes proved ended.
+- Two or more registrations remain, and fewer than two of them answered:
+  ``talk: `<to>` names sessions that did not answer a probe. Nothing was
+  sent. Check the listed sessions, then run the action list again:`` and
+  the candidate rows, with the outcome `failed` and no ids.
+- A choice between sessions (a prefix of several session ids, or two or more
+  registrations that answered): the resolver error, then `Name one session
+  with instance, using its full instance id from list, or ask the user which
+  session takes the handover.` No ids.
+- Every match ended (`not-live`): the resolver error, then `Run the action
+  list and name a live session.` `details` hold the instance id only when
+  `to` matched one registration.
+
+When the listing or the instance lookup fails, or a probe fails in this
+process because the lookup of the target's registry entry failed (a trust
+check, I/O, DPAPI), the result is the fixed text `talk: the handover did not
+start: talk could not read the session registry to check the target.
+Nothing was sent. The talk notice in this session shows the error to the
+user. Ask the user to check it before a new handover.` The host error, which
+can hold a path, goes only to a local notice: `talk: the agent asked for a
+handover, but talk could not check its target, so nothing was sent. Error:
+<host error>`, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`,
+"Errors"). `details` keep the instance id when the action knows the one
+instance: the exact `instance`, also when its listing, lookup, or probe call
+was rejected; for `to`, the one registration that remains when a probe
+lookup failed, or the one matched registration when the probe call was
+rejected. A peer that does not answer a probe, for example with `timeout`,
+gives the probe refusals above, not this text.
+
+### Outcomes
+
+The end of a flow interrupts the promise of its send, and the sending view
+drops the result. So each send of the flow has a dispatch record outside the
+promise (`DispatchRecord` in `cli/talk/tool/tool.ts`): the message id and the
+instance id, fixed before the request; `write`, the state of the socket write
+of the body (`none` before the write call, `pending` until the write
+completes, then `done` or `failed`); and `answer`, which the client sets when
+it reads the response frame, a refusal such as `not-live` included. The
+client sets `write` from the completion of the socket write, because Bun can
+return from `socket.write` before it reports an error such as `EPIPE`.
+
+The result follows the record, not what ended the flow:
+
+| Record or flow end                                                    | Result                                                                                                                      | Outcome      |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| An answer: `delivered`, `queued`, or `submitted`                      | `Handover:` and the outcome text of `send`, with the ids                                                                    | that outcome |
+| An answer: `busy`, `not-live`, or `unknown-kind`                      | That outcome, with the ids                                                                                                  | that outcome |
+| `write` is `pending` or `done`, and no usable answer came             | The text may have gone out, and no usable answer settled the outcome; `cancel` with the ids withdraws it while it is queued | `unknown`    |
+| `write` is `failed`                                                   | The socket did not take the text, and nothing was delivered; with the ids                                                   | `failed`     |
+| `write` is `none`, and the send ended with a failure                  | Nothing was sent, and the talk notice in the session names the reason                                                       | `failed`     |
+| `write` is `none`, and the flow ended first                           | `talk: the handover was cancelled. Nothing was sent.`                                                                       | `cancelled`  |
+| The destination is now this session's registration                    | `talk: the target is this session. Nothing was sent. Name another session as to or instance.`                               | `cancelled`  |
+| The side turn failed, or its reply was empty                          | `talk: the handover side turn failed. Nothing was sent.`                                                                    | `failed`     |
+| Another error ended the flow before the send                          | Nothing was sent, and the talk notice in the session names the error                                                        | `failed`     |
+
+Only the first row is a successful call. Every other row, and every refusal,
+is a result with `isError: true` (see [Actions](#actions)). `cancelled`
+means that the flow ended before anything went out: by a key, by an abort
+of the call, or by the check of step 6. It carries no ids, because no body
+went out. After the body write started, a stop of the sending view or an
+abort of the call gives the outcome of the record: the answer when one came,
+`failed` for a failed write, else `unknown`.
+
+The flow shows the host error of a failed side turn to the user in a
+notice, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`, "Errors").
+The result never holds that error, because omp passes provider diagnostics
+through it. The result never holds the summary or the note either. `details`
+hold the action, the outcome, and the ids, never a text.
 
 ## Queue and busy rules
 
@@ -750,7 +948,7 @@ Other limits:
 | `cli/talk/tool/host.ts`        | The host interface that `extension.ts` fills from `pi` and `ctx`, the clock, the `details` Schema, and the talk entry check of `getEntries()`                                                                                               |
 | `cli/talk/tool/delivery.ts`    | The receiver of one binding: the transition hold, the guard, the confirmation watch, the queue, `cancel`, and the request handlers                                                                                                          |
 | `cli/talk/tool/asks.ts`        | The ask store of the process (waiters, reply addresses, the agent map) and the pending inbound asks of one session                                                                                                                          |
-| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its seven actions, the text of each result, and the listing, resolver, and sends that the `/talk` views share                                                                                              |
+| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its eight actions, the text of each result, the dispatch record and the result of `handover`, and the listing, resolver, and sends that the `/talk` views share                                            |
 | `cli/talk/ui/`                 | The `/talk` command, the views, the message card, handover, and the UI host probe; see `cli/docs/talk-ui.md`                                                                                                                                |
 | `cli/talk/types/`              | The declarations of the omp UI host exports; see `cli/docs/talk-ui.md`                                                                                                                                                                      |
 | `cli/talk/transport/`          | The transport; see `cli/docs/talk-transport.md`                                                                                                                                                                                             |

@@ -30,6 +30,8 @@ import {
 } from "./tool/host";
 import { type ProbeResult, sessionName } from "./tool/targets";
 import {
+  HANDOVER_OWN_TARGET,
+  type HandoverFlow,
   type ListAnswer,
   type ListingSnapshot,
   type PeerTransport,
@@ -69,6 +71,7 @@ import {
   talkErrorText,
 } from "./ui/command";
 import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
+import { safeDiagnostic } from "./ui/handover";
 import { TALK_SHORTCUT } from "./ui/views";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
@@ -230,21 +233,27 @@ export const makeTalkTransport = (
         ),
         signal,
       ),
-    probeAll: (targets, signal) =>
+    probeAll: (targets, signal, hostError) =>
       run(
         TalkTransport.use((transport) => transport.probeAll(targets)).pipe(
           Effect.map((results) =>
-            results.map((result): ProbeResult =>
-              Result.isSuccess(result) ? "ok" : result.failure.outcome,
-            ),
+            results.map((result, index): ProbeResult => {
+              if (Result.isSuccess(result)) return "ok";
+              const { failure } = result;
+              const target = targets[index];
+              // #260 H4: a lookup that failed in this process is no answer of the peer; its reason goes to the caller.
+              if (failure.lookupFailed === true && target !== undefined)
+                hostError?.(target, failure.reason);
+              return failure.outcome;
+            }),
           ),
         ),
         signal,
       ),
-    request: (target, kind, body, signal, beforeBody) =>
+    request: (target, kind, body, signal, beforeBody, trace) =>
       run(
         TalkTransport.use((transport) =>
-          transport.request(target, kind, body, undefined, beforeBody),
+          transport.request(target, kind, body, undefined, beforeBody, trace),
         ).pipe(
           Effect.map((answer): RequestAnswer => ({ _tag: "Answered", body: answer })),
           Effect.catch((error) =>
@@ -582,6 +591,18 @@ const flowUi = (ctx: unknown): FlowUi | undefined => {
 
 const NO_FLOW_UI = `talk: this omp gives no ctx.ui.custom or ctx.ui.notify, so /talk has no views. talk needs omp ${OMP_VERSION_NEEDED} or later.`;
 
+// #260 H3: the refusals of the `handover` action before its side turn; each says what the user can do.
+export const HANDOVER_NEEDS_TUI =
+  "talk: the handover action needs an interactive omp session in a terminal or in Tern, because the user reviews and confirms the summary in a talk view there. Nothing was sent. The user can start the handover with /talk handover <session> in such a session.";
+export const HANDOVER_IN_SUBAGENT =
+  "talk: a subagent session cannot start a handover. Nothing was sent. The user can start it in the main session with /talk handover <session>.";
+export const HANDOVER_FLOW_OPEN =
+  "talk: a /talk view is open in this session, and the handover action does not close it. Nothing was sent. The user can finish or close that view, then ask for the handover again.";
+export const HANDOVER_NEEDS_SIDE_TURN = `talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover. Nothing was sent. The user can update omp to ${OMP_VERSION_NEEDED} or later.`;
+/** #260 H4: the start of the local notice of a failed listing, lookup, or probe of the `handover` action; the cleaned host error follows. */
+export const HANDOVER_HOST_ERROR =
+  "talk: the agent asked for a handover, but talk could not check its target, so nothing was sent. Error: ";
+
 /** #251 G4: the warning of a key that already holds `alt+t`. */
 const conflictNotice = (conflict: unknown): string => {
   const kind =
@@ -807,6 +828,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   let beatTimer: { readonly context: SessionContext; readonly timer: unknown } | undefined;
   let closed = false;
   let registering = false;
+  /** The pair that this binding publishes and has not attached yet (#260 H3). */
+  let publishing: Target | undefined;
   let updating = false;
   let published: RegistrationUpdate | undefined;
   let lastWarning: string | undefined;
@@ -958,6 +981,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       cwd: context.cwd(),
     };
     registering = true;
+    publishing = pair;
     const done = talk.registrations.starting({ registration: pair, isActive: active });
     let answer: RegisterAnswer;
     try {
@@ -965,6 +989,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     } finally {
       done();
       registering = false;
+      publishing = undefined;
     }
     if (answer._tag === "RegisterFailed") {
       warn(`talk: this session could not register: ${answer.reason}`);
@@ -1171,12 +1196,17 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             clock: env.clock,
             signal: signal instanceof AbortSignal ? signal : undefined,
             snapshot,
+            handover: handoverFlow(ctx, context, self.registration),
           },
           params,
         ),
       );
-      if (!outcome.ok) throw new Error(outcome.text);
-      return { content: [{ type: "text", text: outcome.text }], details: outcome.details };
+      const content = [{ type: "text", text: outcome.text }];
+      if (outcome.ok) return { content, details: outcome.details };
+      // #260 H4: a failed handover keeps its details; omp shows a result with `isError` as an error.
+      if (outcome.details.action === "handover")
+        return { content, details: outcome.details, isError: true };
+      throw new Error(outcome.text);
     },
   });
 
@@ -1191,11 +1221,12 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       life.live() ? call() : Promise.reject(new Error("the /talk flow ended. Nothing was sent."));
     return {
       list: () => whileLive(() => talk.transport.list(life.signal)),
-      probeAll: (targets) => whileLive(() => talk.transport.probeAll(targets, life.signal)),
+      probeAll: (targets, _signal, hostError) =>
+        whileLive(() => talk.transport.probeAll(targets, life.signal, hostError)),
       // The client asks `live` again after the handshake, right before the body
       // goes out: a session id that changed with no event stops the body (R1, R11).
-      request: (target, kind, body) =>
-        whileLive(() => talk.transport.request(target, kind, body, life.signal, life.live)),
+      request: (target, kind, body, _signal, _beforeBody, trace) =>
+        whileLive(() => talk.transport.request(target, kind, body, life.signal, life.live, trace)),
       known: (instanceId) => whileLive(() => talk.transport.known(instanceId, life.signal)),
     };
   };
@@ -1237,13 +1268,14 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             }),
           ),
         ),
-      send: (pair, text, kind, life) =>
+      send: (pair, text, kind, life, record) =>
         Effect.runPromise(
           sendToPair(toolContext(life), pair, {
             text,
             attachments: [],
             noWake: false,
             kind,
+            record,
           }).pipe(
             Effect.match({
               onFailure: (error): SendAnswer => ({ ok: false, text: error.message }),
@@ -1257,22 +1289,78 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     };
   };
 
+  /**
+   * The `handover` action of the tool, bound to the context of its call
+   * (#260 H2, H3): the refusals before the side turn, then the `/talk`
+   * handover flow for the one exact pair, with the signal of the call.
+   * `startRegistration` is this binding's registration when the call
+   * started. The pair must differ from it, from the current one, and from
+   * the one that the binding publishes and has not attached yet: in the
+   * checks before the side turn, right before the side turn, right before
+   * the send, and at the body write.
+   */
+  const handoverFlow = (
+    ctx: unknown,
+    context: SessionContext,
+    startRegistration: Target | undefined,
+  ): HandoverFlow => {
+    const refusal = (): string | undefined => {
+      // omp's no-op UI has both methods, but `custom` never calls the factory, so `hasUI` must hold too.
+      const hasUi = Predicate.hasProperty(ctx, "hasUI") && ctx.hasUI === true;
+      if (readContext(ctx, ["mode"]).mode() !== "tui" || !hasUi || flowUi(ctx) === undefined)
+        return HANDOVER_NEEDS_TUI;
+      if (context.agent().kind !== "main") return HANDOVER_IN_SUBAGENT;
+      if (flows.isOpen()) return HANDOVER_FLOW_OPEN;
+      if (method(ctx, "runEphemeralTurn") === undefined) return HANDOVER_NEEDS_SIDE_TURN;
+      return undefined;
+    };
+    /** The exact pair is this binding's registration now, at the start of the call, or the one it publishes; a session id alone proves nothing. */
+    const isOwnPair = (pair: Target): boolean =>
+      sameTarget(startRegistration, pair) ||
+      sameTarget(delivery.registration, pair) ||
+      sameTarget(publishing, pair);
+    return {
+      refusal,
+      isOwn: isOwnPair,
+      start: async (target, note, signal) => {
+        // The checks and the start of the flow run in one tick, so a `/talk` flow that
+        // opened while the target resolved refuses the action and stays open.
+        const refused = refusal();
+        const ui = flowUi(ctx);
+        if (refused !== undefined || ui === undefined)
+          return { _tag: "Refused", text: refused ?? HANDOVER_NEEDS_TUI };
+        const pair = target.target;
+        if (isOwnPair(pair)) return { _tag: "Refused", text: HANDOVER_OWN_TARGET };
+        const destination = { ...pair, name: target.name, cwd: target.cwd };
+        return flows.run(
+          ui,
+          flowServices(ctx, context),
+          { _tag: "AgentHandover", destination, note, isOwn: () => isOwnPair(pair) },
+          signal,
+        );
+      },
+      hostError: (diagnostic) => {
+        notifyUser(ctx, `${HANDOVER_HOST_ERROR}${safeDiagnostic(diagnostic)}`, env.writeError);
+      },
+    };
+  };
+
   /** G1: a flow in a TUI session; in `rpc`, `print`, and `json`, the one notice. */
-  const startFlow = (ctx: unknown, command: TalkCommand): Promise<void> => {
+  const startFlow = async (ctx: unknown, command: TalkCommand): Promise<void> => {
     try {
       if (readContext(ctx, ["mode"]).mode() !== "tui") {
         notifyUser(ctx, VIEWS_NEED_TUI, env.writeError);
-        return Promise.resolve();
+        return;
       }
       const ui = flowUi(ctx);
       if (ui === undefined) {
         notifyUser(ctx, NO_FLOW_UI, env.writeError);
-        return Promise.resolve();
+        return;
       }
-      return flows.run(ui, flowServices(ctx, readContext(ctx, TOOL_NEEDS)), command);
+      // `/talk` and `alt+t` show the end of their flow in its notices, so they drop it.
+      await flows.run(ui, flowServices(ctx, readContext(ctx, TOOL_NEEDS)), command);
     } catch (error) {
       notifyUser(ctx, talkErrorText(error), env.writeError);
-      return Promise.resolve();
     }
   };
 

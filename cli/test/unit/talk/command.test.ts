@@ -26,6 +26,7 @@ import {
   typeCode,
 } from "../../lib/talkFlowHost";
 import { literal } from "../../../talk/tool/attachments";
+import type { FlowEnd } from "../../../talk/tool/tool";
 import { type ListingAnswer, parseTalkArgs, talkCompletions } from "../../../talk/ui/command";
 import {
   CONFIRM_TOO_SMALL,
@@ -945,7 +946,7 @@ describe("flow slot (G3)", () => {
     expect(h.tui.calls).toEqual([]);
   });
 
-  it("gives each listing and send the flow's life, whose signal aborts when the flow ends (C1)", async () => {
+  it("gives each listing and send the flow's signal and liveness, so both stop when the flow ends (C1)", async () => {
     const h = await harness();
     const flow = h.run();
     await flush();
@@ -954,8 +955,10 @@ describe("flow slot (G3)", () => {
     await flow;
     expect(h.services.lives).toHaveLength(2);
     const [listing, send] = h.services.lives;
-    expect(listing).toBe(send);
+    // The send adds the check of its destination to the life of the flow (#260 H3).
+    expect(send?.signal).toBe(listing?.signal);
     expect(send?.signal.aborted).toBe(true);
+    expect(listing?.live()).toBe(false);
     expect(send?.live()).toBe(false);
   });
 
@@ -1034,7 +1037,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
 
   /** One transition: the flow, the outgoing view, and the input that leads to the next talk view. */
   interface Transition {
-    readonly flow: Promise<void>;
+    readonly flow: Promise<FlowEnd>;
     readonly view: FakeNode;
     readonly trigger: () => void;
   }

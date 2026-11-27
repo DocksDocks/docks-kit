@@ -18,9 +18,10 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
 import { Effect, Exit, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { type Client, DIAL_SLOTS, makeClient, processAlive } from "../../../talk/transport/client";
 import {
@@ -44,7 +45,7 @@ import {
   encodeEntry,
   entryFileName,
 } from "../../../talk/transport/registry";
-import type { Target } from "../../../talk/transport/request";
+import { type Target, newRequestTrace } from "../../../talk/transport/request";
 import { TalkDpapi, sealEntries } from "../../../talk/transport/sealWindows";
 import { TRANSPORT_DEFAULTS, TalkTransport } from "../../../talk/transport/transport";
 import { TalkFileError, TalkPosixSystem } from "../../../talk/transport/trustPosix";
@@ -178,6 +179,10 @@ interface FakeOptions {
   readonly gate?: Promise<void>;
   /** Holds back each response until it settles. */
   readonly respond?: Promise<void>;
+  /** The `result` of each response. Default: `ok` with the label as the body. */
+  readonly result?: Readonly<Record<string, unknown>>;
+  /** Destroys the connection when a request arrives, so the reply is lost after the body went out. */
+  readonly dropRequest?: boolean;
   readonly gauge?: Gauge;
   /** Receives the label of each hello, in order. */
   readonly hellos?: Array<string>;
@@ -191,6 +196,8 @@ interface FakeListener {
   readonly requests: () => number;
   /** Destroys every open connection. */
   readonly release: () => void;
+  /** The open accepted connections. */
+  readonly sockets: () => ReadonlyArray<Socket>;
 }
 
 async function startFakeListener(path: string, options: FakeOptions): Promise<FakeListener> {
@@ -245,12 +252,16 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
           socket.write(frame({ type: options.mode === "ended" ? "ended" : "ready" }));
         } else if (received["type"] === "request") {
           requests += 1;
+          if (options.dropRequest === true) {
+            socket.destroy();
+            return;
+          }
           void (options.respond ?? Promise.resolve()).then(() =>
             socket.write(
               frame({
                 type: "response",
                 id: received["id"],
-                result: { status: "ok", body: options.label ?? null },
+                result: options.result ?? { status: "ok", body: options.label ?? null },
               }),
             ),
           );
@@ -270,6 +281,7 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
     release: () => {
       for (const socket of open) socket.destroy();
     },
+    sockets: () => [...open],
   };
 }
 
@@ -439,6 +451,66 @@ describe("bounded connection input", () => {
     } finally {
       client.destroy();
       server.close();
+    }
+  });
+});
+
+describe("frame writes (#260 H5)", () => {
+  /** The accepted end of a loopback connection, with a function that closes both ends. */
+  const acceptedSocket = async (): Promise<{
+    readonly socket: Socket;
+    readonly close: () => void;
+  }> => {
+    const server: Server = createServer();
+    const accepted = Promise.withResolvers<Socket>();
+    server.on("connection", (socket) => accepted.resolve(socket));
+    const listening = Promise.withResolvers<void>();
+    server.listen({ host: "127.0.0.1", port: 0 }, () => listening.resolve());
+    await listening.promise;
+    const address = server.address();
+    const port = address !== null && typeof address === "object" ? address.port : 0;
+    const client = connect({ host: "127.0.0.1", port });
+    client.resume();
+    const socket = await accepted.promise;
+    return {
+      socket,
+      close: () => {
+        client.destroy();
+        socket.destroy();
+        server.close();
+      },
+    };
+  };
+
+  it("writes an untracked frame without a completion callback", async () => {
+    const { socket, close } = await acceptedSocket();
+    try {
+      const write = vi.spyOn(socket, "write");
+      const connection = await Effect.runPromise(makeConnection(socket));
+      await Effect.runPromise(connection.write({ type: "ping" }));
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0]).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+
+  it("tracks a frame write as pending from the write call until its completion callback reports done", async () => {
+    const { socket, close } = await acceptedSocket();
+    try {
+      const connection = await Effect.runPromise(makeConnection(socket));
+      const states: Array<string> = [];
+      Effect.runSync(
+        connection.write({ type: "ping" }, (state) => {
+          states.push(state);
+        }),
+      );
+      // Node runs the completion callback in a later tick, never inside the write call.
+      expect(states).toEqual(["pending"]);
+      await waitFor(() => states.length === 2, SETTLE_MS, "the write completion");
+      expect(states).toEqual(["pending", "done"]);
+    } finally {
+      close();
     }
   });
 });
@@ -1070,6 +1142,116 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       expect(listener.accepted()).toBe(2);
     } finally {
       for (const fake of listeners) closeFake(fake);
+      cleanUp();
+    }
+  });
+});
+
+describe.skipIf(!POSIX)("dispatch record of a request (#260 H5)", () => {
+  let base = "";
+  let folder = "";
+  const opened: Array<FakeListener> = [];
+  const secret = randomBytes(32);
+  const target = { instanceId: hex(8), sessionId: "traced" };
+
+  /** A registry folder whose one entry names a fake listener of `options`. */
+  const fresh = async (options: FakeOptions): Promise<FakeListener> => {
+    base = mkdtempSync(join(tmpdir(), "tl-"));
+    folder = join(base, "reg");
+    mkdirSync(folder, { mode: 0o700 });
+    chmodSync(folder, 0o700);
+    const path = join(folder, socketName(process.pid));
+    const listener = await startFakeListener(path, { secret, pair: target, ...options });
+    opened.push(listener);
+    writePosixEntry(folder, {
+      version: PROTOCOL_VERSION,
+      ...target,
+      name: "traced",
+      cwd: base,
+      processId: process.pid,
+      endpoint: { kind: "unix", path },
+      startTime: 1_700_000_000_000,
+      secret: secret.toString("hex"),
+    });
+    return listener;
+  };
+
+  const cleanUp = (): void => {
+    for (const listener of opened.splice(0)) closeFake(listener);
+    rmSync(base, { recursive: true, force: true });
+  };
+
+  /** One request with a fresh record; gives the record, the exit, and the failure outcome. */
+  const traced = (beforeBody?: () => boolean) =>
+    withClient(folder, (client) =>
+      Effect.gen(function* () {
+        const trace = newRequestTrace();
+        const exit = yield* Effect.exit(
+          client.request(target, "echo", null, undefined, beforeBody, trace),
+        );
+        const outcome = Option.getOrUndefined(Exit.findErrorOption(exit))?.outcome;
+        return { trace, exit, outcome };
+      }),
+    );
+
+  it("records the body write as done and the answer that the listener gave", async () => {
+    try {
+      await fresh({ mode: "answer", label: "echoed" });
+      const { trace, exit } = await traced();
+      expect(trace).toEqual({ write: "done", answer: { status: "ok", body: "echoed" } });
+      expect(Exit.isSuccess(exit)).toBe(true);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records a not-live answer after the body write as an answer, not as a lost reply", async () => {
+    try {
+      await fresh({ mode: "answer", result: { status: "not-live" } });
+      const { trace, outcome } = await traced();
+      expect(trace).toEqual({ write: "done", answer: { status: "not-live" } });
+      expect(outcome).toBe("not-live");
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records the body write as done and no answer when the reply is lost after the body went out", async () => {
+    try {
+      const listener = await fresh({ mode: "answer", dropRequest: true });
+      const { trace, outcome } = await traced();
+      expect(listener.requests()).toBe(1);
+      expect(trace).toEqual({ write: "done", answer: undefined });
+      expect(outcome).toBe("unreachable");
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records the body write as failed when the peer closed its Unix socket right before the write", async () => {
+    try {
+      const listener = await fresh({ mode: "answer" });
+      // The guard runs in the tick of the body write, so the peer is gone before the write call.
+      const { trace, outcome } = await traced(() => {
+        for (const socket of listener.sockets()) socket.destroy();
+        return true;
+      });
+      expect(trace).toEqual({ write: "failed", answer: undefined });
+      expect(outcome).toBe("unreachable");
+      expect(listener.requests()).toBe(0);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("leaves the body write at none when the guard keeps the body back", async () => {
+    try {
+      const listener = await fresh({ mode: "answer" });
+      const { trace, exit } = await traced(() => false);
+      expect(trace).toEqual({ write: "none", answer: undefined });
+      expect(Exit.hasInterrupts(exit)).toBe(true);
+      expect(listener.requests()).toBe(0);
+    } finally {
       cleanUp();
     }
   });
@@ -2347,6 +2529,120 @@ describe("talk transport between spawned Bun peers", () => {
         rmSync(entryPath, { force: true });
         rmSync(starting, { force: true });
         rmSync(named, { force: true });
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  /**
+   * A Bun client for the closed-socket case of #260 H5: it imports the built
+   * bundle, sends one traced request, and in the guard right before the body
+   * write prints `guard` and blocks until the test writes a line, so the
+   * test closes the peer's socket while the client's event loop waits. It
+   * exits when its standard input ends, so a test that stopped never leaves
+   * it waiting.
+   */
+  const CLOSED_SOCKET_CLIENT = `
+import { readSync } from "node:fs";
+import { Effect, ManagedRuntime } from "effect";
+// The bundle path comes from the environment, so a static import cannot name it.
+const talk = await import(process.env.TALK_BUNDLE_URL);
+const runtime = ManagedRuntime.make(talk.TalkTransport.layer({}));
+const target = JSON.parse(process.env.TALK_TARGET);
+const trace = { write: "none", answer: undefined };
+const guard = () => {
+  process.stdout.write("guard\\n");
+  const buffer = Buffer.alloc(1);
+  for (;;) {
+    try {
+      const read = readSync(0, buffer, 0, 1, null);
+      if (read === 1) return true;
+      if (read === 0) process.exit(3);
+    } catch (error) {
+      if (error.code !== "EAGAIN") throw error;
+      Bun.sleepSync(5);
+    }
+  }
+};
+const outcome = await runtime.runPromise(
+  talk.TalkTransport.use((transport) =>
+    transport.request(target, "echo", null, undefined, guard, trace),
+  ).pipe(Effect.match({ onFailure: (error) => error.outcome, onSuccess: () => "ok" })),
+);
+process.stdout.write(JSON.stringify({ trace, outcome }) + "\\n");
+await runtime.dispose();
+process.exit(0);
+`;
+
+  it.skipIf(WINDOWS)(
+    "records the body write as failed under Bun when the peer closed its socket right before the write (#260 H5)",
+    async () => {
+      const secret = randomBytes(32);
+      const pair = { instanceId: hex(8), sessionId: "closed-peer" };
+      const path = join(folder, socketName(process.pid));
+      const listener = await startFakeListener(path, { mode: "answer", secret, pair });
+      const result = Promise.withResolvers<unknown>();
+      // The child is another process with real timers, so a fake clock cannot bound it. The
+      // deadline settles the result inside the cleanup scope, so `finally` always kills the child.
+      const deadline = setTimeout(() => {
+        result.reject(new Error("the Bun client gave no result in time"));
+      }, SPAWN_TIMEOUT_MS / 2);
+      let child: ChildProcessWithoutNullStreams | undefined;
+      let entryPath = "";
+      try {
+        entryPath = await writeEntry({
+          version: PROTOCOL_VERSION,
+          ...pair,
+          name: "closed-peer",
+          cwd: base,
+          processId: process.pid,
+          endpoint: { kind: "unix", path },
+          startTime: 1_700_000_000_000,
+          secret: secret.toString("hex"),
+        });
+        const spawned = spawn(BUN_RUNTIME, ["-e", CLOSED_SOCKET_CLIENT], {
+          cwd: REPO_DIR,
+          env: {
+            ...env,
+            TALK_BUNDLE_URL: pathToFileURL(bundle).href,
+            TALK_TARGET: JSON.stringify(pair),
+          },
+          stdio: "pipe",
+        });
+        child = spawned;
+        const errors: Array<string> = [];
+        spawned.stderr.on("data", (chunk: Buffer) => errors.push(chunk.toString("utf8")));
+        spawned.once("error", result.reject);
+        spawned.stdin.once("error", result.reject);
+        // `close` follows the last line of standard output, so a result that came first wins.
+        spawned.once("close", (code, signal) => {
+          result.reject(
+            new Error(
+              `the Bun client exited (${code ?? signal}) without a result: ${errors.join("")}`,
+            ),
+          );
+        });
+        createInterface({ input: spawned.stdout }).on("line", (line) => {
+          if (line === "guard") {
+            // The client waits in its guard: close the peer's end, then let the client write.
+            for (const socket of listener.sockets()) socket.destroy();
+            waitFor(() => listener.sockets().length === 0, SETTLE_MS, "the closed peer").then(
+              () => spawned.stdin.write("go\n"),
+              result.reject,
+            );
+          } else if (line.startsWith("{")) result.resolve(JSON.parse(line));
+        });
+        expect(await result.promise).toEqual({
+          trace: { write: "failed" },
+          outcome: "unreachable",
+        });
+        expect(listener.requests()).toBe(0);
+      } finally {
+        clearTimeout(deadline);
+        child?.kill("SIGKILL");
+        closeFake(listener);
+        if (entryPath !== "") rmSync(entryPath, { force: true });
+        rmSync(path, { force: true });
       }
     },
     SPAWN_TIMEOUT_MS,

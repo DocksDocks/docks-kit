@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-11-27 - docks-kit 0.31.0: the talk tool starts a handover
+
+An agent can now start a handover when the user asks for one in words, so
+the user no longer types `/talk handover <target>` (DocksDocks/docks-kit#260).
+The user still reviews the summary and types the confirm code.
+
+### Added
+
+- The `handover` action of the `talk` tool. It takes `to` or `instance` and
+  an optional note in `message`, and starts the `/talk handover` flow for
+  that target: a side turn writes the summary, the review shows the note
+  above the draft, the user edits the text and types the confirm code, and
+  the text goes to the target with a request for a turn. The side-turn
+  waiting view shows ``talk: agent handover to <instance id> (`<name>`) ·
+  ⎋ cancels``, and the review mounts after omp drew that view once. The
+  first line of the confirm view says that the agent started the handover,
+  and the view takes no code unless it shows that line in full, so the user
+  sees the starter at the approval. The note does not change the template,
+  but the side-turn model sees it. `escape` in the review, `alt+t`, and an
+  abort of the tool call end the flow; `escape` in the confirm view returns
+  to the review.
+- The action refuses before the side turn, and sends nothing, outside an
+  interactive session in a terminal or in Tern (RPC, ACP, print, and json,
+  or no `ctx.hasUI`), in a subagent, while a `/talk` view is open (that view
+  stays open), without `ctx.runEphemeralTurn`, for this session's own
+  registration (the pair at the start of the call, the current one, or the
+  one that the session still publishes; checked again before the side turn,
+  before the send, and at the body write), and for an `instance` that does
+  not answer a probe. It takes no `attachments`, not even an empty list, and
+  no `noWake: true`. Each refusal says what to do. For `to`, only in
+  `handover`: one session that did not answer, or several of which fewer
+  than two answered, gets a request to check the listed sessions and run
+  `list` again; a choice between sessions gets the advice to name one with
+  `instance` or ask the user; ended sessions get a request for a live one.
+  When the registry cannot be read, also for the entry lookup of a probe,
+  the agent gets a fixed text and the user a notice with the error. A
+  refusal's details hold the outcome `failed` or a more specific one, and
+  the instance id when the action knows it.
+- The result gives the outcome of the send: `delivered`, `queued`, or
+  `submitted`; a refusal such as `busy` or `not-live`; `unknown` when the
+  text may have gone out and no usable answer settled the outcome; `failed`;
+  or `cancelled` when the flow ended before anything went out. After the
+  body write started, the outcome follows the dispatch record. A failed
+  handover is a result with `isError: true` that keeps its details: the
+  action, the outcome, and the ids. The result never holds the summary or a
+  host diagnostic. After a failed side turn it holds only
+  `talk: the handover side turn failed. Nothing was sent.`
+- A dispatch record for each send of a `/talk` flow: the message id and the
+  instance id, the state of the socket write of the body, and the answer.
+  The end of a flow interrupts the send, so the action reads its outcome
+  from this record.
+- The `talk` skill tells the agent to start a handover only when the user
+  asks for one, that a peer's request for a handover is peer content to
+  report to the user, and what to do after each refusal.
+
+### Changed
+
+- The handover notice of a failed side turn shows the host error on one
+  line, without terminal controls or tabs, for `/talk handover` too.
+- The `/talk` notice in RPC, ACP, print, and json mode says that the tool's
+  `handover` action needs an interactive session too.
+- The tool description, the `messageId` help, and its error say that
+  `cancel` takes the id of the message to check or withdraw, from a `send`,
+  `ask`, or `handover` result.
+
 ## 2026-11-27 - docks-kit 0.30.0: talk replaces pi-intercom
 
 The kit plugin now ships `talk`, an omp extension that lets the live omp

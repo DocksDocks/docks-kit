@@ -6,6 +6,7 @@ import { Predicate } from "effect";
 import { expect } from "vitest";
 
 import type { DeliverKind } from "../../talk/tool/protocol";
+import type { DispatchRecord, FlowEnd } from "../../talk/tool/tool";
 import type { Target } from "../../talk/transport/request";
 import {
   type FlowLife,
@@ -212,6 +213,8 @@ export class FakeTui {
   size = { columns: 100, rows: 30 };
   /** The theme that each factory gets; omp gives `extensionTheme(currentTheme())`. */
   theme: unknown = { symbols: { preset: "unicode" } };
+  /** omp draws a frame of each mounted overlay; false holds the frames back until `draw` (#260 H2). */
+  drawOnMount = true;
   readonly views: Array<View> = [];
   readonly calls: Array<string> = [];
   readonly notices: Array<{ readonly text: string; readonly level: string }> = [];
@@ -278,6 +281,7 @@ export class FakeTui {
         },
         close: hostClose,
       });
+      if (this.drawOnMount) this.draw(view);
       return promise;
     },
     notify: (text, level) => {
@@ -285,6 +289,12 @@ export class FakeTui {
       this.notices.push({ text, level });
     },
   };
+
+  /** One frame of `view`: the host reads the text of its root, as the painter does. */
+  draw(view: View): void {
+    const text = view.node.props["text"];
+    if (Predicate.isFunction(text)) text();
+  }
 
   /** The last view; it must be open. */
   get top(): View {
@@ -368,6 +378,8 @@ export class FakeServices implements FlowServices {
   answer: SendAnswer = { ok: true, text: "Delivered: the message is in the session." };
   /** Set: each send waits for it after it records the send, as a slow lookup does. */
   sendGate: Promise<void> | undefined;
+  /** The dispatch record that the flow gave each send, in call order (#260 H5). */
+  readonly records: Array<DispatchRecord> = [];
   /** The flow life of each listing, resolution, and send, in call order. */
   readonly lives: Array<FlowLife> = [];
   /** Each side-turn request, as the flow made it. */
@@ -393,9 +405,11 @@ export class FakeServices implements FlowServices {
     text: string,
     kind: DeliverKind,
     life: FlowLife,
+    record: DispatchRecord,
   ): Promise<SendAnswer> => {
     this.lives.push(life);
     this.sends.push({ pair, text, kind });
+    this.records.push(record);
     if (this.sendGate !== undefined) await this.sendGate;
     return this.answer;
   };
@@ -415,7 +429,8 @@ export const flush = (): Promise<void> => {
 export interface Harness {
   readonly tui: FakeTui;
   readonly services: FakeServices;
-  readonly run: (command?: TalkCommand) => Promise<void>;
+  /** Runs a flow; `signal` is the signal of the tool call that started it (#260 H5). */
+  readonly run: (command?: TalkCommand, signal?: AbortSignal) => Promise<FlowEnd>;
   readonly slot: FlowSlot;
 }
 
@@ -427,8 +442,8 @@ export const harness = async (): Promise<Harness> => {
     tui,
     services,
     slot,
-    run: async (command = { _tag: "List" }) => {
-      const flow = slot.run(tui.ui, services, command);
+    run: async (command = { _tag: "List" }, signal) => {
+      const flow = slot.run(tui.ui, services, command, signal);
       await flush();
       return flow;
     },
