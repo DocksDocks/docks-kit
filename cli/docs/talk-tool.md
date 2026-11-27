@@ -32,7 +32,9 @@ decisions (E1 to E14) that this document names.
 
 omp loads the default export of `talk.js`, the extension factory. omp calls
 the factory once for each session of a module evaluation: for the main
-session and for each subagent session. Each such call is a binding.
+session and for each subagent session, and awaits it. Each such call is a
+binding. The interactive parts of a binding (the `/talk` command, `alt+t`,
+the message cards, and handover) are in `cli/docs/talk-ui.md`.
 
 ### Worker threads
 
@@ -42,15 +44,19 @@ subagent has no `talk` tool.
 
 ### Capability probe
 
-The factory checks by type each member of `pi` that `talk` calls:
-`pi.registerTool`, `pi.sendMessage`, `pi.on`, `pi.getAllTools`,
-`pi.getSessionName`, and the builders `Object`, `String`, `Boolean`,
-`Literal`, `Union`, `Array`, and `Optional` of `pi.typebox.Type`. When all
-are present, it registers the tools and the event handlers. When one is
-missing:
+The factory is async. Before it registers anything, it checks by type each
+member of `pi` that `talk` calls: `pi.registerTool`, `pi.sendMessage`,
+`pi.on`, `pi.getAllTools`, `pi.getSessionName`, `pi.registerCommand`,
+`pi.registerShortcut`, `pi.getShortcutConflict`,
+`pi.registerMessageRenderer`, and the builders `Object`, `String`, `Boolean`,
+`Literal`, `Union`, `Array`, and `Optional` of `pi.typebox.Type`. It also
+loads the omp UI modules and checks their exports (see
+`cli/docs/talk-ui.md`, "UI host probe"). When all are present, it registers
+the tools, the message renderer, the `/talk` command, the `alt+t` shortcut,
+and the event handlers. When one is missing, or a UI module does not load:
 
 - With a callable `pi.on`, the binding registers only a `session_start`
-  handler. That handler shows one notice, which names the missing members and
+  handler. That handler shows one notice, which names each missing part and
   omp 19.2.0. A session with a UI (`ctx.hasUI`) gets it through
   `ctx.ui.notify` as a warning; other sessions get it on standard error.
 - Without `pi.on`, the binding writes the notice to standard error during the
@@ -100,6 +106,10 @@ Each binding registers two tools:
   `execute` only answers that it is internal. The activity check of
   [Session scope](#session-scope) reads its row.
 
+Each binding also registers the renderer of the talk message card, the
+`/talk` command, and the `alt+t` shortcut. `cli/docs/talk-ui.md` describes
+them.
+
 ### Fields
 
 | Field         | Used by                 | Value                                                                              |
@@ -122,7 +132,9 @@ The field rules:
   `instance`. `reply` takes its target from the ask.
 
 A call that breaks a rule fails before it sends anything. The tool has no
-broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
+broker, Herdr, cross-machine, `list-cwd`, or `handover` fields. A handover
+comes only from the `/talk` views: `/talk handover`, or `h` in the list that
+`/talk` or `alt+t` opens (see `cli/docs/talk-ui.md`, "Handover").
 
 ### Actions
 
@@ -135,16 +147,21 @@ broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
   folder, and the full instance id. Use the full instance id as `instance`.
   When the registry cannot be listed, the call fails. All probes of one call
   go out as one batch of the transport, which reads the socket folder once.
+  The `/talk` list view reads the same rows (`listSessions` of `tool.ts`),
+  and the rows of both refresh the `/talk` completion (see
+  `cli/docs/talk-ui.md`, "Completion").
 - `send` resolves the target, sends the message, and returns the result of
-  [Results](#results).
+  [Results](#results). The `/talk` views use the same resolver
+  (`resolveTarget`) and the same send (`sendTo`), so their results, ids, and
+  errors are the same.
 - `ask` sends the message as an ask and waits for the reply. See
   [Asks and replies](#asks-and-replies).
 - `reply` answers an ask that waits for this session.
 - `pending` shows the asks that wait for a reply from this session, oldest
   first: the ask id, the sender's name, the first 8 characters of the
   sender's session id, the age in seconds, and the first 80 characters of the
-  text on one line. It shows only the asks of this session's current
-  registration (see [Reply](#reply)).
+  text on one line, as a literal. It shows only the asks of this session's
+  current registration (see [Reply](#reply)).
 - `status` shows this session's name, the first 8 characters of its session
   id, and its folder; its registration (the full instance id, or none); the
   live peer count; the number of queued messages; and the pending asks, as
@@ -226,10 +243,12 @@ replacement.
 
 Each message has a random message id of 16 lowercase hex digits. The id of an
 ask is also its ask id. The receiving session shows the message as a custom
-message (`customType` `talk`, displayed, `details.messageId` set) with this
-text:
+message (`customType` `talk`, displayed) with versioned `details` (see
+[Details](#details)) and this text:
 
-1. `**From <name>** (<cwd>)`, with the name and the folder as literals.
+1. `**From <name>** (<cwd>)`, with the name and the folder as literals. A
+   handover starts with `**Handover from <name>** (<cwd>): continue this
+   work.` instead.
 2. For an ask: `This is an ask. Answer it with the talk tool: action "reply",
    replyTo "<ask id>".` For a reply that reaches the session as a message:
    `Reply to ask <ask id>.`
@@ -241,8 +260,26 @@ Markdown code span on one line. Each run of control characters or line
 separators becomes one space, and the fence of the span is longer than every
 backtick run in the text. So a peer cannot start a line or a row, or add
 Markdown structure. The From line, the attachment labels, the reply heading,
-and the rows of `list`, `pending`, and the candidate lists show peer metadata
-this way.
+the rows of `list`, `pending`, and the candidate lists, and the text preview
+of each ask row show peer text this way. An error also shows the `to` or
+`replyTo` value of the call as a literal, because a model can copy a peer
+name into `to`.
+
+### Details
+
+The receiver writes these `details` on each talk message: `v` (`1`),
+`messageId`, `kind` (`message`, `ask`, `reply`, or `handover`), `from`
+(`name`, `cwd`, `sessionId`), `sentAt`, `askId` (only on an ask or a reply),
+the `kind` and `name` of each attachment, and `body`, the UTF-16 range of the
+sender's text in the text. The confirmation watch looks for
+`details.messageId`. The message card of `cli/docs/talk-ui.md` decodes the
+details; a message with `details` that hold only `messageId`, from plan
+DocksDocks/docks-kit#250, gets omp's default card.
+
+A `deliver` body has an optional `kind`: `message` or `handover`. The tool
+leaves it out, so its body is the body of plan DocksDocks/docks-kit#250; a
+body without `kind` is a plain message. Only the `/talk` handover sends
+`kind: "handover"`. An ask with `kind: "handover"` does not decode.
 
 ### Size limit
 
@@ -327,14 +364,24 @@ with the message id: in each of the next 8 microtask turns, then every 10 ms.
 It reads omp's live read-only list `getEntriesView()` where omp has it, else
 the copy of `getEntries()`. Each read inspects only the entries that came
 after its last read of the same list; another list, or a shorter one, is a
-reset, and the binding reads it again from its start. So a watch that runs
-for minutes does not copy or scan the whole transcript each 10 ms. The watch
-ends:
+reset, and the binding reads it again from its start. So on a host with the
+live list, a watch that runs for minutes does not copy or scan the whole
+transcript each 10 ms. The `getEntries()` fallback gives a new array on each
+read, so there each read copies and scans the whole transcript. The binding
+keeps its read position only while a watch runs, so it holds no list after
+the last watch ends. On the live list, a watch that starts while no other
+watch runs sets its read position to the end of the list before the send,
+because no watch waits for an older entry. So on a host with the live list,
+an isolated send to an idle session reads only the entries after it. On the
+`getEntries()` fallback, the binding reads nothing before the send, because
+the first check gets a new array and reads it from its start anyway. The
+watch ends:
 
 - `delivered` when the entry appears while `getSessionId()` still equals the
   target session id.
 - `not-live` when the session id changes first.
-- `unknown` after 10 minutes, or when a read of the session throws.
+- `unknown` after 10 minutes of the monotonic clock, or when a read of the
+  session throws.
 
 The request answers `delivered` or `not-live` when the watch ends so within
 1 s, and `submitted` otherwise. A watch that ends `unknown` within 1 s, for
@@ -411,7 +458,10 @@ guard and the queue use the same rule.
 - A full queue answers `busy` in every mode. The queue of one registration
   holds at most 64 messages and at most 4 MiB of message text (UTF-8). This
   bounds what a peer can make the receiving omp process hold while the
-  session cannot take messages.
+  session cannot take messages. On the queue path, the receiver checks the
+  count first and then measures the text before it applies the byte cap. So
+  it measures each message that passes the count check, also one that the
+  byte cap then refuses, and no message that the count check refuses.
 
 Each registration has one queue, first in first out, outside the transcript.
 The binding tries the queue from a fresh task: once 100 ms after a message
@@ -459,11 +509,19 @@ An ask carries a reply address and an origin flag:
 
 - A main session uses its own registration, with the flag `main`.
 - A subagent session uses the registration of the nearest main session that
-  it descends from, with the flag `sub`. Each binding records its agent id
-  and parent id (`ctx.agent`) in the agent map of the singleton at
-  `session_start`, and the ask walks that map. At `session_shutdown`, the
-  binding releases its entry; the map keeps it only while the entry of a
-  live subagent names it as parent, and then drops it.
+  it descends from, with the flag `sub`. Each binding of a subagent records
+  its agent id and parent id (`ctx.agent`) in the agent map of the
+  singleton at `session_start` and at each `talk` call, and the ask walks
+  that map. A main session has no parent, so it has no entry. The map counts
+  the subagents of each agent. At `session_shutdown`, the binding releases
+  its entry; the map keeps it only while the entry of a live subagent names
+  it as parent, and then drops it. Each subagent binding beats from a 1 s
+  managed timer (`ctx.setInterval`). omp keeps those timers running while
+  the extension is suspended and clears them when it closes the binding.
+  The sweep (see [Sweep](#sweep)) releases the entry of a binding that gave
+  no beat in 3 sweeps in a row: omp closed that binding without a
+  `session_shutdown`. A suspended binding keeps its entry, so a subagent
+  that it starts after it resumes still finds its ancestors.
 
 A reply address is live only while it is still the current registration of
 its owning binding: that binding is active, and its session id equals the
@@ -501,13 +559,18 @@ still withdraw an ask that the receiver queued.
 The receiver of an ask keeps it as a pending ask until a successful reply,
 the 10-minute ask timeout, or the end of the message (`cancelled` or
 `not-live`). A timer of the pending asks ends each ask at its timeout, also
-when no call reads them; it runs only while an ask is pending. Each pending
-ask belongs to the registration that received it. It stays across an
-after-event that keeps the session id, and it ends with that registration:
-at a withdrawal, at an unseen session id change, and at `session_shutdown`. A
-successor session never sees it in `pending` or `status`, and cannot answer
-it with `reply`. While a transition is pending and the session id differs
-from the registered one, `pending` shows none of them either.
+when no call reads them; it runs only while an ask is pending. The deadline
+and the age of a pending ask use a monotonic clock (`performance.now()`), so
+a step of the wall clock neither extends nor shortens an ask. The pending
+asks stay in the order of their deadlines: an ask received again under the
+same id goes last. So each expiry removes only the due asks at the front.
+Each pending ask belongs to the registration that
+received it. It stays across an after-event that keeps the session id, and
+it ends with that registration: at a withdrawal, at an unseen session id
+change, and at `session_shutdown`. A successor session never sees it in
+`pending` or `status`, and cannot answer it with `reply`. While a transition
+is pending and the session id differs from the registered one, `pending`
+shows none of them either.
 
 `reply` picks the ask by `replyTo`, or the only pending ask when `replyTo` is
 unset. It fails when `replyTo` names no pending ask, when no ask waits, or
@@ -614,7 +677,9 @@ is `unref`'d and that catches every error in its callback. It withdraws every
 registration of the process whose binding fails its activity check. So the
 registration of a binding that omp closed while the extension was suspended,
 whose own handler and timer no longer run, is withdrawn even when no other
-binding remains and no request comes.
+binding remains and no request comes. The sweep also releases the agent map
+entry of each subagent binding that gave no beat in 3 sweeps in a row (see
+[Ask](#ask)). A binding that omp only suspended keeps its entry.
 
 ## Known limits
 
@@ -660,16 +725,18 @@ Other limits:
 
 ## Source files
 
-| File                           | Holds                                                                                                                                                                         |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cli/talk/index.ts`            | The bundle entry: it default-exports the factory and keeps the transport exports                                                                                              |
-| `cli/talk/extension.ts`        | The factory: the capability probe, the process singleton and its transport facade, the sweep, and the binding of each session; the only file of `cli/talk/` that runs effects |
-| `cli/talk/tool/protocol.ts`    | The request kinds `deliver`, `reply`, and `cancel`, their body and result Schemas, and the 512 KiB message limit                                                              |
-| `cli/talk/tool/targets.ts`     | Session names, the field rules of each action, and the target selection of `to` and `instance`                                                                                |
-| `cli/talk/tool/format.ts`      | The text of a delivered message and of a reply that reaches a session as a message                                                                                            |
-| `cli/talk/tool/attachments.ts` | The attachment Schemas and their labeled blocks                                                                                                                               |
-| `cli/talk/tool/host.ts`        | The host interface that `extension.ts` fills from `pi` and `ctx`, the clock, and the talk entry check of `getEntries()`                                                       |
-| `cli/talk/tool/delivery.ts`    | The receiver of one binding: the transition hold, the guard, the confirmation watch, the queue, `cancel`, and the request handlers                                            |
-| `cli/talk/tool/asks.ts`        | The ask store of the process (waiters, reply addresses, the agent map) and the pending inbound asks of one session                                                            |
-| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its seven actions, and the text of each result                                                                                               |
-| `cli/talk/transport/`          | The transport; see `cli/docs/talk-transport.md`                                                                                                                               |
+| File                           | Holds                                                                                                                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli/talk/index.ts`            | The bundle entry: it default-exports the factory and keeps the transport exports                                                                                                                                                            |
+| `cli/talk/extension.ts`        | The factory: the capability probe, the process singleton and its transport facade, the sweep, and the binding of each session with its tool, renderer, command, shortcut, and flow services; the only file of `cli/talk/` that runs effects |
+| `cli/talk/tool/protocol.ts`    | The request kinds `deliver`, `reply`, and `cancel`, their body and result Schemas, the message and deliver kinds, and the 512 KiB message limit                                                                                             |
+| `cli/talk/tool/targets.ts`     | Session names, the field rules of each action, and the target selection of `to` and `instance`                                                                                                                                              |
+| `cli/talk/tool/format.ts`      | The text of a delivered message, of a handover, and of a reply that reaches a session as a message, with the range of the sender's text                                                                                                     |
+| `cli/talk/tool/attachments.ts` | The attachment Schemas, their labeled blocks, and the `literal` and `oneLine` cleaners                                                                                                                                                      |
+| `cli/talk/tool/host.ts`        | The host interface that `extension.ts` fills from `pi` and `ctx`, the clock, the `details` Schema, and the talk entry check of `getEntries()`                                                                                               |
+| `cli/talk/tool/delivery.ts`    | The receiver of one binding: the transition hold, the guard, the confirmation watch, the queue, `cancel`, and the request handlers                                                                                                          |
+| `cli/talk/tool/asks.ts`        | The ask store of the process (waiters, reply addresses, the agent map) and the pending inbound asks of one session                                                                                                                          |
+| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its seven actions, the text of each result, and the listing, resolver, and sends that the `/talk` views share                                                                                              |
+| `cli/talk/ui/`                 | The `/talk` command, the views, the message card, handover, and the UI host probe; see `cli/docs/talk-ui.md`                                                                                                                                |
+| `cli/talk/types/`              | The declarations of the omp UI host exports; see `cli/docs/talk-ui.md`                                                                                                                                                                      |
+| `cli/talk/transport/`          | The transport; see `cli/docs/talk-transport.md`                                                                                                                                                                                             |

@@ -1,12 +1,17 @@
-import { Effect, type Schema } from "effect";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
+
+import { Effect, Predicate, type Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { makeAskStore } from "../../../talk/tool/asks";
+import type { Attachment } from "../../../talk/tool/attachments";
 import {
   ANSWER_WAIT_MS,
   HOLD_MS,
   MAX_QUEUED_BYTES,
   MAX_QUEUED_MESSAGES,
+  QUEUE_RETRY_MS,
   SEND_WAIT_MS,
   WATCH_LIMIT_MS,
   type TalkDelivery,
@@ -20,6 +25,7 @@ import {
   TALK_MESSAGE_TYPE,
   type TalkHost,
   type TalkMessage,
+  decodeTalkMessage,
   systemClock,
   talkMessageId,
 } from "../../../talk/tool/host";
@@ -27,11 +33,13 @@ import {
   CANCEL_KIND,
   DELIVER_KIND,
   type DeliverBody,
+  MAX_MESSAGE_BYTES,
   REPLY_KIND,
   type ReplyBody,
   encodeCancelBody,
   encodeDeliverBody,
   encodeReplyBody,
+  messageBytes,
 } from "../../../talk/tool/protocol";
 import type { Target } from "../../../talk/transport/request";
 
@@ -82,6 +90,7 @@ interface FakeSession {
  * A fake omp session: an append lands two microtask turns after the send, in
  * the session that was current at the send; a transition replaces the session
  * in place, so `getEntries()` and `getSessionId()` read the new one at once.
+ * `getEntries()` gives the live list, as omp's `getEntriesView()` does.
  */
 const makeFakeHost = (): { readonly fake: FakeSession; readonly host: TalkHost } => {
   const fake: FakeSession = {
@@ -114,6 +123,7 @@ const makeFakeHost = (): { readonly fake: FakeSession; readonly host: TalkHost }
     sessionId: () => fake.state.id,
     sessionFile: () => fake.state.file,
     entries: () => fake.state.entries,
+    liveEntries: () => true,
     isIdle: () => fake.idle,
     hasPendingMessages: () => fake.pendingMessages,
     mode: () => fake.mode,
@@ -152,7 +162,7 @@ const clock = systemClock((error) => {
 
 beforeEach(() => {
   clockErrors = [];
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
 });
 
 afterEach(() => {
@@ -184,6 +194,18 @@ let messageCounter = 0;
 const nextMessageId = (): string => {
   messageCounter += 1;
   return messageCounter.toString(16).padStart(16, "0");
+};
+
+setFlagsFromString("--expose-gc");
+const gcFunction: unknown = runInNewContext("gc");
+
+/** A full garbage collection, after a fresh task, so that no weak reference of the task stays held. */
+const collectGarbage = async (): Promise<void> => {
+  if (!Predicate.isFunction(gcFunction)) throw new Error("the V8 gc function is missing");
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  await promise;
+  Reflect.apply(gcFunction, undefined, []);
 };
 
 const sendBody = (overrides: Partial<DeliverBody> = {}): DeliverBody => ({
@@ -237,9 +259,17 @@ describe("confirmation and wake (E4)", () => {
     expect(fake.sent[0]?.options).toEqual({ triggerTurn: true });
     expect(fake.sent[0]?.message).toEqual({
       customType: TALK_MESSAGE_TYPE,
-      content: formatDelivery(body),
+      content: formatDelivery(body).content,
       display: true,
-      details: { messageId: body.messageId },
+      details: {
+        v: 1,
+        messageId: body.messageId,
+        kind: "message",
+        from: body.from,
+        sentAt: body.sentAt,
+        attachments: [],
+        body: formatDelivery(body).body,
+      },
     });
     expect(fake.state.entries.map(talkMessageId)).toEqual([body.messageId]);
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
@@ -282,28 +312,70 @@ describe("confirmation and wake (E4)", () => {
     expect(WATCH_LIMIT_MS).toBe(600_000);
   });
 
-  it("reads each old entry once over many checks, not on each check (C6)", async () => {
+  it("ends a watch after 10 minutes also when the wall clock stepped back (C7)", async () => {
     const { fake, delivery } = setup();
-    fake.holdAppends = true;
-    let reads = 0;
-    const backing: Array<unknown> = Array.from({ length: 5_000 }, () => ({ type: "message" }));
+    fake.refuseTurns = true;
+    const body = sendBody();
+    void delivery.deliver(REG_A, body);
+    await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS);
+    vi.setSystemTime(Date.now() - 30 * 60 * 1_000);
+    await vi.advanceTimersByTimeAsync(WATCH_LIMIT_MS - ANSWER_WAIT_MS - 20);
+    expect(cancelOf(delivery, body.messageId)).toBe("submitted");
+    await vi.advanceTimersByTimeAsync(20);
+    expect(cancelOf(delivery, body.messageId)).toBe("unknown");
+  });
+
+  /** A list of `length` plain entries that counts the reads of its items. */
+  const countedEntries = (length: number) => {
+    const counter = { reads: 0 };
+    const backing: Array<unknown> = Array.from({ length }, () => ({ type: "message" }));
     const entries = new Proxy(backing, {
       get: (target, key, receiver) => {
-        if (typeof key === "string" && /^\d+$/u.test(key)) reads += 1;
+        if (typeof key === "string" && /^\d+$/u.test(key)) counter.reads += 1;
         return Reflect.get(target, key, receiver);
       },
     });
+    return { counter, entries };
+  };
+
+  it("reads no old entry over many checks: a new watch starts at the end of the list (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    const { counter, entries } = countedEntries(5_000);
     fake.state = { ...fake.state, entries };
     const body = sendBody();
     const state = peek(delivery.deliver(REG_A, body));
     await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS);
-    // About a hundred checks ran; together they read each old entry once.
+    // About a hundred checks ran; none read an entry from before the send.
     expect(state.value?.outcome).toBe("submitted");
-    expect(reads).toBe(5_000);
+    expect(counter.reads).toBe(0);
     fake.releaseHeld();
     await vi.advanceTimersByTimeAsync(10);
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
-    expect(reads).toBe(5_001);
+    expect(counter.reads).toBe(1);
+  });
+
+  it("reads only the new entry of each isolated delivery to an idle session (C6)", async () => {
+    const { fake, delivery } = setup();
+    const { counter, entries } = countedEntries(5_000);
+    fake.state = { ...fake.state, entries };
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect(counter.reads).toBe(2);
+  });
+
+  it("reads a list that became shorter again from its start (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    fake.state.entries.push({ type: "message" }, { type: "message" }, { type: "message" });
+    const body = sendBody();
+    const state = peek(delivery.deliver(REG_A, body));
+    await flushMicrotasks();
+    // omp empties the same list, then the message lands as its first entry.
+    fake.state.entries.length = 0;
+    fake.releaseHeld();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(state.value?.outcome).toBe("delivered");
   });
 
   it("reads a replaced entry list of the same session again from its start (C6)", async () => {
@@ -331,6 +403,74 @@ describe("confirmation and wake (E4)", () => {
     };
     await vi.advanceTimersByTimeAsync(10);
     expect(state.value?.outcome).toBe("delivered");
+  });
+
+  it("drops its read of the entry list when the last watch ends, so a list that omp replaced goes (C6)", async () => {
+    const { fake, delivery } = setup();
+    const watched = ((): WeakRef<Array<unknown>> => {
+      const entries: Array<unknown> = Array.from({ length: 1_000 }, () => ({ type: "message" }));
+      fake.state = { ...fake.state, entries };
+      return new WeakRef(entries);
+    })();
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    // omp replaces the live list, and no other talk message comes.
+    fake.state = stateFor(SESSION_A);
+    await collectGarbage();
+    expect(watched.deref()).toBeUndefined();
+  });
+
+  it("reads no copy of getEntries() before a send, because the first check would discard it (R7)", async () => {
+    const { fake, host } = makeFakeHost();
+    let reads = 0;
+    const readsAtSend: Array<number> = [];
+    const delivery = makeDelivery({
+      host: {
+        ...host,
+        // The getEntries() fallback: a new copy on each read.
+        liveEntries: () => false,
+        entries: () => {
+          reads += 1;
+          return [...fake.state.entries];
+        },
+        sendMessage: (message, options) => {
+          readsAtSend.push(reads);
+          host.sendMessage(message, options);
+        },
+      },
+      clock,
+      retain: async () => true,
+    });
+    delivery.attach(REG_A);
+    fake.state.entries.push({ type: "message" }, { type: "message" });
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    const afterFirst = reads;
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect(readsAtSend).toEqual([0, afterFirst]);
+  });
+
+  it("keeps no entry list after a send that omp refused with a throw (C6)", async () => {
+    const { fake, host } = makeFakeHost();
+    const failure = new Error("sendMessage failed");
+    const delivery = makeDelivery({
+      host: {
+        ...host,
+        sendMessage: () => {
+          throw failure;
+        },
+      },
+      clock,
+      retain: async () => true,
+    });
+    delivery.attach(REG_A);
+    const watched = ((): WeakRef<Array<unknown>> => {
+      const entries: Array<unknown> = Array.from({ length: 1_000 }, () => ({ type: "message" }));
+      fake.state = { ...fake.state, entries };
+      return new WeakRef(entries);
+    })();
+    await expect(delivery.deliver(REG_A, sendBody())).rejects.toBe(failure);
+    fake.state = stateFor(SESSION_A);
+    await collectGarbage();
+    expect(watched.deref()).toBeUndefined();
   });
 });
 
@@ -532,6 +672,24 @@ describe("transition hold (E2)", () => {
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
   });
 
+  it("sends a held message from a fresh task after the after-event also when the wall clock jumped ahead (C7)", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    const body = sendBody();
+    // A busy session queues the message and plans a try in 100 ms.
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    fake.idle = true;
+    await delivery.beforeTransition({ kind: "switch", reason: "resume" });
+    vi.setSystemTime(Date.now() + 60 * 60 * 1_000);
+    delivery.afterTransition({
+      kind: "switch",
+      reason: "resume",
+      previousSessionFile: fake.state.file,
+    });
+    await freshTask();
+    expect(fake.sentIds()).toEqual([body.messageId]);
+  });
+
   it("keeps the queue across a session_switch that keeps the session id", async () => {
     const { fake, delivery } = setup();
     await delivery.beforeTransition({ kind: "switch", reason: "resume" });
@@ -685,26 +843,77 @@ describe("results, queue, and busy rules (E5)", () => {
     expect(delivery.pending.list(REG_A)).toHaveLength(1);
   });
 
-  it("answers busy when the queued text would pass 4 MiB, and frees the bytes as messages leave (C8)", async () => {
+  it("answers busy at the first wire-valid message that would pass 4 MiB of queued text, and frees the bytes as messages leave (C8)", async () => {
     const { fake, delivery } = setup();
     fake.idle = false;
-    // Each message is a little above 1,000,000 bytes, so four fit and a fifth does not.
-    const big = (): DeliverBody => sendBody({ text: "x".repeat(1_000_000) });
-    const queued = [big(), big(), big(), big()];
-    for (const body of queued) expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
-    expect(4 * 1_000_000).toBeLessThan(MAX_QUEUED_BYTES);
-    expect((await delivery.deliver(REG_A, big())).outcome).toBe("busy");
-    // A small message still fits.
-    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
-    const [cancelled] = queued;
-    expect(cancelOf(delivery, cancelled?.messageId ?? "")).toBe("cancelled");
-    expect((await delivery.deliver(REG_A, big())).outcome).toBe("queued");
+    // The longest text of a body that the 512 KiB wire limit still lets through.
+    const overhead = messageBytes(
+      await Effect.runPromise(encodeDeliverBody(sendBody({ text: "" }))),
+    );
+    const largest = (): DeliverBody => sendBody({ text: "x".repeat(MAX_MESSAGE_BYTES - overhead) });
+    expect(messageBytes(await Effect.runPromise(encodeDeliverBody(largest())))).toBe(
+      MAX_MESSAGE_BYTES,
+    );
+    const tooLarge = await Effect.runPromise(
+      Effect.flip(
+        encodeDeliverBody(sendBody({ text: "x".repeat(MAX_MESSAGE_BYTES - overhead + 1) })),
+      ),
+    );
+    expect(tooLarge._tag).toBe("TalkMessageTooLarge");
+    const contentBytes = Buffer.byteLength(formatDelivery(largest()).content, "utf8");
+    const fit = Math.floor(MAX_QUEUED_BYTES / contentBytes);
+    // The byte limit, not the count limit, refuses the next one.
+    expect(fit).toBeLessThan(MAX_QUEUED_MESSAGES);
+    const queued: Array<DeliverBody> = [];
+    for (let count = 0; count < fit; count += 1) {
+      const body = largest();
+      queued.push(body);
+      expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    }
+    const refused = largest();
+    expect((await delivery.deliver(REG_A, refused)).outcome).toBe("busy");
+    expect(delivery.queuedCount).toBe(fit);
+    expect(cancelOf(delivery, refused.messageId)).toBe("not-found");
+    // A small message still fits in the rest.
+    const small = sendBody();
+    expect(Buffer.byteLength(formatDelivery(small).content, "utf8")).toBeLessThanOrEqual(
+      MAX_QUEUED_BYTES - fit * contentBytes,
+    );
+    expect((await delivery.deliver(REG_A, small)).outcome).toBe("queued");
+    // A cancelled message frees its bytes.
+    expect(cancelOf(delivery, queued[0]?.messageId ?? "")).toBe("cancelled");
+    expect((await delivery.deliver(REG_A, largest())).outcome).toBe("queued");
+    // Sent messages free theirs: the queue takes as many again.
     fake.idle = true;
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(QUEUE_RETRY_MS * (fit + 2) * 2);
     expect(delivery.queuedCount).toBe(0);
     fake.idle = false;
-    for (const body of [big(), big(), big(), big()])
-      expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    for (let count = 0; count < fit; count += 1)
+      expect((await delivery.deliver(REG_A, largest())).outcome).toBe("queued");
+    expect((await delivery.deliver(REG_A, largest())).outcome).toBe("busy");
+  });
+
+  it("counts the bytes of a message only when it joins the queue, after the count check", async () => {
+    const { fake, delivery } = setup();
+    const sizes = vi.spyOn(Buffer, "byteLength");
+    const sizedTexts = (): Array<string> =>
+      sizes.mock.calls.flatMap(([value]) => (typeof value === "string" ? [value] : []));
+    try {
+      const immediate = sendBody({ text: "goes out at once" });
+      expect((await delivery.deliver(REG_A, immediate)).outcome).toBe("delivered");
+      expect(sizedTexts()).not.toContain(formatDelivery(immediate).content);
+      fake.idle = false;
+      const queued = sendBody({ text: "joins the queue" });
+      expect((await delivery.deliver(REG_A, queued)).outcome).toBe("queued");
+      expect(sizedTexts()).toContain(formatDelivery(queued).content);
+      for (let count = 1; count < MAX_QUEUED_MESSAGES; count += 1)
+        expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
+      const refused = sendBody({ text: "the queue is full" });
+      expect((await delivery.deliver(REG_A, refused)).outcome).toBe("busy");
+      expect(sizedTexts()).not.toContain(formatDelivery(refused).content);
+    } finally {
+      sizes.mockRestore();
+    }
   });
 });
 
@@ -719,7 +928,7 @@ describe("asks and replies at the receiver (E6)", () => {
     expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
     expect(retained).toEqual([{ pair: ASKER, sentBefore: 0 }]);
     expect(fake.sent).toHaveLength(1);
-    expect(fake.sent[0]?.message.content).toBe(formatDelivery(body));
+    expect(fake.sent[0]?.message.content).toBe(formatDelivery(body).content);
     expect(delivery.pending.list(REG_A).map((entry) => entry.askId)).toEqual([body.messageId]);
   });
 
@@ -765,7 +974,7 @@ describe("asks and replies at the receiver (E6)", () => {
       messageId: body.messageId,
       instanceId: REG_A.instanceId,
     });
-    expect(fake.sent[0]?.message.content).toBe(formatReply(body));
+    expect(fake.sent[0]?.message.content).toBe(formatReply(body).content);
   });
 
   it("follows the busy rules for a main reply without a waiter", async () => {
@@ -781,6 +990,90 @@ describe("asks and replies at the receiver (E6)", () => {
       "not-found",
     );
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe("message details (#251 G5)", () => {
+  /** The details of the one landed entry, decoded with its content. */
+  const landedDetails = (fake: FakeSession) => {
+    expect(fake.state.entries).toHaveLength(1);
+    const decoded = decodeTalkMessage(fake.state.entries[0]);
+    if (decoded === undefined) throw new Error("the landed entry does not decode");
+    return decoded;
+  };
+
+  const attachments: ReadonlyArray<Attachment> = [
+    { type: "file", name: "a.ts", content: "export {};" },
+    { type: "context", name: "notes", content: "**Attachment (file): `x`**" },
+  ];
+
+  it("writes versioned details for a send that decode, and the watch confirms it", async () => {
+    const { fake, delivery } = setup();
+    const body = sendBody({ text: "line 1\nline 2", attachments, sentAt: 1_700_000_000_000 });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(content).toBe(formatDelivery(body).content);
+    expect(details).toEqual({
+      v: 1,
+      messageId: body.messageId,
+      kind: "message",
+      from: body.from,
+      sentAt: body.sentAt,
+      attachments: [
+        { kind: "file", name: "a.ts" },
+        { kind: "context", name: "notes" },
+      ],
+      body: formatDelivery(body).body,
+    });
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+    expect(talkMessageId(fake.state.entries[0])).toBe(body.messageId);
+  });
+
+  it("writes the kind ask and the ask id for an ask", async () => {
+    const { fake, delivery } = setup();
+    const body = askBody({ text: "one\ntwo\nthree" });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("ask");
+    expect(details.askId).toBe(body.messageId);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+  });
+
+  it("writes the kind reply and the ask that it answers for a main reply", async () => {
+    const { fake, delivery } = setup();
+    const body = replyBody({ origin: "main" });
+    expect((await delivery.receiveReply(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("reply");
+    expect(details.askId).toBe(body.askId);
+    expect(details.messageId).toBe(body.messageId);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+  });
+
+  it("writes the kind handover with a wake for a handover (#251 G6)", async () => {
+    const { fake, delivery } = setup();
+    const body = sendBody({ kind: "handover", text: "## Next task\nShip it." });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("handover");
+    expect(details.askId).toBeUndefined();
+    expect(content.startsWith("**Handover from ")).toBe(true);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+    expect(fake.sent[0]?.options).toEqual({ triggerTurn: true });
+  });
+
+  it("keeps the details of a queued message until it goes out, and the watch confirms it", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    const body = askBody({ attachments });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    fake.idle = true;
+    await vi.advanceTimersByTimeAsync(QUEUE_RETRY_MS);
+    await flushMicrotasks();
+    const { details } = landedDetails(fake);
+    expect(details.kind).toBe("ask");
+    expect(details.attachments.map((attachment) => attachment.kind)).toEqual(["file", "context"]);
+    expect(cancelOf(delivery, body.messageId)).toBe("delivered");
   });
 });
 

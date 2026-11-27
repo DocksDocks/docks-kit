@@ -248,6 +248,8 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   const locked = lock.withPermits(1);
   const runFork = yield* FiberSet.makeRuntime<never, void, never>();
   const registrations = new Map<string, Served>();
+  /** The instance id of every registration that `registrations` keeps, withdrawn ones included. */
+  const servedIds = new Set<string>();
   const handlers = new Map<string, RequestHandler>([[PING_KIND, () => Effect.succeed("pong")]]);
   const pendingRemovals = new Set<string>();
   // Accepted sockets whose handshake has not ended; disposal destroys them.
@@ -464,10 +466,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
           );
     return yield* locked(
       Effect.gen(function* () {
-        if (
-          chosen !== undefined &&
-          [...registrations.values()].some((served) => served.instanceId === chosen)
-        )
+        if (chosen !== undefined && servedIds.has(chosen))
           return yield* new TalkRegisterError({ sessionId, reason: "the instance id is in use" });
         yield* registry.prepare;
         if (bound === undefined) bound = yield* bind;
@@ -487,6 +486,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
         };
         yield* publishServed(served, bound.endpoint);
         registrations.set(targetKey(instanceId, sessionId), served);
+        servedIds.add(instanceId);
         const registration: Registration = { instanceId, sessionId, fileName: served.fileName };
         return registration;
       }),
@@ -588,41 +588,55 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
     yield* publishServed(served, endpoint);
   });
 
+  /**
+   * One round of the repair pass: it re-creates a missing folder, rebinds a
+   * POSIX socket that a missing folder took or that went away, and publishes
+   * each stale or changed entry with the current endpoint.
+   */
+  const repairRound = Effect.gen(function* () {
+    const current = bound;
+    if (current === undefined) return;
+    const live = liveServed();
+    let rebind = false;
+    // A folder that fails its trust check stops the pass here.
+    if (!(yield* registry.folderPresent)) {
+      // The entries went with the folder; on POSIX the socket went too. Windows keeps its port.
+      yield* registry.prepare;
+      for (const served of live) served.stale = true;
+      rebind = registry.endpointKind === "unix";
+    } else if (endpointState(current) === "replaced") {
+      rebind = true;
+    }
+    let endpoint = current.endpoint;
+    if (rebind) {
+      // A failed candidate leaves the current listener as it is; the next pass tries again.
+      const candidate = yield* bind;
+      bound = candidate;
+      endpoint = candidate.endpoint;
+      yield* closeEndpoint(current);
+      closedListeners += 1;
+      for (const served of live) served.stale = true;
+    }
+    // Each entry on its own: a failure of one entry does not stop the others.
+    for (const served of live) {
+      const repaired = yield* Effect.result(repairEntry(served, endpoint));
+      if (Result.isFailure(repaired)) yield* noteRepairFailure(served.fileName, repaired.failure);
+    }
+  });
+
   const repairPass = locked(
     Effect.gen(function* () {
       lastRepairFailure = "";
-      const current = bound;
-      if (current === undefined) return;
+      if (bound === undefined) return;
       for (const fileName of [...pendingRemovals]) {
         const removed = yield* Effect.result(registry.remove(fileName));
         if (Result.isSuccess(removed)) pendingRemovals.delete(fileName);
       }
-      const live = liveServed();
-      let rebind = false;
-      // A folder that fails its trust check stops the pass here.
-      if (!(yield* registry.folderPresent)) {
-        // The entries went with the folder; on POSIX the socket went too. Windows keeps its port.
-        yield* registry.prepare;
-        for (const served of live) served.stale = true;
-        rebind = registry.endpointKind === "unix";
-      } else if (endpointState(current) === "replaced") {
-        rebind = true;
-      }
-      let endpoint = current.endpoint;
-      if (rebind) {
-        // A failed candidate leaves the current listener as it is; the next pass tries again.
-        const candidate = yield* bind;
-        bound = candidate;
-        endpoint = candidate.endpoint;
-        yield* closeEndpoint(current);
-        closedListeners += 1;
-        for (const served of live) served.stale = true;
-      }
-      // Each entry on its own: a failure of one entry does not stop the others.
-      for (const served of live) {
-        const repaired = yield* Effect.result(repairEntry(served, endpoint));
-        if (Result.isFailure(repaired)) yield* noteRepairFailure(served.fileName, repaired.failure);
-      }
+      yield* repairRound;
+      // The socket can go away between the check and the publication, for example when another
+      // process removes the folder and creates it again. Then the entries name a socket that is
+      // gone: a second round rebinds and publishes them again at once.
+      if (bound !== undefined && endpointState(bound) === "replaced") yield* repairRound;
     }),
   ).pipe(
     Effect.catch((error) => noteRepairFailure("the pass", error)),

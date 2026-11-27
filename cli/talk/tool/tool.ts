@@ -16,6 +16,7 @@ import {
   CANCEL_KIND,
   DELIVER_KIND,
   type DeliverBody,
+  type DeliverKind,
   DeliverResult,
   MessageId,
   REPLY_KIND,
@@ -151,18 +152,33 @@ export type RequestAnswer =
 /**
  * The transport calls of the tool, as plain functions of the process
  * singleton (E12). An expected failure is a value; a rejection is a defect
- * of the transport runtime.
+ * of the transport runtime. A `signal` interrupts the call when it aborts,
+ * so a `/talk` flow that ends stops its transport work (#251 G3); the tool
+ * gives none.
  */
 export interface PeerTransport {
-  readonly list: () => Promise<ListAnswer>;
+  readonly list: (signal?: AbortSignal) => Promise<ListAnswer>;
   /**
    * Pings each target under the dial limit, in one batch that shares one
    * socket snapshot. The results come in the order of the targets.
    */
-  readonly probeAll: (targets: ReadonlyArray<Target>) => Promise<ReadonlyArray<ProbeResult>>;
-  readonly request: (target: Target, kind: string, body: Schema.Json) => Promise<RequestAnswer>;
+  readonly probeAll: (
+    targets: ReadonlyArray<Target>,
+    signal?: AbortSignal,
+  ) => Promise<ReadonlyArray<ProbeResult>>;
+  /**
+   * `beforeBody` runs right before the body goes out, after the mutual proof;
+   * false keeps the body back, and the call rejects as an interrupted call.
+   */
+  readonly request: (
+    target: Target,
+    kind: string,
+    body: Schema.Json,
+    signal?: AbortSignal,
+    beforeBody?: () => boolean,
+  ) => Promise<RequestAnswer>;
   /** The pair of an entry that this process kept, by its full instance id. */
-  readonly known: (instanceId: string) => Promise<Target | undefined>;
+  readonly known: (instanceId: string, signal?: AbortSignal) => Promise<Target | undefined>;
 }
 
 /** The calling session, as the tool sees it. */
@@ -187,7 +203,16 @@ export interface ToolContext {
   readonly signal: AbortSignal | undefined;
   /** Default: the ask timeout of `asks.ts`. */
   readonly askTimeoutMs?: number | undefined;
+  /** Gets the rows of each `listSessions` call, such as the `/talk` completion snapshot (#251 G2). */
+  readonly snapshot?: ListingSnapshot | undefined;
 }
+
+/**
+ * Starts one listing and returns the function that publishes its rows. A
+ * call starts before the registry read, so the owner can drop the rows of a
+ * listing that a later one overtook.
+ */
+export type ListingSnapshot = () => (rows: ReadonlyArray<SessionRow>) => void;
 
 /** What `send`, `ask`, `reply`, and `cancel` report besides the text. */
 export interface TalkToolDetails {
@@ -314,28 +339,68 @@ const probeAll = (
     ),
   );
 
-const peerLine = (self: TalkSelf, { peer, probe }: Candidate<ListedPeer>): string => {
-  const own = isOwn(self, peer) ? " (this session)" : "";
-  const unresolved = probeState(probe) === "unresolved" ? `; unresolved: ${probe}` : "";
+const peerLine = (row: SessionRow): string => {
+  const own = row.own ? " (this session)" : "";
+  const unresolved = probeState(row.probe) === "unresolved" ? `; unresolved: ${row.probe}` : "";
   return (
-    `- ${literal(peer.name)} [${peer.instanceId.slice(0, INSTANCE_DISPLAY_LENGTH)}]${own}: ` +
-    `session ${literal(peer.sessionId.slice(0, SHORT_ID_LENGTH))}, folder ${literal(peer.cwd)}, ` +
-    `instance ${peer.instanceId}${unresolved}`
+    `- ${literal(row.name)} [${row.instanceId.slice(0, INSTANCE_DISPLAY_LENGTH)}]${own}: ` +
+    `session ${literal(row.sessionId.slice(0, SHORT_ID_LENGTH))}, folder ${literal(row.cwd)}, ` +
+    `instance ${row.instanceId}${unresolved}`
   );
 };
 
-interface Resolved {
+/**
+ * One row of the session listing (E8, #251 G3): a registration that its
+ * probe did not prove ended. The `list` action and the `/talk` list view
+ * read the same rows.
+ */
+export interface SessionRow extends ListedPeer {
+  /** The registration of the calling binding. */
+  readonly own: boolean;
+  /** `ok`, or a failure that proves no end (`unresolved`). */
+  readonly probe: ProbeResult;
+}
+
+/**
+ * The listing as rows, not prose: every listed registration that its probe
+ * did not prove ended. Only these probed rows reach `context.snapshot`.
+ */
+export const listSessions = Effect.fnUntraced(function* (
+  context: ToolContext,
+): Effect.fn.Return<ReadonlyArray<SessionRow>, TalkToolFailed> {
+  const publish = context.snapshot?.();
+  const candidates = yield* probeAll(context, yield* listPeers(context.transport));
+  const rows = candidates
+    .filter((candidate) => probeState(candidate.probe) !== "ended")
+    .map(({ peer, probe }) => ({
+      instanceId: peer.instanceId,
+      sessionId: peer.sessionId,
+      name: peer.name,
+      cwd: peer.cwd,
+      own: isOwn(context.self, peer),
+      probe,
+    }));
+  publish?.(rows);
+  return rows;
+});
+
+/** The exact registration pair that a selector resolved to, with the metadata that the listing gave. */
+export interface ResolvedTarget {
   readonly target: Target;
   readonly name: string | undefined;
+  readonly cwd?: string | undefined;
 }
 
 const NO_TARGET = "talk: the action needs a target.";
 
-/** The target of `send`, `ask`, and `cancel` (E8). Nothing is sent before it resolves. */
-const resolveTarget = Effect.fnUntraced(function* (
+/**
+ * The target resolver of `send`, `ask`, `cancel`, and `/talk <target>` (E8,
+ * #251 G2). Nothing is sent before it resolves.
+ */
+export const resolveTarget = Effect.fnUntraced(function* (
   context: ToolContext,
   selector: Selector,
-): Effect.fn.Return<Resolved, TalkToolFailed> {
+): Effect.fn.Return<ResolvedTarget, TalkToolFailed> {
   switch (selector._tag) {
     case "None":
       return yield* fail(NO_TARGET);
@@ -358,22 +423,20 @@ const resolveTarget = Effect.fnUntraced(function* (
               `talk: this process never saw the instance ${instanceId} (not-found). Run the action list.`,
               { instanceId, outcome: "not-found" },
             );
-      return {
-        target: resolution.target,
-        name: listing.find((peer) => peer.instanceId === instanceId)?.name,
-      };
+      const listed = listing.find((peer) => peer.instanceId === instanceId);
+      return { target: resolution.target, name: listed?.name, cwd: listed?.cwd };
     }
     case "To": {
       const { to } = selector;
       const match = matchTo(yield* listPeers(context.transport), to);
       if (match._tag === "NoMatch")
         return yield* fail(
-          `talk: no listed session matches "${to}" (not-found). Run the action list.`,
+          `talk: no listed session matches ${literal(to)} (not-found). Run the action list.`,
           { outcome: "not-found" },
         );
       if (match._tag === "AmbiguousPrefix")
         return yield* fail(
-          `talk: "${to}" starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
+          `talk: ${literal(to)} starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
         );
       const candidates = yield* probeAll(context, match.peers);
       const decision = decideTo(candidates);
@@ -382,19 +445,20 @@ const resolveTarget = Effect.fnUntraced(function* (
           return {
             target: { instanceId: decision.peer.instanceId, sessionId: decision.peer.sessionId },
             name: decision.peer.name,
+            cwd: decision.peer.cwd,
           };
         case "NotFound":
-          return yield* fail(`talk: no listed session matches "${to}" (not-found).`, {
+          return yield* fail(`talk: no listed session matches ${literal(to)} (not-found).`, {
             outcome: "not-found",
           });
         case "NotLive":
           return yield* fail(
-            `talk: "${to}" is not live (not-live). Candidates:\n${describeCandidates(candidates)}`,
+            `talk: ${literal(to)} is not live (not-live). Candidates:\n${describeCandidates(candidates)}`,
             { outcome: "not-live" },
           );
         case "Ambiguous":
           return yield* fail(
-            `talk: "${to}" does not name exactly one live session. Nothing was sent. ` +
+            `talk: ${literal(to)} does not name exactly one live session. Nothing was sent. ` +
               `Use instance with one full instance id:\n${describeCandidates(candidates)}`,
           );
       }
@@ -408,7 +472,7 @@ const sender = (self: TalkSelf): DeliverBody["from"] => ({
   sessionId: self.sessionId,
 });
 
-const idLines = (messageId: string, target: Resolved): string =>
+const idLines = (messageId: string, target: ResolvedTarget): string =>
   `Message id: ${messageId}\nInstance: ${target.target.instanceId}` +
   (target.name === undefined ? "" : ` (${literal(target.name)})`);
 
@@ -419,7 +483,7 @@ const idLines = (messageId: string, target: Resolved): string =>
 const afterDispatch = <A>(
   effect: Effect.Effect<A, TalkToolFailed | TalkBodyInvalid>,
   messageId: string,
-  target: Resolved,
+  target: ResolvedTarget,
 ): Effect.Effect<A, TalkToolFailed> =>
   Effect.mapError(effect, (error) =>
     error._tag === "TalkToolFailed" && error.messageId !== undefined
@@ -458,7 +522,7 @@ const requestFailed = (
   what: string,
   answer: Extract<RequestAnswer, { _tag: "Failed" }>,
   messageId: string,
-  target: Resolved,
+  target: ResolvedTarget,
 ): Effect.Effect<never, TalkToolFailed> =>
   fail(
     `talk: ${what} failed: ${answer.outcome} (${answer.reason}).\n${idLines(messageId, target)}`,
@@ -471,7 +535,7 @@ const dispatched = <R>(
   run: () => Promise<RequestAnswer>,
   decode: (json: Schema.Json) => Effect.Effect<R, TalkBodyInvalid>,
   messageId: string,
-  target: Resolved,
+  target: ResolvedTarget,
 ): Effect.Effect<R, TalkToolFailed> =>
   afterDispatch(
     transportCall(what, run).pipe(
@@ -485,21 +549,34 @@ const dispatched = <R>(
     target,
   );
 
-const runSend = Effect.fnUntraced(function* (
+/** The text and the options of one message, after its target resolved. */
+export interface SendInput {
+  readonly text: string;
+  readonly attachments: NonNullable<TalkParams["attachments"]>;
+  readonly noWake: boolean;
+  /** `handover` only from the `/talk` handover flow (#251 G6); the tool sends `message`. */
+  readonly kind: DeliverKind;
+}
+
+/**
+ * The send to one resolved pair (E5): the `send` action and the `/talk`
+ * views call it, so both give the same results, ids, and errors. A plain
+ * message leaves `kind` out, so its body is the body of #250.
+ */
+export const sendTo = Effect.fnUntraced(function* (
   context: ToolContext,
-  params: TalkParams,
-  selector: Selector,
+  target: ResolvedTarget,
+  input: SendInput,
 ) {
-  const text = yield* requireMessage("send", params.message);
-  const target = yield* resolveTarget(context, selector);
   const messageId = newMessageId();
   const json = yield* encodeDeliverBody({
     messageId,
     from: sender(context.self),
-    text,
-    attachments: params.attachments ?? [],
+    text: input.text,
+    attachments: input.attachments,
     sentAt: context.clock.now(),
-    noWake: params.noWake ?? false,
+    noWake: input.noWake,
+    ...(input.kind === "message" ? {} : { kind: input.kind }),
   });
   const { outcome } = yield* dispatched(
     "the send",
@@ -512,6 +589,43 @@ const runSend = Effect.fnUntraced(function* (
   const ids = { messageId, instanceId: target.target.instanceId, outcome };
   if (!acceptsDelivery(outcome)) return yield* fail(`talk: ${report}`, ids);
   return { ok: true, text: report, details: { action: "send", ...ids } } satisfies TalkToolOutcome;
+});
+
+/**
+ * #251 G3: a send to one exact registration pair. The pair resolves through
+ * the `instance` path of E8, never by name, so a pair that ended reads
+ * `not-live` and a session that took over its name receives nothing.
+ */
+export const sendToPair = Effect.fnUntraced(function* (
+  context: ToolContext,
+  pair: Target,
+  input: SendInput,
+) {
+  const resolved = yield* resolveTarget(context, {
+    _tag: "Instance",
+    instanceId: pair.instanceId,
+  });
+  if (resolved.target.sessionId !== pair.sessionId)
+    return yield* fail(
+      `talk: the instance ${pair.instanceId} no longer serves the session ${literal(pair.sessionId)} (not-live). Nothing was sent.`,
+      { instanceId: pair.instanceId, outcome: "not-live" },
+    );
+  return yield* sendTo(context, resolved, input);
+});
+
+const runSend = Effect.fnUntraced(function* (
+  context: ToolContext,
+  params: TalkParams,
+  selector: Selector,
+) {
+  const text = yield* requireMessage("send", params.message);
+  const target = yield* resolveTarget(context, selector);
+  return yield* sendTo(context, target, {
+    text,
+    attachments: params.attachments ?? [],
+    noWake: params.noWake ?? false,
+    kind: "message",
+  });
 });
 
 const NO_REPLY_ADDRESS =
@@ -558,7 +672,7 @@ const replyText = (reply: ReplyBody): string =>
 const askOutcome = (
   outcome: AskOutcome,
   askId: string,
-  target: Resolved,
+  target: ResolvedTarget,
 ): Effect.Effect<TalkToolOutcome, TalkToolFailed> => {
   const ids = { messageId: askId, instanceId: target.target.instanceId };
   const lines = idLines(askId, target);
@@ -630,7 +744,7 @@ const runAsk = Effect.fnUntraced(function* (
 
 const askLine = (ask: PendingAsk): string =>
   `- ${ask.askId} from ${literal(ask.from.name)} (session ${literal(ask.from.sessionId.slice(0, SHORT_ID_LENGTH))}), ` +
-  `${Math.floor(ask.ageMs / 1_000)} s ago: ${ask.preview}`;
+  `${Math.floor(ask.ageMs / 1_000)} s ago: ${literal(ask.preview)}`;
 
 const runReply = Effect.fnUntraced(function* (context: ToolContext, params: TalkParams) {
   const text = yield* requireMessage("reply", params.message);
@@ -639,7 +753,7 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
   switch (selection._tag) {
     case "NotFound":
       return yield* fail(
-        `talk: no pending ask has the id ${replyTo ?? ""}. Run the action pending.`,
+        `talk: no pending ask has the id ${literal(replyTo ?? "")}. Run the action pending.`,
       );
     case "None":
       return yield* fail("talk: no ask waits for a reply from this session.");
@@ -652,7 +766,7 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
   }
   const { ask } = selection;
   const messageId = newMessageId();
-  const target: Resolved = { target: ask.route.replyTo, name: ask.from.name };
+  const target: ResolvedTarget = { target: ask.route.replyTo, name: ask.from.name };
   const json = yield* encodeReplyBody({
     messageId,
     from: sender(context.self),
@@ -718,14 +832,13 @@ const runCancel = Effect.fnUntraced(function* (
 });
 
 const runList = Effect.fnUntraced(function* (context: ToolContext) {
-  const candidates = yield* probeAll(context, yield* listPeers(context.transport));
   // E8: `list` omits registrations proven ended and marks unresolved ones.
-  const shown = candidates.filter((candidate) => probeState(candidate.probe) !== "ended");
+  const rows = yield* listSessions(context);
   const text =
-    shown.length === 0
+    rows.length === 0
       ? "No live talk sessions."
-      : `Talk sessions (${shown.length}); use the full instance id as instance:\n` +
-        shown.map((candidate) => peerLine(context.self, candidate)).join("\n");
+      : `Talk sessions (${rows.length}); use the full instance id as instance:\n` +
+        rows.map(peerLine).join("\n");
   return { ok: true, text, details: { action: "list" } } satisfies TalkToolOutcome;
 });
 

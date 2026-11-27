@@ -18,7 +18,7 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Effect, Fiber, Layer, Logger, type Scope } from "effect";
+import { Effect, Exit, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -271,6 +271,16 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
       for (const socket of open) socket.destroy();
     },
   };
+}
+
+/**
+ * Teardown of a fake listener, after the assertions of its test: it destroys
+ * each accepted socket and then closes the server, so a connection that a
+ * regression left open cannot keep the worker alive.
+ */
+function closeFake(listener: FakeListener): void {
+  listener.release();
+  listener.server.close();
 }
 
 /** Writes a POSIX entry file as the registry would. */
@@ -599,6 +609,55 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
     }
   });
 
+  it("rebinds in the same pass when the folder goes away and comes back while the pass publishes", async () => {
+    fresh();
+    let armed = false;
+    try {
+      await withListener(
+        folder,
+        (real) => ({
+          ...real,
+          // After the pass found the folder and the socket intact, another process removes the
+          // folder, which takes the socket and the entry, and creates the folder again.
+          check: (published) =>
+            Effect.suspend(() => {
+              if (armed) {
+                armed = false;
+                rmSync(folder, { recursive: true, force: true });
+                mkdirSync(folder, { mode: 0o700 });
+                chmodSync(folder, 0o700);
+              }
+              return real.check(published);
+            }),
+        }),
+        (listener, registry) =>
+          Effect.gen(function* () {
+            const registration = yield* register(listener, "gone");
+            const before = yield* listener.status;
+            armed = true;
+            yield* TestClock.adjust(REPAIR_MS);
+            yield* statusUntil(
+              listener,
+              (status) => status.repairPasses > before.repairPasses,
+              "the repair pass",
+            );
+            const after = yield* listener.status;
+            expect(armed).toBe(false);
+            // The pass did not leave an entry that names the removed socket.
+            expect(after.endpoint).not.toEqual(before.endpoint);
+            expect(after.closedListeners).toBe(before.closedListeners + 1);
+            expect(after.registrations.every((served) => !served.stale)).toBe(true);
+            const entry = yield* registry.read(registration.fileName);
+            const named = Option.getOrUndefined(entry)?.endpoint;
+            expect(named).toEqual(after.endpoint);
+            expect(named?.kind === "unix" && existsSync(named.path)).toBe(true);
+          }),
+      );
+    } finally {
+      cleanUp();
+    }
+  });
+
   it("keeps the published descriptor until a replacement publishes", async () => {
     fresh();
     let failPublish = false;
@@ -673,6 +732,73 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
             const status = yield* listener.status;
             expect(status.pendingRemovals).toEqual([]);
             expect(status.registrations.map((item) => item.live)).toEqual([false]);
+          }),
+      );
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("refuses a chosen instance id that a live or a withdrawn registration holds, from an index of served ids", async () => {
+    fresh();
+    const chosen = "0123456789abcdef";
+    const input = (sessionId: string, instanceId = chosen) => ({
+      sessionId,
+      instanceId,
+      name: sessionId,
+      cwd: base,
+    });
+    /** Runs `effect` and gives the maps whose iteration started in it. */
+    const iteratedMaps = <A, E>(effect: Effect.Effect<A, E>) =>
+      Effect.gen(function* () {
+        const maps = new Set<unknown>();
+        const restore: Array<() => void> = [];
+        yield* Effect.sync(() => {
+          for (const key of ["values", "keys", "entries", "forEach", Symbol.iterator] as const) {
+            const original: unknown = Reflect.get(Map.prototype, key);
+            if (!Predicate.isFunction(original)) continue;
+            Reflect.set(Map.prototype, key, function (this: unknown, ...args: Array<unknown>) {
+              maps.add(this);
+              return Reflect.apply(original, this, args);
+            });
+            restore.push(() => Reflect.set(Map.prototype, key, original));
+          }
+        });
+        const result = yield* Effect.ensuring(
+          effect,
+          Effect.sync(() => {
+            for (const undo of restore) undo();
+          }),
+        );
+        return { result, maps: [...maps] };
+      });
+    /** A served registration of the listener: it holds a secret and an entry file name. */
+    const holdsServed = (map: unknown): boolean =>
+      map instanceof Map &&
+      [...map.values()].some(
+        (value) =>
+          Predicate.hasProperty(value, "secret") && Predicate.hasProperty(value, "fileName"),
+      );
+    try {
+      await withListener(
+        folder,
+        (real) => real,
+        (listener) =>
+          Effect.gen(function* () {
+            const first = yield* listener.register(input("first"));
+            for (let index = 0; index < 20; index += 1) yield* register(listener, `other-${index}`);
+            const live = yield* Effect.flip(listener.register(input("second")));
+            expect(live.reason).toBe("the instance id is in use");
+            yield* listener.withdraw(first);
+            const withdrawn = yield* iteratedMaps(Effect.flip(listener.register(input("third"))));
+            expect(withdrawn.result.reason).toBe("the instance id is in use");
+            const accepted = yield* iteratedMaps(
+              listener.register(input("fourth", "fedcba9876543210")),
+            );
+            expect(accepted.result.instanceId).toBe("fedcba9876543210");
+            // Neither check read the registrations, which keep every withdrawn one.
+            expect([...withdrawn.maps, ...accepted.maps].filter(holdsServed)).toEqual([]);
+            expect((yield* listener.status).registrations).toHaveLength(22);
           }),
       );
     } finally {
@@ -802,7 +928,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
 
   it("keeps a newer kept entry when a late proof of an older attempt arrives, and sends one body per call", async () => {
     fresh();
-    const servers: Array<Server> = [];
+    const listeners: Array<FakeListener> = [];
     const secret = randomBytes(32);
     const instanceId = hex(8);
     const sessionId = "late";
@@ -843,7 +969,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
         mode: "answer",
         label: "second",
       });
-      servers.push(first.server, second.server);
+      listeners.push(first, second);
       writeEntryAt(firstPath);
       const later = await Effect.runPromise(
         Effect.gen(function* () {
@@ -871,7 +997,79 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       // One request body per call, whatever the count of routes.
       expect(first.requests() + second.requests()).toBe(2);
     } finally {
-      for (const server of servers) server.close();
+      for (const listener of listeners) closeFake(listener);
+      cleanUp();
+    }
+  });
+
+  it("writes no body and closes the connection when the guard refuses after the handshake, and sends when it allows (R1, R11)", async () => {
+    fresh();
+    const listeners: Array<FakeListener> = [];
+    const secret = randomBytes(32);
+    const target = { instanceId: hex(8), sessionId: "guarded" };
+    try {
+      mkdirSync(folder, { mode: 0o700 });
+      chmodSync(folder, 0o700);
+      const path = join(folder, socketName(process.pid));
+      const gate = Promise.withResolvers<void>();
+      const listener = await startFakeListener(path, {
+        mode: "answer",
+        label: "guarded",
+        secret,
+        pair: target,
+        gate: gate.promise,
+      });
+      listeners.push(listener);
+      writePosixEntry(folder, {
+        version: PROTOCOL_VERSION,
+        ...target,
+        name: "guarded",
+        cwd: base,
+        processId: process.pid,
+        endpoint: { kind: "unix", path },
+        startTime: 1_700_000_000_000,
+        secret: secret.toString("hex"),
+      });
+      // The source session of the caller; it changes with no event while the handshake waits.
+      let session = "s-1";
+      const guard = (): boolean => session === "s-1";
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const client = yield* makeClient({ requestTimeoutMs: 5_000, probeTimeoutMs: 500 });
+          const call = yield* Effect.forkChild(
+            client.request(target, "echo", null, undefined, guard),
+          );
+          yield* promised(() => waitFor(() => listener.hellos() === 1, SETTLE_MS, "the hello"));
+          session = "s-2";
+          gate.resolve();
+          const refused = yield* Fiber.await(call);
+          // The refused connection, the only one so far, closes before the next call opens one (L4).
+          yield* promised(() =>
+            waitFor(
+              () => listener.closed() === 1,
+              SETTLE_MS,
+              "the close of the refused connection",
+            ),
+          );
+          const refusedRequests = listener.requests();
+          // The same client sends once the guard allows it.
+          session = "s-1";
+          const sent = yield* client.request(target, "echo", null, undefined, guard);
+          return { refused, refusedRequests, sent };
+        }).pipe(
+          Effect.provide(
+            TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer)),
+          ),
+        ),
+      );
+      expect(Exit.hasInterrupts(outcome.refused)).toBe(true);
+      expect(outcome.sent).toBe("guarded");
+      expect(outcome.refusedRequests).toBe(0);
+      // Only the allowed call wrote a body.
+      expect(listener.requests()).toBe(1);
+      expect(listener.accepted()).toBe(2);
+    } finally {
+      for (const fake of listeners) closeFake(fake);
       cleanUp();
     }
   });
@@ -880,7 +1078,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
 describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () => {
   let base = "";
   let folder = "";
-  const servers: Array<Server> = [];
+  const opened: Array<FakeListener> = [];
   const secret = randomBytes(32);
   const target = { instanceId: hex(8), sessionId: "route" };
 
@@ -892,7 +1090,7 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
   };
 
   const cleanUp = (): void => {
-    for (const server of servers.splice(0)) server.close();
+    for (const listener of opened.splice(0)) closeFake(listener);
     rmSync(base, { recursive: true, force: true });
   };
 
@@ -910,7 +1108,7 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
   const fake = async (options: FakeOptions): Promise<{ path: string; fake: FakeListener }> => {
     const path = join(folder, socketName(process.pid));
     const started = await startFakeListener(path, { secret, pair: target, ...options });
-    servers.push(started.server);
+    opened.push(started);
     return { path, fake: started };
   };
 
@@ -2036,7 +2234,7 @@ describe("talk transport between spawned Bun peers", () => {
       const target = targetOf(registration);
       const oldPath = unixPath((await status(r)).endpoint);
       await b.call("list");
-      const silentServers: Array<Server> = [];
+      const silentListeners: Array<FakeListener> = [];
       try {
         await withClient(
           folder,
@@ -2066,7 +2264,7 @@ describe("talk transport between spawned Bun peers", () => {
               const silent = yield* promised(() =>
                 startFakeListener(oldPath, { mode: "silent", gauge }),
               );
-              silentServers.push(silent.server);
+              silentListeners.push(silent);
               expect(
                 yield* promised(() => b.send("request", { target, kind: "echo" })),
               ).toMatchObject(ended);
@@ -2100,7 +2298,7 @@ describe("talk transport between spawned Bun peers", () => {
           "test",
         );
       } finally {
-        for (const server of silentServers) server.close();
+        for (const listener of silentListeners) closeFake(listener);
         await r.stop();
       }
     },

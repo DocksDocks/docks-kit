@@ -11,6 +11,10 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
+    "paths": {
+      "@oh-my-pi/pi-tui": ["./talk/types/pi-tui.d.ts"],
+      "@oh-my-pi/pi-tui/text/width": ["./talk/types/pi-tui/text/width.d.ts"]
+    },
     "plugins": [
       {
         "name": "@effect/language-service",

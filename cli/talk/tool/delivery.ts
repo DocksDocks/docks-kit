@@ -8,13 +8,15 @@
 import { Effect, Schema } from "effect";
 
 import { type AskStore, type PendingAsks, makePendingAsks } from "./asks";
-import { formatDelivery, formatReply } from "./format";
+import { type BodyRange, formatDelivery, formatReply } from "./format";
 import {
   type AfterTransition,
   type BeforeTransition,
   type CancelTimer,
   type SessionMode,
+  TALK_DETAILS_VERSION,
   TALK_MESSAGE_TYPE,
+  type TalkDetails,
   type TalkClock,
   type TalkHost,
   type TransitionKind,
@@ -27,6 +29,7 @@ import {
   DELIVER_KIND,
   type DeliverBody,
   type DeliverResult,
+  type MessageKind,
   REPLY_KIND,
   type ReplyBody,
   type ReplyResult,
@@ -96,13 +99,17 @@ interface MessageRecord {
   state: MessageState;
 }
 
-/** A queued message keeps its text; a record does not, so kept outcomes stay small. */
-interface QueuedMessage {
+/** A message on its way out: a record does not keep the text, so kept outcomes stay small. */
+interface Outgoing {
   readonly record: MessageRecord;
   readonly content: string;
+  readonly details: TalkDetails;
+  readonly triggerTurn: boolean;
+}
+
+interface QueuedMessage extends Outgoing {
   /** The UTF-8 size of `content`, counted against `MAX_QUEUED_BYTES`. */
   readonly bytes: number;
-  readonly triggerTurn: boolean;
 }
 
 interface Watch {
@@ -122,13 +129,32 @@ interface Hold {
 
 /** One message on its way into the session. */
 interface Incoming {
-  readonly messageId: string;
-  readonly senderSessionId: string;
   readonly content: string;
+  readonly details: TalkDetails;
   readonly triggerTurn: boolean;
   /** Runs when the receiver accepts the message: an ask becomes pending. */
   readonly onAccept: (() => void) | undefined;
 }
+
+/** The details that the receiver writes for a message (#251 G5). */
+const talkDetails = (
+  kind: MessageKind,
+  body: DeliverBody | ReplyBody,
+  range: BodyRange,
+  askId: string | undefined,
+): TalkDetails => ({
+  v: TALK_DETAILS_VERSION,
+  messageId: body.messageId,
+  kind,
+  from: body.from,
+  sentAt: body.sentAt,
+  ...(askId === undefined ? {} : { askId }),
+  attachments: body.attachments.map((attachment) => ({
+    kind: attachment.type,
+    name: attachment.name,
+  })),
+  body: range,
+});
 
 type AcceptOutcome = "delivered" | "queued" | "submitted" | "busy" | "not-live";
 
@@ -184,7 +210,10 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
    * The confirmation reads only the entries appended since its last read:
    * `scanned` is the entry list that it read last, `scannedTo` its length
    * then. Another list, or a shorter one, is a reset and is read again from
-   * the start.
+   * the start. On a live list, a new watch batch starts the cursor at the
+   * end of the list before its first send, because no watch waits for an
+   * older entry. The cursor exists only while a watch runs, so it keeps no
+   * list that omp replaced after the last watch.
    */
   let scanned: ReadonlyArray<unknown> | undefined;
   let scannedTo = 0;
@@ -235,6 +264,8 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     if (watches.size > 0) return;
     cancelTick?.();
     cancelTick = undefined;
+    scanned = undefined;
+    scannedTo = 0;
     for (const drained of [...drainWaiters]) drained();
   };
 
@@ -257,7 +288,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
         if (watch !== undefined) found.add(watch);
       }
       scannedTo = entries.length;
-      const now = clock.now();
+      const now = clock.elapsed();
       for (const watch of [...watches.values()]) {
         if (sessionId !== watch.sessionId) endWatch(watch, "not-live");
         else if (found.has(watch)) endWatch(watch, "delivered");
@@ -283,21 +314,47 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     }
   };
 
+  /**
+   * Starts the cursor of a new watch batch at the end of a live entry list,
+   * so the first check of an isolated send does not read the whole
+   * transcript. A copy of `getEntries()` is a new array at each read, so the
+   * first check would reset a cursor on it: the batch reads none. A failed
+   * read leaves no cursor: the first check reads from the start.
+   */
+  const startBatch = (): void => {
+    if (watches.size > 0) return;
+    try {
+      if (!host.liveEntries()) return;
+      const entries = host.entries();
+      scanned = entries;
+      scannedTo = entries.length;
+    } catch {
+      scanned = undefined;
+      scannedTo = 0;
+    }
+  };
+
   /** Hands a message to omp and starts its watch. Call only in the tick of a passed guard. */
-  const send = (message: QueuedMessage, target: Target): Watch => {
+  const send = (message: Outgoing, target: Target): Watch => {
     const { record } = message;
+    startBatch();
     try {
       host.sendMessage(
         {
           customType: TALK_MESSAGE_TYPE,
           content: message.content,
           display: true,
-          details: { messageId: record.messageId },
+          details: message.details,
         },
         { triggerTurn: message.triggerTurn },
       );
     } catch (error) {
       settle(record, "unknown");
+      // A batch that never started keeps no list.
+      if (watches.size === 0) {
+        scanned = undefined;
+        scannedTo = 0;
+      }
       throw error;
     }
     settle(record, "submitted");
@@ -305,7 +362,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     const watch: Watch = {
       record,
       sessionId: target.sessionId,
-      deadline: clock.now() + WATCH_LIMIT_MS,
+      deadline: clock.elapsed() + WATCH_LIMIT_MS,
       ended: promise,
       end: resolve,
     };
@@ -334,7 +391,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   /** Plans the next try of the queue from a fresh task; an earlier plan wins. */
   const scheduleFlush = (delayMs: number): void => {
     if (queue.length === 0) return;
-    const at = clock.now() + delayMs;
+    const at = clock.elapsed() + delayMs;
     if (cancelFlush !== undefined && flushAt <= at) return;
     cancelFlush?.();
     flushAt = at;
@@ -380,30 +437,32 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   const accept = async (target: Target, incoming: Incoming): Promise<AcceptOutcome> => {
     const admission = admit(target);
     if (admission === "not-live" || admission === "busy") return admission;
-    const bytes = Buffer.byteLength(incoming.content, "utf8");
-    // A full queue refuses before a record or a pending ask exists (E5).
-    if (
-      admission === "queued" &&
-      (queue.length >= MAX_QUEUED_MESSAGES || queuedBytes + bytes > MAX_QUEUED_BYTES)
-    )
-      return "busy";
+    // A full queue refuses before a record or a pending ask exists (E5). The
+    // text is measured only on the queue path, after the count check and
+    // before the byte cap, so a message that the count refuses is not measured.
+    let bytes = 0;
+    if (admission === "queued") {
+      if (queue.length >= MAX_QUEUED_MESSAGES) return "busy";
+      bytes = Buffer.byteLength(incoming.content, "utf8");
+      if (queuedBytes + bytes > MAX_QUEUED_BYTES) return "busy";
+    }
     const record: MessageRecord = {
-      messageId: incoming.messageId,
-      senderSessionId: incoming.senderSessionId,
+      messageId: incoming.details.messageId,
+      senderSessionId: incoming.details.from.sessionId,
       instanceId: target.instanceId,
       isAsk: incoming.onAccept !== undefined,
       state: "queued",
     };
     keep(record);
     incoming.onAccept?.();
-    const message: QueuedMessage = {
+    const message: Outgoing = {
       record,
       content: incoming.content,
-      bytes,
+      details: incoming.details,
       triggerTurn: incoming.triggerTurn,
     };
     if (admission === "queued") {
-      queue.push(message);
+      queue.push({ ...message, bytes });
       queuedBytes += bytes;
       // A closed gate plans the next try when it opens.
       if (gateOpen()) scheduleFlush(QUEUE_RETRY_MS);
@@ -513,11 +572,14 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       const { ask } = body;
       // E6: an ask is accepted only after its reply route is retained.
       if (ask !== undefined && !(await retain(ask.replyTo))) return result("no-reply-route");
+      const formatted = formatDelivery(body);
       return result(
         await accept(target, {
-          messageId: body.messageId,
-          senderSessionId: body.from.sessionId,
-          content: formatDelivery(body),
+          content: formatted.content,
+          details:
+            ask === undefined
+              ? talkDetails(body.kind ?? "message", body, formatted.body, undefined)
+              : talkDetails("ask", body, formatted.body, body.messageId),
           triggerTurn: !body.noWake,
           onAccept:
             ask === undefined
@@ -536,11 +598,11 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       });
       // A reply from a subagent's ask never enters a main session (E6).
       if (body.origin === "sub") return result("not-found");
+      const formatted = formatReply(body);
       return result(
         await accept(target, {
-          messageId: body.messageId,
-          senderSessionId: body.from.sessionId,
-          content: formatReply(body),
+          content: formatted.content,
+          details: talkDetails("reply", body, formatted.body, body.askId),
           triggerTurn: !body.noWake,
           onAccept: undefined,
         }),
