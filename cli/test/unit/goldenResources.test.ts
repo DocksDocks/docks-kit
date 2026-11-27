@@ -246,22 +246,27 @@ describe("golden temporary resources", () => {
     expect(mocks.rmSync).toHaveBeenCalledWith(`${next}.owner-pid`, { force: true });
   });
 
-  it("changes no permission and does not descend when lstat shows no folder", () => {
-    const link = "/golden-test-tmp/golden-home-link";
-    mocks.stats.set(link, {
-      uid: mocks.ownerUid,
-      mtimeMs: NOW_MS,
-      mode: 0,
-      isDirectory: () => false,
-    });
-    mocks.rmSync.mockImplementation(() => {
-      throw Object.assign(new Error("removal denied"), { code: "EACCES" });
-    });
+  // Windows takes no permission repair, so only POSIX reaches the `lstat` guard.
+  it.skipIf(process.platform === "win32")(
+    "changes no permission and does not descend when lstat shows no folder",
+    () => {
+      const link = "/golden-test-tmp/golden-home-link";
+      mocks.stats.set(link, {
+        uid: mocks.ownerUid,
+        mtimeMs: NOW_MS,
+        mode: 0,
+        isDirectory: () => false,
+      });
+      mocks.rmSync.mockImplementation(() => {
+        throw Object.assign(new Error("removal denied"), { code: "EACCES" });
+      });
 
-    expect(removeTree(link)).toBe("removal denied");
-    expect(mocks.chmodSync).not.toHaveBeenCalled();
-    expect(mocks.readdirSync).not.toHaveBeenCalled();
-  });
+      expect(removeTree(link)).toBe("removal denied");
+      expect(mocks.lstatSync).toHaveBeenCalledWith(link);
+      expect(mocks.chmodSync).not.toHaveBeenCalled();
+      expect(mocks.readdirSync).not.toHaveBeenCalled();
+    },
+  );
 
   it("skips foreign directories and continues after a removal failure", () => {
     const deadPid = 41_003;

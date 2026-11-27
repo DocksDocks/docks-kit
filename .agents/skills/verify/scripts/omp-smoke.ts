@@ -897,10 +897,11 @@ function registrationOf(value: unknown): Registration | undefined {
 }
 
 /**
- * The scan of a request to the scan child, with its JSON result: `{ status: "done", problem, instanceId }` or
- * `{ status: "none" }` for an attribution, and `{ status: "done", problem }` for a final scan. Undefined for a
- * malformed request: for example a cutoff `stopAt` that is not a finite time within the deadline from now, a
- * final scan without registrations, or a registration that has no valid shape.
+ * The scan of a request to the scan child, with its JSON result: `{ kind: "attribution", status: "done", problem,
+ * instanceId }` or `{ kind: "attribution", status: "none" }` for an attribution, and `{ kind: "final", status:
+ * "done", problem }` for a final scan. Undefined for a malformed request: for example a cutoff `stopAt` that is
+ * not a finite time within the deadline from now, a final scan without registrations, or a registration that has
+ * no valid shape.
  */
 function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, TalkPosixSystem> | undefined {
   const defaultFolder = text(request["defaultFolder"]);
