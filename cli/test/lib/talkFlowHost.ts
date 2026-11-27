@@ -270,6 +270,8 @@ export class FakeServices implements FlowServices {
   listing: Promise<ListingAnswer> | undefined;
   /** Set: the listing rejects with it, as a defect of the transport runtime. */
   listError: Error | undefined;
+  /** Set: the listing throws it at once, before it returns a promise. */
+  listThrow: Error | undefined;
   target: TargetAnswer = {
     _tag: "Failed",
     text: "talk: no listed session matches `x` (not-found).",
@@ -289,6 +291,7 @@ export class FakeServices implements FlowServices {
   readonly sessionId = (): string => this.session;
   readonly list = (life: FlowLife): Promise<ListingAnswer> => {
     this.lives.push(life);
+    if (this.listThrow !== undefined) throw this.listThrow;
     return this.listError === undefined
       ? (this.listing ?? Promise.resolve({ _tag: "Listed", rows: this.rows }))
       : Promise.reject(this.listError);

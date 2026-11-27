@@ -313,7 +313,6 @@ describe("list view (G3)", () => {
     "enlarge the pane",
     "enlarge",
     "grow",
-    "↔",
   ];
 
   it.each([
@@ -324,8 +323,6 @@ describe("list view (G3)", () => {
     [7, "enlarge"],
     [5, "grow"],
     [4, "grow"],
-    [3, "↔"],
-    [1, "↔"],
   ])("fits a whole resize cue to %i columns, never a cut word", async (columns, text) => {
     const ui = await loadUi();
     const shown = resizeText(ui, columns);
@@ -333,6 +330,14 @@ describe("list view (G3)", () => {
     expect(CUES).toContain(shown);
     expect([...shown].length).toBeLessThanOrEqual(columns);
   });
+
+  it.each([3, 1])(
+    "shows no cue in a pane %i columns wide, narrower than the shortest whole cue",
+    async (columns) => {
+      const ui = await loadUi();
+      expect(resizeText(ui, columns)).toBe("");
+    },
+  );
 
   /** Shrinks the pane below the open list; the list ends and the resize view mounts. */
   const shrink = async (h: Harness): Promise<FakeNode> => {
@@ -419,17 +424,37 @@ describe("list view (G3)", () => {
     // The view stays open and focused while the rows are pending.
     expect(h.tui.top.node).toBe(resize);
     expect(prop(resize, "text")).toBe(LISTING_TEXT);
+    // A shrink during the listing: the size decides first, so the view shows the cue, here none.
+    h.tui.size = { columns: 1, rows: 1 };
+    expect(prop(resize, "text")).toBe("");
+    h.tui.size = { columns: 100, rows: 30 };
+    expect(prop(resize, "text")).toBe(LISTING_TEXT);
     const life = h.services.lives.at(-1);
     expect(life?.signal.aborted).toBe(false);
     expect(press(resize, "escape")).toBe(true);
-    await flow;
+    // The key aborts the flow at once, before any yield.
     expect(life?.signal.aborted).toBe(true);
+    await flow;
     const views = h.tui.views.length;
     listing.resolve({ _tag: "Listed", rows: h.services.rows });
     await flush();
     expect(h.tui.views).toHaveLength(views);
     expect(h.tui.views.every((view) => view.closed)).toBe(true);
     expect(h.tui.notices).toEqual([]);
+  });
+
+  it("ends the flow with the error when the listing after a grow throws at once", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const resize = await shrink(h);
+    h.services.listThrow = new Error("the registry broke");
+    await grow(h, resize);
+    // The view ends with the failure at once; no listing promise is left open.
+    expect(h.tui.views.at(-1)?.node).toBe(resize);
+    expect(h.tui.views.at(-1)?.closed).toBe(true);
+    await flow;
+    expect(h.tui.notices).toEqual([{ text: "talk: the registry broke", level: "error" }]);
   });
 
   it("keeps the list open at the smallest size that fits", async () => {
@@ -896,8 +921,9 @@ describe("flow slot (G3)", () => {
     expect(press(waiting.node, "enter")).toBe(true);
     const life = h.services.lives.at(-1);
     expect(press(waiting.node, "escape")).toBe(true);
-    await flow;
+    // The key aborts the flow at once, before any yield.
     expect(life?.signal.aborted).toBe(true);
+    await flow;
     gate.resolve();
     await flush();
     expect(h.tui.notices).toEqual([]);
@@ -925,6 +951,100 @@ describe("flow slot (G3)", () => {
       expect(view.result).toEqual(list ? { _tag: "Close" } : { _tag: "Cancel" });
       expect(h.services.sends).toEqual([]);
       expect(h.tui.notices).toEqual([]);
+    },
+  );
+});
+
+describe("a buffered escape right after a view-changing key (round 8)", () => {
+  const GAMMA = { instanceId: ID_C, sessionId: "session-gamma", name: "gamma", cwd: "/g" };
+
+  /** One transition: the flow, the outgoing view, and the key that leads to the next talk view. */
+  interface Transition {
+    readonly flow: Promise<void>;
+    readonly view: FakeNode;
+    readonly trigger: () => void;
+  }
+
+  it.each<[string, (h: Harness) => Promise<Transition>]>([
+    [
+      "activate in the list, to compose",
+      async (h) => {
+        const flow = h.run();
+        await flush();
+        const view = h.tui.top.node;
+        return { flow, view, trigger: () => fire(view, "onActivate", itemsOf(view)[1]?.id) };
+      },
+    ],
+    [
+      "h in the list, to the waiting view of the side turn",
+      async (h) => {
+        const flow = h.run();
+        await flush();
+        const view = h.tui.top.node;
+        return { flow, view, trigger: () => press(view, "h") };
+      },
+    ],
+    [
+      "enter in compose, to the confirm view",
+      async (h) => {
+        const flow = h.run();
+        await flush();
+        const view = await composeTo(h, ID_B, "hello");
+        return { flow, view, trigger: () => press(view, "enter") };
+      },
+    ],
+    [
+      "the last code letter, to the waiting view of the send",
+      async (h) => {
+        const flow = h.run();
+        await flush();
+        const view = await confirmTo(h, ID_B, "hello");
+        const { code } = codeOf(view);
+        press(view, code.charAt(0));
+        return { flow, view, trigger: () => press(view, code.charAt(1)) };
+      },
+    ],
+    [
+      "escape in the confirm view, back to compose",
+      async (h) => {
+        const flow = h.run();
+        await flush();
+        const view = await confirmTo(h, ID_B, "hello");
+        return { flow, view, trigger: () => press(view, "escape") };
+      },
+    ],
+    [
+      "ctrl+s in the handover review, to the confirm view",
+      async (h) => {
+        h.services.target = { _tag: "Resolved", destination: GAMMA };
+        const flow = h.run({ _tag: "Handover", target: "gamma" });
+        await flush();
+        const view = h.tui.top.node;
+        expect(view.kind).toBe("editor");
+        return { flow, view, trigger: () => press(view, "ctrl+s") };
+      },
+    ],
+  ])(
+    "keeps the outgoing view focused after %s, and a buffered escape ends the flow there",
+    async (_name, open) => {
+      const h = await harness();
+      const { flow, view, trigger } = await open(h);
+      const outgoing = h.tui.views.find((candidate) => candidate.node === view);
+      const signal = h.services.lives[0]?.signal;
+      const mounted = h.tui.views.length;
+      const notices = h.tui.notices.length;
+      trigger();
+      // No microtask ran: omp still shows the outgoing view, so the next key goes to it.
+      expect(outgoing?.closed).toBe(false);
+      expect(press(view, "escape")).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      await flow;
+      await flush();
+      // The flow ended before the next talk view mounted; nothing went out.
+      expect(h.tui.views).toHaveLength(mounted);
+      expect(h.tui.views.every((candidate) => candidate.closed)).toBe(true);
+      expect(h.services.sends).toEqual([]);
+      expect(h.tui.notices).toHaveLength(notices);
     },
   );
 });

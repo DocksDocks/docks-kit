@@ -512,8 +512,9 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     const { flow, reply, signal } = await pending(h);
     expect(press(h.tui.top.node, "a")).toBe(true);
     expect(press(h.tui.top.node, "escape")).toBe(true);
-    await flow;
+    // The key aborts the flow and the side turn at once, before any yield.
     expect(signal.aborted).toBe(true);
+    await flow;
     reply.resolve({ replyText: DRAFT });
     await flush();
     expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);

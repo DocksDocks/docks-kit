@@ -35,14 +35,17 @@ import {
 } from "./handover";
 import type { HostUi } from "./host";
 import {
+  CLOSE_KEY,
   type ConfirmChoice,
   type Destination,
+  TALK_SHORTCUT,
   type ListChoice,
   type Waited,
   type ListMode,
   type ListRow,
   type SizeReader,
   type TextChoice,
+  type ViewKey,
   composeView,
   confirmView,
   drawCode,
@@ -229,6 +232,11 @@ interface Flow {
   readonly services: FlowServices;
   readonly life: FlowLife;
   view: OpenView | undefined;
+  /**
+   * Closes the outgoing view: a view that settled while the flow goes on
+   * stays shown and focused until the next talk view mounts (round 8).
+   */
+  held: (() => void) | undefined;
 }
 
 const TALK_PREFIX = "talk: ";
@@ -255,6 +263,30 @@ const resultOf = <R>(waited: Waited<R>): R | undefined => {
   if (waited._tag === "Failed") throw waited.cause;
   return waited._tag === "Ready" ? waited.result : undefined;
 };
+
+/** The `_tag` of a view choice. */
+const tagOf = (value: unknown): unknown =>
+  Predicate.hasProperty(value, "_tag") ? value._tag : undefined;
+
+/**
+ * The host UI of one view (round 8): each node with `onKey` gets the key
+ * while the view is open. A settled view that omp still shows takes each
+ * key: `escape` and `alt+t` end the flow, and every other key does nothing,
+ * so no key reaches the composer before the next talk view mounts.
+ */
+const settledKeys = (ui: HostUi, isOpen: () => boolean, end: () => void): HostUi => ({
+  ...ui,
+  jsx: (kind, props, key) => {
+    const onKey = props["onKey"];
+    if (!Predicate.isFunction(onKey)) return ui.jsx(kind, props, key);
+    const guarded = (event: ViewKey): boolean => {
+      if (isOpen()) return Reflect.apply(onKey, undefined, [event]) === true;
+      if (event.kind !== "release" && (event.id === CLOSE_KEY || event.id === TALK_SHORTCUT)) end();
+      return true;
+    };
+    return ui.jsx(kind, { ...props, onKey: guarded }, key);
+  },
+});
 
 export interface FlowSlotOptions {
   /** Default: `drawCode` of `views.ts` with `crypto.randomInt`. */
@@ -295,33 +327,65 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     });
   };
 
+  /** Closes the outgoing view of the flow, if one is held. */
+  const release = (flow: Flow): void => {
+    const close = flow.held;
+    flow.held = undefined;
+    close?.();
+  };
+
   /**
-   * Mounts one view as an overlay and waits for its choice. The view closes
-   * through its own `done` with `ended` when the flow ends, and `check`
-   * cancels it with `ended` when omp closed its overlay without `done`.
+   * Mounts one view as an overlay and resolves with its choice (G3).
+   *
+   * A choice that is not `ended` leaves the view shown and focused until the
+   * factory of the next view of the flow runs, in the microtasks after the
+   * key: a key that omp dispatches before them still reaches a talk view,
+   * never the composer. A settled view takes no key: `escape` and `alt+t`
+   * end the flow, and every other key does nothing. The outgoing view closes
+   * inside the next factory, before omp opens the next overlay, because omp
+   * gives the focus back to the node that was focused when an overlay
+   * opened (`overlays.ts` v19.2.1:63-79); a closed talk view must not be that
+   * node. A choice equal to `ended` ends the flow at once, before any later
+   * key runs. The view closes through its own `done` with `ended` when the
+   * flow ends, and `check` cancels it with `ended` when omp closed its
+   * overlay without `done`.
    */
-  const mount = async <T>(
+  const mount = <T>(
     flow: Flow,
     flowUi: FlowUi,
-    build: (size: SizeReader, done: (choice: T) => void) => JSXNode,
+    build: (viewUi: HostUi, size: SizeReader, done: (choice: T) => void) => JSXNode,
     ended: T,
     fullscreen: boolean,
   ): Promise<T> => {
-    if (!live(flow)) return ended;
-    const { signal } = flow.controller;
-    let choice = ended;
+    if (!live(flow)) return Promise.resolve(ended);
+    const { controller } = flow;
+    const { signal } = controller;
+    const settled = Promise.withResolvers<T>();
     const view: OpenView = { handle: undefined, cancel: () => undefined };
     flow.view = view;
-    try {
-      await flowUi.custom(
+    flowUi
+      .custom(
         (host, _theme, _keybindings, done) => {
+          // The outgoing view closes now, before omp opens this overlay.
+          release(flow);
           let open = true;
+          let building = true;
           const finish = (value: T): void => {
             if (!open) return;
             open = false;
             signal.removeEventListener("abort", onAbort);
-            choice = value;
-            done(value);
+            if (flow.view === view) flow.view = undefined;
+            if (tagOf(value) === tagOf(ended)) controller.abort();
+            // omp mounts no view whose `done` ran while its factory ran, and an ended flow mounts
+            // no next view: both close at once. Otherwise the view waits for the next one.
+            if (signal.aborted || building) done(value);
+            else {
+              release(flow);
+              flow.held = () => {
+                done(value);
+              };
+            }
+            settled.resolve(value);
           };
           const onAbort = (): void => {
             finish(ended);
@@ -330,7 +394,19 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           signal.addEventListener("abort", onAbort, { once: true });
           // omp can run the factory after the flow ended; the view then closes at once.
           if (!live(flow)) finish(ended);
-          return build(sizeReader(host), finish);
+          const node = build(
+            settledKeys(
+              ui,
+              () => open,
+              () => {
+                controller.abort();
+              },
+            ),
+            sizeReader(host),
+            finish,
+          );
+          building = false;
+          return node;
         },
         {
           overlay: true,
@@ -339,11 +415,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
             view.handle = handle;
           },
         },
-      );
-    } finally {
-      if (flow.view === view) flow.view = undefined;
-    }
-    return choice;
+      )
+      .catch((error: unknown) => {
+        // A failed mount ends the flow with its error.
+        settled.reject(error);
+      });
+    return settled.promise;
   };
 
   /**
@@ -361,9 +438,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       flow,
       flowUi,
       // omp can run the factory after the flow ended; the step then does not start.
-      (_size, done) =>
+      (viewUi, _size, done) =>
         pendingView(
-          ui,
+          viewUi,
           text,
           () => (live(flow) ? task() : Promise.reject(new Error("the /talk flow ended"))),
           done,
@@ -373,7 +450,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     );
 
   /** A view that edits the text of one send: compose, or the handover review. */
-  type EditView = (size: SizeReader, text: string, done: (choice: TextChoice) => void) => JSXNode;
+  type EditView = (
+    viewUi: HostUi,
+    size: SizeReader,
+    text: string,
+    done: (choice: TextChoice) => void,
+  ) => JSXNode;
 
   /**
    * Edit, confirm, and send to one destination (G3, G6). `escape` in the
@@ -395,7 +477,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       const edited = await mount<TextChoice>(
         flow,
         flowUi,
-        (size, done) => edit(size, text, done),
+        (viewUi, size, done) => edit(viewUi, size, text, done),
         { _tag: "Cancel" },
         fullscreen,
       );
@@ -406,7 +488,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       const confirmed = await mount<ConfirmChoice>(
         flow,
         flowUi,
-        (size, done) => confirmView(ui, size, destination, { kind, text, code }, done),
+        (viewUi, size, done) => confirmView(viewUi, size, destination, { kind, text, code }, done),
         { _tag: "Close" },
         FULL_SCREEN,
       );
@@ -432,6 +514,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
    * ran mounts no review.
    */
   const handover = async (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> => {
+    // A flow that ended at the key that chose the handover shows nothing more.
+    if (!live(flow)) return;
     const { sideTurn } = flow.services;
     if (sideTurn === undefined) {
       flowUi.notify(HANDOVER_NO_SIDE_TURN, "error");
@@ -455,7 +539,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       destination,
       "handover",
       draft.text,
-      (size, text, done) => reviewView(ui, size, text, done),
+      (viewUi, size, text, done) => reviewView(viewUi, size, text, done),
       FULL_SCREEN,
     );
   };
@@ -467,7 +551,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       destination,
       "message",
       "",
-      (size, text, done) => composeView(ui, size, destination, text, done),
+      (viewUi, size, text, done) => composeView(viewUi, size, destination, text, done),
       DOCKED,
     );
 
@@ -495,7 +579,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       const choice = await mount<ListChoice>(
         flow,
         flowUi,
-        (size, done) => listView(ui, size, shown, mode, done, preferred),
+        (viewUi, size, done) => listView(viewUi, size, shown, mode, done, preferred),
         { _tag: "Close" },
         FULL_SCREEN,
       );
@@ -506,7 +590,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           const resized = await mount<Waited<ListingAnswer>>(
             flow,
             flowUi,
-            (size, done) => resizeView(ui, size, () => flow.services.list(flow.life), done),
+            (viewUi, size, done) =>
+              resizeView(viewUi, size, () => flow.services.list(flow.life), done),
             { _tag: "Close" },
             FULL_SCREEN,
           );
@@ -576,6 +661,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         services,
         life: { signal: controller.signal, live: () => live(flow) },
         view: undefined,
+        held: undefined,
       };
       current = flow;
       try {
@@ -584,6 +670,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         if (live(flow)) flowUi.notify(talkErrorText(error), "error");
       } finally {
         flow.controller.abort();
+        release(flow);
         if (current === flow) current = undefined;
       }
     },

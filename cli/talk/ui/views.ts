@@ -137,7 +137,7 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 /**
  * The texts of the resize view, longest first (G3): the view shows the
  * longest one that fits the width, so one screen row holds a whole cue and
- * no word is cut. Below 4 cells, the one-cell expand symbol `↔` asks for room.
+ * no word is cut. A pane narrower than 4 cells shows no cue.
  */
 export const RESIZE_TEXTS = [
   "talk: enlarge the pane to see the session list",
@@ -145,7 +145,6 @@ export const RESIZE_TEXTS = [
   "enlarge the pane",
   "enlarge",
   "grow",
-  "↔",
 ] as const;
 const LIST_EMPTY = "No live talk sessions.";
 
@@ -285,9 +284,20 @@ export type Waited<R> =
   | { readonly _tag: "Failed"; readonly cause: unknown }
   | { readonly _tag: "Close" };
 
-/** Runs `task` once and ends the view with its result; `done` runs once only. */
+/**
+ * Runs `task` once and ends the view with its result; `done` runs once
+ * only. A task that throws at once ends the view as `Failed`, as a
+ * rejection does (round 8).
+ */
 const settleWith = <R>(task: () => Promise<R>, done: (choice: Waited<R>) => void): void => {
-  task().then(
+  let running: Promise<R>;
+  try {
+    running = task();
+  } catch (cause) {
+    done({ _tag: "Failed", cause });
+    return;
+  }
+  running.then(
     (result) => {
       done({ _tag: "Ready", result });
     },
@@ -361,11 +371,13 @@ export const resizeView = <R>(
   if (listLayout(size()).fits) start();
   return ui.jsx("text", {
     text: () => {
-      if (listing()) return LISTING_TEXT;
+      // The current size decides first: the progress text shows only while the list fits.
       const current = size();
+      if (!listLayout(current).fits) return resizeText(ui, current?.columns);
+      if (listing()) return LISTING_TEXT;
       // A draw at a size that fits starts the listing after the draw.
-      if (listLayout(current).fits) queueMicrotask(start);
-      return resizeText(ui, current?.columns);
+      queueMicrotask(start);
+      return LISTING_TEXT;
     },
     onKey: waitingKeys(done),
   });
