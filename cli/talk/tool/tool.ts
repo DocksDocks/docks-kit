@@ -10,6 +10,7 @@ import { Effect, Predicate, Result, Schema } from "effect";
 
 import type { AgentRef, AskOutcome, AskStore, PendingAsk, PendingAsks } from "./asks";
 import { Attachment, formatAttachment, literal, oneLine } from "./attachments";
+import { TRUST_LINE } from "./format";
 import type { TalkClock } from "./host";
 import {
   type AskRoute,
@@ -663,9 +664,10 @@ const askFailed = (cause: unknown): TalkToolFailed =>
       })
     : new TalkToolFailed({ message: `talk: the ask failed: ${causeText(cause)}` });
 
+/** The reply as the result of a waiting ask: the head line, the trust line, the text, and the attachments. */
 const replyText = (reply: ReplyBody): string =>
   [
-    `**Reply from ${literal(reply.from.name)}:**\n\n${reply.text}`,
+    `**Reply from ${literal(reply.from.name)}:**\n${TRUST_LINE}\n\n${reply.text}`,
     ...reply.attachments.map((attachment) => formatAttachment(attachment, reply.sentAt)),
   ].join("\n\n");
 

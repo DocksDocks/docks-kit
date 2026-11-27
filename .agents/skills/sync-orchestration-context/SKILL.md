@@ -229,7 +229,7 @@ The omp pipeline reads SoT from the embedded payload.
 - The lock goes in `finally`, also when `body` throws. A signal needs no
   handler: the OS releases the lock when the process ends.
 
-(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 1 with the held line and leaves HOME unchanged"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no lock in a dry run"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "rejects an unknown argument with exit 2 before it takes the lock"`, `bunx vitest run cli/test/unit/engine-di.test.ts -t "refuses the removed --skip-plugin-refresh"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 2 when the lock wait is not a non-negative safe integer"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "DRY_RUN env global"`, and `bunx vitest run cli/test/unit/syncLock.test.ts -t "prints the help with -h and --help while another sync holds the lock"`)
+(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 1 with the held line and leaves HOME unchanged"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no lock in a dry run"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "rejects an unknown argument with exit 2 before it takes the lock"`, `bunx vitest run cli/test/unit/engine-di.test.ts -t "with exit 2 before it takes a lock or writes an omp file"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 2 when the lock wait is not a non-negative safe integer"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "DRY_RUN env global"`, and `bunx vitest run cli/test/unit/syncLock.test.ts -t "prints the help with -h and --help while another sync holds the lock"`)
 
 Folder locks: two homes can share an omp folder (`PI_CODING_AGENT_DIR`,
 `PI_CONFIG_DIR`, `XDG_DATA_HOME`, or a symlink). Their home locks differ, so
@@ -280,10 +280,14 @@ each writer of such a folder also takes `<folder>/.docks-kit-sync-lock.db`
 
 - `docks-kit sync` always runs the omp pipeline. There is no harness
   selection and no target word.
-- A held sync lock delays every check that runs under it. An invalid argument
-  exits 2 only after the lock wait ends. A rejected sync leaves
-  `~/.cache/docks-kit/sync-lock.db` in HOME.
-  (verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 1 with the held line and leaves HOME unchanged"`)
+- A held sync lock delays the checks that run under it, not the argument
+  checks. The public CLI rejects a positional word (`docks-kit sync omp`:
+  `Unexpected positional argument`, exit 1) and an unknown flag
+  (`unknown flag <flag> for 'sync'`, exit 2) before the engine runs. On the
+  raw engine channel, `parseArgs` runs before the lock: any argument that is
+  not a `sync` flag prints `Unknown arg: <argument>` and exits 2, at once and
+  without a `~/.cache/docks-kit/sync-lock.db`.
+  (verify: `bunx vitest run cli/test/unit/removedNames.test.ts -t "refuses each sync target word as an unexpected positional argument"` and `bunx vitest run cli/test/unit/syncLock.test.ts -t "rejects an unknown argument with exit 2 before it takes the lock"`)
 - Never call `withSyncLock` inside a run that already holds the sync lock. A
   second acquire in one process finds the lock held, waits the full bound, and
   exits 1.

@@ -150,8 +150,9 @@ describe("formatDelivery", () => {
     expect(lines(text)[1]).toBe(TRUST);
     expect(lines(text)[2]).toBe(replyHint(ASK_ID));
     expect(lines(text)[3]).toBe("Please check the build.");
-    expect(replyHint(ASK_ID)).toContain(`replyTo "${ASK_ID}"`);
-    expect(replyHint(ASK_ID)).toContain('action "reply"');
+    expect(replyHint(ASK_ID)).toBe(
+      `This is an ask. When the user's instructions allow it, answer it with the talk tool: action "reply", replyTo "${ASK_ID}".`,
+    );
   });
 
   it("shows a sender name and folder with line breaks and Markdown as literals on the From line", () => {

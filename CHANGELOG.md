@@ -11,7 +11,9 @@ later.
 ### Added
 
 - The `talk` tool (DocksDocks/docks-kit#249, DocksDocks/docks-kit#250).
-  `list` shows the live sessions. `send` sends a message and returns at once.
+  `list` shows each registered session that a probe did not prove ended; an
+  entry whose probe failed without that proof shows as unresolved. `send`
+  sends a message and waits for the delivery result, not for a reply.
   `ask` sends an ask and waits for the reply, at most 10 minutes. `reply`
   answers an ask, `pending` lists the asks that wait for this session,
   `status` shows the registration, the live peers, the queued messages, and
@@ -76,18 +78,21 @@ later.
   legacy marketplace registry into its active data root during that command,
   as it does on any plugin command.
 - When sync cannot read the plugin inventory, it warns
-  `omp plugin inventory unavailable — …` and the summary shows
-  `omp plugins: unknown (plugin inventory unavailable)`. With Git, it skips
-  the pi-intercom check and the retirement of the former marketplace plugins
-  and runs `omp plugin link` for the kit plugin. Without Git, it runs no other
-  omp plugin command.
+  `omp plugin inventory unavailable — …`. It skips the pi-intercom check and
+  the retirement of the former marketplace plugins. With Git, it runs
+  `omp plugin link` for the kit plugin; when the link succeeds, the summary
+  shows `omp plugins: 1 installed`. Without Git, it runs no other omp plugin
+  command. When Git is missing or the link fails, the summary shows
+  `omp plugins: unknown (plugin inventory unavailable)`.
 
 ### Notes for an upgrade
 
 - Restart each omp session after the sync: omp loads `talk` only at startup.
-- Sync leaves every pi-intercom install as it is. pi-intercom 0.19.0 from npm
-  does not load on omp 19.2 or later; when the notice shows that version,
-  remove the package with omp once you no longer need its files.
+- Sync leaves every pi-intercom install as it is. The notice names the
+  version that the inventory row declares, and a linked or patched build can
+  declare 0.19.0 too. If you know that you installed pi-intercom 0.19.0 from
+  npm, remove it with omp once you no longer need its files: that release does
+  not load on omp 19.2 or later.
 
 ## 2026-11-26 - docks-kit 0.29.7: the omp pins move to 19.2.1
 

@@ -20,6 +20,7 @@ import {
   loaderCallProblems,
   packageOfInput,
   quoteShellArgument,
+  staleDiagnostic,
 } from "../../../scripts/build-talk";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
@@ -334,20 +335,18 @@ describe("talk build freshness check", () => {
     return { result, tmp };
   }
 
-  function expectStale(
-    result: SpawnSyncReturns<string>,
-    outDir: string,
-    reason: string,
-    printedOut: string = resolve(outDir),
-  ): void {
+  /** Asserts the one stale line, with the rebuild command for the shell of this host. */
+  function expectStale(result: SpawnSyncReturns<string>, outDir: string, reason: string): void {
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
     const lines = result.stderr.trimEnd().split("\n");
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain(join(outDir, "talk.js"));
-    expect(lines[0]).toContain(reason);
-    expect(lines[0]).toContain(
-      `rebuild with: ${REBUILD} --entry ${FIXTURE_ENTRY} --out ${printedOut}`,
+    const rebuildWith =
+      process.platform === "win32" ? "rebuild with (PowerShell):" : "rebuild with:";
+    const entry = quoteShellArgument(FIXTURE_ENTRY, process.platform);
+    const out = quoteShellArgument(resolve(outDir), process.platform);
+    expect(lines[0]).toBe(
+      `[build-talk] stale: ${join(resolve(outDir), "talk.js")} ${reason}; ${rebuildWith} ${REBUILD} --entry ${entry} --out ${out}`,
     );
   }
 
@@ -383,28 +382,74 @@ describe("talk build freshness check", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it.skipIf(process.platform === "win32")(
-    "quotes an output path with a space, so that a POSIX shell reads the rebuild command as the same arguments",
-    () => {
-      const outDir = tempDir("check with space");
-      const { result } = runCheck(outDir);
-      expectStale(result, outDir, "is missing", `'${resolve(outDir)}'`);
-      const rebuild = result.stderr.trimEnd().split("rebuild with: ")[1] ?? "";
-      // The shell prints each argument of the printed command on its own line.
-      const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
-        encoding: "utf8",
-      });
-      expect(parsed.status).toBe(0);
-      expect(parsed.stdout.trimEnd().split("\n")).toEqual([
-        "bun",
-        "cli/scripts/build-talk.ts",
-        "--entry",
-        FIXTURE_ENTRY,
-        "--out",
-        resolve(outDir),
-      ]);
-    },
-  );
+  it("quotes an output path with a space, so that the shell of the host reads the rebuild command as the same arguments", () => {
+    const outDir = tempDir("check with space");
+    const { result } = runCheck(outDir);
+    expectStale(result, outDir, "is missing");
+    // Both shells take a path without a single quote in single quotes.
+    expect(result.stderr).toContain(`--out '${resolve(outDir)}'`);
+    if (process.platform === "win32") return;
+    const rebuild = result.stderr.trimEnd().split("rebuild with: ")[1] ?? "";
+    // The shell prints each argument of the printed command on its own line.
+    const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
+      encoding: "utf8",
+    });
+    expect(parsed.status).toBe(0);
+    expect(parsed.stdout.trimEnd().split("\n")).toEqual([
+      "bun",
+      "cli/scripts/build-talk.ts",
+      "--entry",
+      FIXTURE_ENTRY,
+      "--out",
+      resolve(outDir),
+    ]);
+  });
+});
+
+describe("talk build stale diagnostic of each shell", () => {
+  it.each([
+    [
+      "POSIX, given options, a path with a space",
+      "linux",
+      {
+        path: "/tmp/build output/talk.js",
+        state: "missing",
+        entry: "/repo/e.js",
+        outDir: "/tmp/build output",
+      },
+      "[build-talk] stale: /tmp/build output/talk.js is missing; rebuild with: bun cli/scripts/build-talk.ts --entry /repo/e.js --out '/tmp/build output'",
+    ],
+    [
+      "Windows, given options, a path with a space",
+      "win32",
+      {
+        path: String.raw`C:\build output\talk.js`,
+        state: "changed",
+        entry: String.raw`C:\repo\e.js`,
+        outDir: String.raw`C:\build output`,
+      },
+      String.raw`[build-talk] stale: C:\build output\talk.js differs from a fresh build; rebuild with (PowerShell): bun cli/scripts/build-talk.ts --entry C:\repo\e.js --out 'C:\build output'`,
+    ],
+    [
+      "POSIX, the default options",
+      "darwin",
+      { path: "/repo/SoT/talk.js", state: "changed", entry: undefined, outDir: undefined },
+      "[build-talk] stale: /repo/SoT/talk.js differs from a fresh build; rebuild with: bun cli/scripts/build-talk.ts",
+    ],
+    [
+      "Windows, the default options",
+      "win32",
+      {
+        path: String.raw`C:\repo\SoT\talk.js`,
+        state: "missing",
+        entry: undefined,
+        outDir: undefined,
+      },
+      String.raw`[build-talk] stale: C:\repo\SoT\talk.js is missing; rebuild with (PowerShell): bun cli/scripts/build-talk.ts`,
+    ],
+  ] as const)("prints the line for %s", (_name, platform, stale, line) => {
+    expect(staleDiagnostic(stale, platform)).toBe(line);
+  });
 });
 
 describe("talk build shell quoting of the rebuild command", () => {

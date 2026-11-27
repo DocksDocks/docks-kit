@@ -12,7 +12,11 @@ docks-kit sync --dry-run            # preview it
 
 `sync` deploys the omp SoT and takes no positional argument. A word after
 `sync`, such as `omp`, stops it with `Unexpected positional argument` and
-exit 1.
+exit 1. A flag that `sync` does not have, such as `--prune`, stops it with
+`unknown flag <flag> for 'sync'` and exit 2. The private `native-raw` engine
+channel reads the raw arguments itself: any argument that is not a `sync`
+flag, a word as well as a flag, stops it with `Unknown arg: <argument>` and
+exit 2.
 
 ## Global flags
 
@@ -63,11 +67,11 @@ runs never write the same files at once.
   omp folder. Otherwise they hold the sync lock and the omp agent folder lock
   while they rewrite `config.yml`. The wait and the held line are those of a
   sync.
-- A sync reads its arguments before it takes a lock. An invalid argument
-  exits 2 and `-h` or `--help` prints the help, without a wait for a held
-  lock. A run with `--dry-run` takes no lock. A dry run through the
-  `DRY_RUN=1` env global of the private `native-raw` engine channel takes no
-  lock either.
+- A sync checks its arguments before it takes a lock, so a held lock delays no
+  argument error, and `-h` or `--help` prints the help without a wait. A
+  rejected argument leaves no lock file. A run with `--dry-run` takes no lock.
+  A dry run through the `DRY_RUN=1` env global of the private `native-raw`
+  engine channel takes no lock either.
 - The lock goes when the run ends, also when the process is killed.
 
 ## `omp` session flags

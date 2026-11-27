@@ -612,6 +612,31 @@ export function quoteShellArgument(argument: string, platform: NodeJS.Platform):
   return `'${argument.replaceAll("'", String.raw`'\''`)}'`;
 }
 
+/**
+ * The `--check` line for a stale `path`: the reason and the rebuild command,
+ * quoted for the shell of `platform` (PowerShell on Windows, which the line
+ * names). `entry` and `outDir` are the resolved options that the run got;
+ * an option that the run did not get stays out of the command.
+ */
+export function staleDiagnostic(
+  stale: {
+    readonly path: string;
+    readonly state: Exclude<TalkCheck, "current">;
+    readonly entry: string | undefined;
+    readonly outDir: string | undefined;
+  },
+  platform: NodeJS.Platform,
+): string {
+  const rebuild = [
+    BUILD_COMMAND,
+    ...(stale.entry === undefined ? [] : ["--entry", quoteShellArgument(stale.entry, platform)]),
+    ...(stale.outDir === undefined ? [] : ["--out", quoteShellArgument(stale.outDir, platform)]),
+  ].join(" ");
+  const reason = stale.state === "missing" ? "is missing" : "differs from a fresh build";
+  const shell = platform === "win32" ? " (PowerShell)" : "";
+  return `[build-talk] stale: ${stale.path} ${reason}; rebuild with${shell}: ${rebuild}`;
+}
+
 async function main(): Promise<void> {
   try {
     const { values } = parseArgs({
@@ -636,16 +661,17 @@ async function main(): Promise<void> {
       console.log(`[build-talk] ${path} is current`);
       return;
     }
-    const rebuild = [
-      BUILD_COMMAND,
-      ...(values.entry === undefined
-        ? []
-        : ["--entry", quoteShellArgument(entry, process.platform)]),
-      ...(values.out === undefined ? [] : ["--out", quoteShellArgument(outDir, process.platform)]),
-    ].join(" ");
-    const reason = state === "missing" ? "is missing" : "differs from a fresh build";
-    const shell = process.platform === "win32" ? " (PowerShell)" : "";
-    console.error(`[build-talk] stale: ${path} ${reason}; rebuild with${shell}: ${rebuild}`);
+    console.error(
+      staleDiagnostic(
+        {
+          path,
+          state,
+          entry: values.entry === undefined ? undefined : entry,
+          outDir: values.out === undefined ? undefined : outDir,
+        },
+        process.platform,
+      ),
+    );
     process.exit(1);
   } catch (error) {
     const usage =

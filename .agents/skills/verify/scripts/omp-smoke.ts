@@ -60,6 +60,7 @@ import {
   decodeEntry,
   describeFailure,
   ENTRY_NAME,
+  type RegistryEntry,
 } from "../../../../cli/talk/transport/registry.ts";
 import {
   checkRegistryFolder,
@@ -74,13 +75,48 @@ import {
 const PACKAGE_NAME = "docks-kit-omp";
 /** The kit plugin folder, relative to the repository root. */
 const PLUGIN_DIR = "SoT/.omp/plugin";
-/** The shipped `talk` skill: the load mode expects it among the skills that omp loads. */
-const TALK_SKILL = "talk";
 /**
- * The number of skills that the kit plugin ships. A change that adds or removes a skill folder under
- * `SoT/.omp/plugin/skills/` must update this number, so a deleted skill fails the load mode.
+ * The skills that the kit plugin ships, apart from the checkout: the 32 docks and plan-lifecycle skills,
+ * `workspace-hygiene`, and `talk`. The load mode requires that omp loads exactly these names. A change that
+ * adds, removes, or renames a skill folder under `SoT/.omp/plugin/skills/` must update this list, so a
+ * deleted or replaced skill fails the load mode.
  */
-const EXPECTED_SKILL_COUNT = 34;
+const REQUIRED_SKILLS = [
+  "accessibility",
+  "agent-first-setup",
+  "ci-speed",
+  "claude-md-migration",
+  "code-clarity",
+  "code-guardrails",
+  "code-review",
+  "code-reviewer",
+  "commit-discipline",
+  "context-tree",
+  "dep-vuln-workflow",
+  "design-tokenization",
+  "effect-ts",
+  "fix-workflow",
+  "lint-no-suppressions",
+  "make-interfaces-feel-better",
+  "plan-manager",
+  "plan-reviewer",
+  "plan-workspace",
+  "react-component-patterns",
+  "refactor",
+  "report-skill-issue",
+  "security",
+  "skill-agent-pipeline",
+  "skill-maintenance",
+  "solid",
+  "talk",
+  "tdd-workflow",
+  "test-coverage",
+  "type-safety-discipline",
+  "workspace-hygiene",
+  "write-skill",
+  "yolo",
+  "zoom-out",
+];
 const REQUIRED_AGENTS = ["code-reviewer", "plan-reviewer"];
 const COMMAND_TIMEOUT_MS = 120_000;
 const MODEL_PROVIDER = "omp-smoke";
@@ -336,6 +372,11 @@ interface Script {
   respond?: (request: JsonObject) => Promise<Answer>;
   /** When set, each answer waits for it first, so the omp session stays live until a check ends. */
   hold?: Promise<unknown>;
+  /**
+   * When set, a text answer waits for it first. A text answer ends an `omp -p` session, so the session stays
+   * live until the final check ends.
+   */
+  final?: () => Promise<unknown>;
 }
 
 function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): string {
@@ -357,6 +398,8 @@ async function scriptedAnswer(script: Script, request: JsonObject): Promise<Answ
     const turn = script.turns[index];
     answer = typeof turn === "function" ? turn(request) : turn;
   }
+  const finalAnswer = answer === undefined || answer.length === 0 || typeof answer === "string";
+  if (finalAnswer && script.final !== undefined) await script.final();
   return answer === undefined || answer.length === 0 ? "ok" : answer;
 }
 
@@ -598,22 +641,19 @@ function realOrSame(path: string): string {
 
 /**
  * What identifies the registration of one omp session: the process id and the work folder of the omp child.
- * After a session change, also the session id and the instance id of the new registration.
+ * After a session change, also the session id of the new registration.
  */
 interface Registration {
   readonly processId: number;
   readonly cwd: string;
   readonly sessionId?: string | undefined;
-  readonly instanceId?: string | undefined;
 }
 
 /** The registration in the words of a problem. */
 function describeRegistration(registration: Registration): string {
-  const ids = [
-    registration.sessionId === undefined ? "" : ` and the session ${registration.sessionId}`,
-    registration.instanceId === undefined ? "" : ` and the instance ${registration.instanceId}`,
-  ].join("");
-  return `process ${registration.processId} with the folder ${registration.cwd}${ids}`;
+  const session =
+    registration.sessionId === undefined ? "" : ` and the session ${registration.sessionId}`;
+  return `process ${registration.processId} with the folder ${registration.cwd}${session}`;
 }
 
 /** One entry file of a talk registry folder and its text. */
@@ -664,120 +704,265 @@ const registryFiles = Effect.fn("registryFiles")(function* (folder: string) {
   return files;
 });
 
-/** The entry files of a talk registry folder. An unsafe or unreadable folder throws an error that names it. */
-async function readRegistry(folder: string): Promise<RegistryFile[]> {
-  const result = await Effect.runPromise(
-    Effect.result(registryFiles(folder).pipe(Effect.provide(TalkPosixSystem.layer))),
+/** `registryFiles`, with a failure as a problem that names the folder. */
+const readRegistry = (folder: string) =>
+  registryFiles(folder).pipe(
+    Effect.mapError(
+      (failure) =>
+        `the talk registry folder ${folder} is unsafe or unreadable: ${describeFailure(failure)}`,
+    ),
   );
-  if (Result.isSuccess(result)) return result.success;
-  throw new Error(
-    `the talk registry folder ${folder} is unsafe or unreadable: ${describeFailure(result.failure)}`,
-  );
-}
 
 /**
- * Whether the private folder holds a valid entry of the registration. Each entry must pass `decodeEntry`: the
- * schema, and the rules for the file name, the endpoint, and the socket path that talk peers apply. Then the
- * entry must have the process id, the work folder after `realpath`, and the session and instance ids that the
- * registration names. An entry that talk peers reject throws, also beside a valid entry of the registration:
- * only the omp children of the run write to this folder.
+ * The valid private entry of the registration, or undefined. Each entry must pass `decodeEntry`: the schema,
+ * and the rules for the file name, the endpoint, and the socket path that talk peers apply. Then the entry
+ * must have the process id, the work folder after `realpath`, and the session id when the registration names
+ * one. An entry that talk peers reject fails, also beside a valid entry of the registration: only the omp
+ * children of the run write to this folder.
  */
-async function privateRegistered(
+const privateEntry = Effect.fn("privateEntry")(function* (
   folder: string,
   registration: Registration,
   realCwd: string,
-): Promise<boolean> {
+) {
   const kind = endpointKindFor(process.platform);
-  const entries = (await readRegistry(folder)).map((file) => {
-    const decoded = Effect.runSync(
-      Effect.result(decodeEntry(file.text, file.fileName, folder, kind)),
+  const entries: RegistryEntry[] = [];
+  for (const file of yield* readRegistry(folder)) {
+    const entry = yield* decodeEntry(file.text, file.fileName, folder, kind).pipe(
+      Effect.mapError(
+        (rejected) =>
+          `the private registry folder ${folder} holds the entry ${file.fileName}, which talk peers reject: ${rejected.reason.replace(/\s*\n\s*/g, " ")}`,
+      ),
     );
-    if (Result.isFailure(decoded))
-      throw new Error(
-        `the private registry folder ${folder} holds the entry ${file.fileName}, which talk peers reject: ${decoded.failure.reason.replace(/\s*\n\s*/g, " ")}`,
-      );
-    return decoded.success;
-  });
-  return entries.some(
+    entries.push(entry);
+  }
+  return entries.find(
     (entry) =>
       entry.processId === registration.processId &&
       realOrSame(entry.cwd) === realCwd &&
-      (registration.sessionId === undefined || entry.sessionId === registration.sessionId) &&
-      (registration.instanceId === undefined || entry.instanceId === registration.instanceId),
+      (registration.sessionId === undefined || entry.sessionId === registration.sessionId),
   );
-}
+});
 
 /**
- * The entry files of the default folder whose JSON has the process id and, after `realpath`, the work folder of
- * the session. Any entry of the omp child counts, also an entry that is not valid or that has other ids.
+ * The names of the entry files whose JSON has the process id and, after `realpath`, the work folder of the
+ * registration. Any entry of the omp child counts, also an entry that is not valid or that has other ids.
  */
-async function leakedEntries(folder: string, processId: number, realCwd: string): Promise<string[]> {
-  return (await readRegistry(folder))
+function entriesOfProcess(files: readonly RegistryFile[], registration: Registration): string[] {
+  const realCwd = realOrSame(registration.cwd);
+  return files
     .filter((file) => {
       const entry = parseJsonText(file.text);
-      if (!isObject(entry) || entry["processId"] !== processId) return false;
+      if (!isObject(entry) || entry["processId"] !== registration.processId) return false;
       const cwd = entry["cwd"];
       return typeof cwd === "string" && realOrSame(cwd) === realCwd;
     })
     .map((file) => file.fileName);
 }
 
+/** The diagnostic of entries of the registration in the default folder; it names the default folder. */
+function leakProblem(
+  defaultFolder: string,
+  names: readonly string[],
+  registration: Registration,
+): string {
+  return `the default talk registry folder ${defaultFolder} holds the entry ${names.join(", ")} of process ${registration.processId} with the folder ${registration.cwd}`;
+}
+
+/** The result of one attribution: the problem, or an empty text, and the instance id of the valid private entry. */
+interface Attribution {
+  readonly problem: string;
+  readonly instanceId: string | undefined;
+}
+
 /**
- * The registry attribution of one live omp session (H7). Each poll reads the private folder and then the
- * default folder. A default folder that holds an entry of the omp child fails at once: a session that lost
- * `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the private folder holds a valid entry of
- * the registration, and it fails when none comes within the timeout. Entries of other sessions do not count,
- * because each check matches the process id and the folder together. An unsafe or unreadable folder, or a
- * private entry that talk peers reject, fails at once. Gives the problem, or an empty text.
+ * The polls of one attribution. Each poll scans the private folder and then the default folder; the default
+ * scan runs also when the private scan failed, so its diagnostic is not lost. `scan.running` tells the caller
+ * whether a scan was still running when the deadline interrupted the polls.
+ */
+const attributionPolls = Effect.fn("attributionPolls")(function* (
+  privateFolder: string,
+  defaultFolder: string,
+  registration: Registration,
+  scan: { running: boolean },
+) {
+  const realCwd = realOrSame(registration.cwd);
+  for (;;) {
+    scan.running = true;
+    const found = yield* Effect.result(privateEntry(privateFolder, registration, realCwd));
+    const leaked = yield* Effect.result(readRegistry(defaultFolder));
+    scan.running = false;
+    const problems: string[] = [];
+    if (Result.isFailure(leaked)) problems.push(leaked.failure);
+    else {
+      const names = entriesOfProcess(leaked.success, registration);
+      if (names.length > 0) problems.push(leakProblem(defaultFolder, names, registration));
+    }
+    if (Result.isFailure(found)) problems.push(found.failure);
+    if (problems.length > 0) {
+      const failed: Attribution = { problem: problems.join("; "), instanceId: undefined };
+      return failed;
+    }
+    if (Result.isSuccess(found) && found.success !== undefined) {
+      const passed: Attribution = { problem: "", instanceId: found.success.instanceId };
+      return passed;
+    }
+    yield* Effect.sleep(POLL_MS);
+  }
+});
+
+/**
+ * Runs a registry scan under one deadline of `REGISTRY_TIMEOUT_MS`. At the deadline the timeout interrupts the
+ * scan that runs (on macOS that kills a running `ls -led` of the folder check), and a result that comes after
+ * the deadline is not used. Gives the result, the problem of a failed setup of the trust checks, or undefined
+ * at the deadline.
+ */
+async function scanWithinDeadline<A>(
+  scan: Effect.Effect<A, never, TalkPosixSystem>,
+): Promise<{ readonly value: A } | { readonly problem: string } | undefined> {
+  const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
+  const outcome = await Effect.runPromise(
+    scan.pipe(
+      Effect.timeoutOption(REGISTRY_TIMEOUT_MS),
+      Effect.provide(TalkPosixSystem.layer),
+      Effect.result,
+    ),
+  );
+  if (Result.isFailure(outcome))
+    return {
+      problem: `the talk registry folders could not be read: ${describeFailure(outcome.failure)}`,
+    };
+  if (Option.isNone(outcome.success) || Date.now() > deadline) return undefined;
+  return { value: outcome.success.value };
+}
+
+/**
+ * The registry attribution of one live omp session (H7). A default folder that holds an entry of the omp child
+ * fails at once: a session that lost `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the
+ * private folder holds a valid entry of the registration. An unsafe or unreadable folder, or a private entry
+ * that talk peers reject, fails at once. Entries of other sessions do not count, because each check matches
+ * the process id and the folder together. One deadline bounds the whole attribution (`scanWithinDeadline`).
  */
 async function registryAttribution(
   privateFolder: string,
   defaultFolder: string,
   registration: Registration,
-): Promise<string> {
-  const realCwd = realOrSame(registration.cwd);
-  const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
-  try {
-    for (;;) {
-      const registered = await privateRegistered(privateFolder, registration, realCwd);
-      const leaked = await leakedEntries(defaultFolder, registration.processId, realCwd);
-      if (leaked.length > 0)
-        return `the default talk registry folder ${defaultFolder} holds the entry ${leaked.join(", ")} of process ${registration.processId} with the folder ${registration.cwd}`;
-      if (registered) return "";
-      if (Date.now() > deadline)
-        return `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
-      await sleep(POLL_MS);
-    }
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
+): Promise<Attribution> {
+  const scan = { running: false };
+  const outcome = await scanWithinDeadline(
+    attributionPolls(privateFolder, defaultFolder, registration, scan),
+  );
+  if (outcome !== undefined)
+    return "value" in outcome ? outcome.value : { problem: outcome.problem, instanceId: undefined };
+  const within = `within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+  return {
+    problem: scan.running
+      ? `the scans of the talk registry folders ${privateFolder} and ${defaultFolder} did not end ${within}`
+      : `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} ${within}`,
+    instanceId: undefined,
+  };
+}
+
+/** A registration that a mode attributed, and the label of its omp session. */
+interface Attributed {
+  readonly label: string;
+  readonly registration: Registration;
 }
 
 /**
- * The registry attribution of the omp session `label` of a run; the problem names the session. `ids` names the
- * session id and the instance id of a registration that a session change made.
+ * The final scan of the default folder, before the smoke ends a talk session that a mode attributed, while the
+ * session is still live. One read of the default folder, under the deadline of `scanWithinDeadline`, matches
+ * each registration by its process id and folder. A match fails with the diagnostic that names the default
+ * folder, so a copy that a session writes there after its attribution passed still fails the run. The
+ * registrations of one process after a session change match the same entries, so each process counts once.
  */
+async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Promise<string> {
+  if (attributed.length === 0) return "";
+  const outcome = await scanWithinDeadline(Effect.result(readRegistry(run.defaultRegistry)));
+  if (outcome === undefined)
+    return `the final scan of the default talk registry folder ${run.defaultRegistry} did not end within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+  if ("problem" in outcome) return outcome.problem;
+  const files = outcome.value;
+  if (Result.isFailure(files)) return files.failure;
+  const reported = new Set<string>();
+  return attributed
+    .map(({ label, registration }) => {
+      const names = entriesOfProcess(files.success, registration);
+      const key = `${registration.processId} ${realOrSame(registration.cwd)}`;
+      if (names.length === 0 || reported.has(key)) return "";
+      reported.add(key);
+      return `${label} before it ended: ${leakProblem(run.defaultRegistry, names, registration)}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+/**
+ * The registry attribution of the omp session `label` of a run; the problem names the session. `sessionId`
+ * names the session of a registration that a session change made.
+ */
+async function labeledAttribution(
+  run: Run,
+  label: string,
+  processId: number | undefined,
+  cwd: string,
+  sessionId: string | undefined = undefined,
+): Promise<Attribution> {
+  const attribution =
+    processId === undefined
+      ? { problem: "the omp process did not start", instanceId: undefined }
+      : await registryAttribution(run.isolation.registry, run.defaultRegistry, {
+          processId,
+          cwd,
+          sessionId,
+        });
+  return attribution.problem
+    ? { ...attribution, problem: `${label}: ${attribution.problem}` }
+    : attribution;
+}
+
+/** The problem of the registry attribution of the omp session `label` of a run, or an empty text. */
 async function sessionAttribution(
   run: Run,
   label: string,
   processId: number | undefined,
   cwd: string,
-  ids: { readonly sessionId: string; readonly instanceId: string } | undefined = undefined,
 ): Promise<string> {
-  const problem =
-    processId === undefined
-      ? "the omp process did not start"
-      : await registryAttribution(run.isolation.registry, run.defaultRegistry, {
-          processId,
-          cwd,
-          ...ids,
-        });
-  return problem && `${label}: ${problem}`;
+  return (await labeledAttribution(run, label, processId, cwd)).problem;
 }
 
 /** The problems of several attributions, as one check problem. */
 async function attributionProblem(checks: readonly Promise<string>[]): Promise<string> {
   return (await Promise.all(checks)).filter(Boolean).join("; ");
+}
+
+/**
+ * The registry checks of one `omp -p` session of the load mode or the `hooks` mode. `onSpawn` starts the
+ * attribution, and the fake model holds each answer until it ends. The text answer ends the session, so the fake
+ * model holds it until the final scan of the default folder ends: the session is live during both checks.
+ * `problem` gives the problems of both after the session, or an empty text.
+ */
+function printSessionRegistry(
+  run: Run,
+  label: string,
+  cwd: string,
+): { onSpawn: (pid: number | undefined) => void; problem: () => Promise<string> } {
+  let attribution = Promise.resolve(`${label}: the omp session did not start`);
+  let final = Promise.resolve("");
+  return {
+    onSpawn: (pid) => {
+      attribution = sessionAttribution(run, label, pid, cwd);
+      run.script.hold = attribution;
+      if (pid !== undefined)
+        run.script.final = () =>
+          (final = finalLeakProblem(run, [{ label, registration: { processId: pid, cwd } }]));
+    },
+    problem: async () => {
+      run.script.hold = undefined;
+      run.script.final = undefined;
+      return [await attribution, await final].filter(Boolean).join("; ");
+    },
+  };
 }
 
 // ---------- plugin discovery ----------
@@ -1083,7 +1268,7 @@ async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
     "omp skill list --json",
     failures,
   );
-  let registryCheck = Promise.resolve("session: the omp session did not start");
+  const registry = printSessionRegistry(run, "session", run.workDir);
   await run.omp(
     [
       "-p",
@@ -1095,16 +1280,9 @@ async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
       "--no-session",
       SESSION_PROMPT,
     ],
-    {
-      onSpawn: (pid) => {
-        registryCheck = sessionAttribution(run, "session", pid, run.workDir);
-        // The fake model holds the turn until the check ends, so the session is live during the check.
-        run.script.hold = registryCheck;
-      },
-    },
+    { onSpawn: registry.onSpawn },
   );
-  run.script.hold = undefined;
-  const registryProblem = await registryCheck;
+  const registryProblem = await registry.problem();
 
   const lines = [`${name} -> ${run.plugin?.realPath ?? "missing"}`];
   let extensions: string[] = [];
@@ -1123,17 +1301,17 @@ async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
     .map((skill) => text(skill["name"]) ?? "(no name)")
     .sort();
   lines.push(`skills: ${skills.length}`, `skill names: ${skills.join(",")}`);
-  // The loaded skills are the skill folders of the plugin, and their number is the fixed count.
+  // The loaded skills are the skill folders of the plugin, and they are the required skills.
   const shipped = pluginSkillNames(pluginDir);
   if (skills.join(",") !== shipped.join(","))
     failures.push(
       `skills: ${skills.length}, expected the ${shipped.length} skill folders of ${pluginDir}: ${shipped.join(",")}`,
     );
-  if (skills.length !== EXPECTED_SKILL_COUNT)
+  const required = [...REQUIRED_SKILLS].sort();
+  if (skills.join(",") !== required.join(","))
     failures.push(
-      `skills: ${skills.length}, expected ${EXPECTED_SKILL_COUNT}; update EXPECTED_SKILL_COUNT only when a skill was added or removed on purpose`,
+      `skills: ${skills.length}, expected the ${required.length} skills of REQUIRED_SKILLS: ${required.join(",")}; update REQUIRED_SKILLS only when a skill was added, removed, or renamed on purpose`,
     );
-  if (!skills.includes(TALK_SKILL)) failures.push(`the loaded skills do not include ${TALK_SKILL}`);
 
   const offered = taskToolAgents(run.requests);
   const ownAgents = run.plugin === null ? new Set<string>() : pluginAgentNames(run.plugin.realPath);
@@ -1349,7 +1527,7 @@ async function hooks(): Promise<{ lines: string[]; registry: string | null }> {
     const env: Record<string, string> = { ...gitEnv, XDG_STATE_HOME: join(stateRoot, name) };
     if (mode !== undefined) env["DOCKS_VERIFY_GATE"] = mode;
     run.script.turns = turns;
-    let registryCheck = Promise.resolve(`${name}: the omp session did not start`);
+    const registry = printSessionRegistry(run, name, repoDir);
     const result = await run.omp(
       [
         "-p",
@@ -1361,19 +1539,10 @@ async function hooks(): Promise<{ lines: string[]; registry: string | null }> {
         ...extraArgv,
         SCRIPTED_PROMPT,
       ],
-      {
-        cwd: repoDir,
-        env,
-        onSpawn: (pid) => {
-          registryCheck = sessionAttribution(run, name, pid, repoDir);
-          // The fake model holds the first turn until the check ends, so the session is live during the check.
-          run.script.hold = registryCheck;
-        },
-      },
+      { cwd: repoDir, env, onSpawn: registry.onSpawn },
     );
     run.script.turns = [];
-    run.script.hold = undefined;
-    const registryProblem = await registryCheck;
+    const registryProblem = await registry.problem();
     if (registryProblem) registryProblems.push(registryProblem);
     if (result.code !== 0)
       sessionFailures.push(
@@ -2126,6 +2295,21 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
   let peer: RpcPeer | null = null;
   let peerResult: OmpResult | null = null;
   let senderRun: Promise<OmpResult> | null = null;
+  // The registrations that the mode attributed, and the problems of the `registry` line.
+  const attributed: Attributed[] = [];
+  const registryProblems: string[] = [];
+  const reportRegistry = (): void => {
+    results.set(REGISTRY_CHECK, registryProblems.filter(Boolean).join("; "));
+  };
+  let finalScanned = false;
+  // The final scan of the default folder runs once, after the registry check started and before the smoke ends
+  // the first omp session, so both sessions are still live.
+  const finalScan = async (): Promise<void> => {
+    if (finalScanned || !results.has(REGISTRY_CHECK)) return;
+    finalScanned = true;
+    registryProblems.push(await finalLeakProblem(run, attributed));
+    reportRegistry();
+  };
   try {
     // The peer: omp in RPC mode. Its first provider turn answers the driver's prompt.
     const rpc = await startRpcOmp(
@@ -2135,6 +2319,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     );
     peer = rpc;
     const peerRegistry = sessionAttribution(run, "peer", rpc.pid, run.workDir);
+    if (rpc.pid !== undefined)
+      attributed.push({ label: "peer", registration: { processId: rpc.pid, cwd: run.workDir } });
     const peerState = async (): Promise<JsonObject> => {
       const data = await rpc.send({ type: "get_state" });
       return isObject(data) ? data : {};
@@ -2249,6 +2435,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       {
         onSpawn: (pid) => {
           senderRegistry = sessionAttribution(run, "sender", pid, run.workDir);
+          if (pid !== undefined)
+            attributed.push({ label: "sender", registration: { processId: pid, cwd: run.workDir } });
         },
       },
     );
@@ -2263,10 +2451,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       failStep("the first provider request of the sender does not offer the talk tool");
     pass();
     // Both omp processes are live: the peer waits for RPC commands, and the sender waits in its first turn.
-    const registryProblems = [await attributionProblem([peerRegistry, senderRegistry])];
-    const reportRegistry = (): void => {
-      results.set(REGISTRY_CHECK, registryProblems.filter(Boolean).join("; "));
-    };
+    registryProblems.push(await attributionProblem([peerRegistry, senderRegistry]));
     reportRegistry();
 
     step = "talk-list";
@@ -2354,14 +2539,34 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       const sessionId = await peerSessionId();
       if (sessionId === before.sessionId)
         failStep(`RPC ${String(rpcCommand["type"])} kept the session id ${sessionId}`);
-      const instance = await listUntil(sessionId, [before.instance]);
+      // The session change makes a new registration of the peer. Its attribution starts now, apart from the list,
+      // so a registration only in the default folder gets its diagnostic also when the list fails.
+      const attribution = labeledAttribution(
+        run,
+        `peer after ${prefix}`,
+        rpc.pid,
+        run.workDir,
+        sessionId,
+      );
+      if (rpc.pid !== undefined)
+        attributed.push({
+          label: `peer after ${prefix}`,
+          registration: { processId: rpc.pid, cwd: run.workDir, sessionId },
+        });
+      const instance = await listUntil(sessionId, [before.instance]).catch(
+        async (error: unknown) => {
+          registryProblems.push((await attribution).problem);
+          reportRegistry();
+          throw error;
+        },
+      );
       pass();
-      // The session change made a new registration of the peer, so its attribution runs again while the peer is live.
+      const changeAttribution = await attribution;
       registryProblems.push(
-        await sessionAttribution(run, `peer after ${prefix}`, rpc.pid, run.workDir, {
-          sessionId,
-          instanceId: instance,
-        }),
+        changeAttribution.problem ||
+          (changeAttribution.instanceId === instance
+            ? ""
+            : `peer after ${prefix}: the private entry of session ${sessionId} has the instance ${changeAttribution.instanceId}, but the list shows ${instance}`),
       );
       reportRegistry();
 
@@ -2413,6 +2618,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     );
 
     step = "closed-peer-not-live";
+    // Both omp processes are still live.
+    await finalScan();
     peerResult = await rpc.close();
     const closed = await sender.call(TALK_TOOL, {
       action: "send",
@@ -2426,6 +2633,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     results.set(step, error instanceof Error ? error.message : String(error));
   }
 
+  // On a failure, the final scan runs here, before the smoke ends the sessions.
+  await finalScan();
   // The sender ends after its next turn, and a slow peer turn that still waits ends; a sender that still
   // waits in a tool call is stopped.
   sender.finish();
@@ -3144,6 +3353,16 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     pass();
   };
 
+  // The registrations that the mode attributed. The final scan of the default folder runs once, after the
+  // registry check, before the smoke ends the first omp session, so both sessions are still live.
+  const attributed: Attributed[] = [];
+  let finalScanned = false;
+  const finalScan = async (): Promise<void> => {
+    if (finalScanned || !results.has(REGISTRY_CHECK)) return;
+    finalScanned = true;
+    const problem = await finalLeakProblem(run, attributed);
+    results.set(REGISTRY_CHECK, [results.get(REGISTRY_CHECK), problem].filter(Boolean).join("; "));
+  };
   try {
     const screen = new TerminalOmp(
       ["--model", `${MODEL_PROVIDER}/${UI_MODEL_ID}`, "--no-title"],
@@ -3162,6 +3381,9 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
         env,
       );
       // Both omp processes are live: the TUI omp shows its footer, and the peer waits for RPC commands.
+      attributed.push({ label: "TUI", registration: { processId: screen.pid, cwd: run.workDir } });
+      if (peer.pid !== undefined)
+        attributed.push({ label: "peer", registration: { processId: peer.pid, cwd: run.workDir } });
       results.set(
         REGISTRY_CHECK,
         await attributionProblem([
@@ -3171,11 +3393,14 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       );
       await currentFlow(screen, peer);
     }
+    await finalScan();
     terminalResult = await screen.close();
   } catch (error) {
     results.set(step, error instanceof Error ? error.message : String(error));
   }
 
+  // On a failure, the final scan runs here, before the smoke ends the sessions.
+  await finalScan();
   if (terminal !== null && terminalResult === null) terminalResult = await terminal.close();
   const peerResult = peer === null ? null : await peer.close();
   const sessionFailures: string[] = [];

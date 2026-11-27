@@ -11,10 +11,10 @@
  *   bun cli/test/golden-mutation.ts
  *   bun cli/test/golden-mutation.ts --prove-red
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { isObject, parseJson, type Json } from "../src/engine-native/jq";
+import { isObject, parseJson } from "../src/engine-native/jq";
 import { hostOs } from "../src/engine-native/os";
 import { banner, labelSelected, parseArgs } from "./lib/goldenCli";
 import {
@@ -133,23 +133,22 @@ function piIntercomProblems(
   if (removals.length > 0) problems.push(`  output names a removal: ${removals.join(" | ")}`);
 
   const plugin = join(home, ".docks-kit", "omp-plugin");
-  // A manifest that cannot be read is a problem of this case: the matrix goes on.
-  let manifest: Json | undefined;
-  try {
-    manifest = parseJson(readFileSync(join(plugin, "package.json"), "utf8"));
-  } catch (error) {
-    problems.push(
-      `  the deployed kit plugin manifest cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const omp = manifest !== undefined && isObject(manifest) ? manifest["omp"] : undefined;
-  const extensions = omp !== undefined && isObject(omp) ? omp["extensions"] : undefined;
-  if (!Array.isArray(extensions) || !extensions.includes("./extensions/talk.js")) {
-    problems.push("  the deployed kit plugin manifest does not list ./extensions/talk.js");
+  const manifestBytes = deployedBytes(join(plugin, "package.json"), "package.json", problems);
+  if (manifestBytes !== undefined) {
+    const manifest = parseJson(manifestBytes.toString("utf8"));
+    const omp = manifest !== undefined && isObject(manifest) ? manifest["omp"] : undefined;
+    const extensions = omp !== undefined && isObject(omp) ? omp["extensions"] : undefined;
+    if (!Array.isArray(extensions) || !extensions.includes("./extensions/talk.js")) {
+      problems.push("  the deployed kit plugin manifest does not list ./extensions/talk.js");
+    }
   }
   const shipped = readFileSync(join(REPO_DIR, "SoT", ".omp", "plugin", "extensions", "talk.js"));
-  const deployed = join(plugin, "extensions", "talk.js");
-  if (!existsSync(deployed) || !readFileSync(deployed).equals(shipped)) {
+  const deployed = deployedBytes(
+    join(plugin, "extensions", "talk.js"),
+    "extensions/talk.js",
+    problems,
+  );
+  if (deployed !== undefined && !deployed.equals(shipped)) {
     problems.push(
       "  the deployed extensions/talk.js differs from SoT/.omp/plugin/extensions/talk.js",
     );
@@ -158,6 +157,31 @@ function piIntercomProblems(
     problems.push("  the deployed kit plugin has no skills/talk/SKILL.md");
   }
   return problems;
+}
+
+/**
+ * The bytes of the deployed kit plugin file `path`, or undefined after a
+ * problem that names `name`: the file is missing, is not a regular file, or
+ * cannot be read. A problem fails the case, and the matrix goes on.
+ */
+function deployedBytes(path: string, name: string, problems: Array<string>): Buffer | undefined {
+  try {
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat === undefined) {
+      problems.push(`  the deployed kit plugin has no ${name}`);
+      return undefined;
+    }
+    if (!stat.isFile()) {
+      problems.push(`  the deployed kit plugin ${name} is not a regular file`);
+      return undefined;
+    }
+    return readFileSync(path);
+  } catch (error) {
+    problems.push(
+      `  the deployed kit plugin ${name} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
 }
 
 function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCaseGolden {
