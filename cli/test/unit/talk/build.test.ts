@@ -393,7 +393,12 @@ describe("talk build freshness check", () => {
     expect(result.stderr).toContain(quotedName);
     // Where a POSIX shell is present, it prints each argument of the printed command on its own line.
     if (process.platform === "win32" || !existsSync("/bin/sh")) return;
-    const rebuild = result.stderr.trimEnd().split("rebuild with: ")[1] ?? "";
+    // The command starts after the exact prefix up to the known stale path; a
+    // `rebuild with: ` inside that path is not a delimiter.
+    const prefix = `[build-talk] stale: ${join(resolve(outDir), "talk.js")} is missing; rebuild with: `;
+    const line = result.stderr.trimEnd();
+    expect(line.startsWith(prefix)).toBe(true);
+    const rebuild = line.slice(prefix.length);
     const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
       encoding: "utf8",
     });

@@ -48,9 +48,10 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { Effect, Option, Result } from "effect";
+import { Effect, Option, Result, Schema } from "effect";
 import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
 import { endpointKindFor } from "../../../../cli/talk/transport/endpoint.ts";
+import { InstanceId } from "../../../../cli/talk/transport/handshake.ts";
 import {
   DARWIN_GETCONF,
   registryFolderFor,
@@ -223,6 +224,19 @@ const ompBinary =
 // ---------- process and scratch lifecycle ----------
 
 const children = new Set<ChildProcess>();
+/** The process groups of the running registry scan children (`scanInChild`), by the process id of each child. */
+const scanGroups = new Set<number>();
+
+/** Sends SIGKILL to a scan child and to each process that it started, such as a macOS `ls -led`. */
+function killScanGroup(pid: number): void {
+  scanGroups.delete(pid);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // The group already ended.
+  }
+}
+
 /** The omp processes that run in a pseudo-terminal (the `talk-ui` mode). */
 const terminalChildren = new Set<Bun.Subprocess>();
 let scratch: string | null = null;
@@ -246,6 +260,7 @@ function removeFolder(path: string): boolean {
 function cleanup(): string[] {
   for (const child of children) child.kill("SIGKILL");
   children.clear();
+  for (const pid of scanGroups) killScanGroup(pid);
   for (const child of terminalChildren) child.kill("SIGKILL");
   terminalChildren.clear();
   server?.closeAllConnections();
@@ -860,14 +875,15 @@ function registrationOf(value: unknown): Registration | undefined {
   if (!isObject(value)) return undefined;
   const processId = value["processId"];
   const cwd = text(value["cwd"]);
-  if (typeof processId !== "number" || cwd === undefined) return undefined;
+  if (typeof processId !== "number" || !Number.isInteger(processId) || processId <= 0) return undefined;
+  if (cwd === undefined || cwd === "") return undefined;
   return { processId, cwd, sessionId: text(value["sessionId"]) };
 }
 
 /**
  * The scan of a request to the scan child, with its JSON result: `{ status: "done", problem, instanceId }` or
  * `{ status: "none" }` for an attribution, and `{ status: "done", problem }` for a final scan. Undefined for a
- * request without a known shape.
+ * malformed request, for example a final scan without registrations or with one that has no valid shape.
  */
 function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, TalkPosixSystem> | undefined {
   const defaultFolder = text(request["defaultFolder"]);
@@ -890,12 +906,15 @@ function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, Talk
       ),
     );
   }
-  if (request["kind"] !== "final") return undefined;
-  const attributed = objects(request["attributed"]).flatMap((item): Attributed[] => {
-    const label = text(item["label"]);
-    const registration = registrationOf(item["registration"]);
-    return label === undefined || registration === undefined ? [] : [{ label, registration }];
-  });
+  const items = request["attributed"];
+  if (request["kind"] !== "final" || !Array.isArray(items) || items.length === 0) return undefined;
+  const attributed: Attributed[] = [];
+  for (const item of items) {
+    const label = isObject(item) ? text(item["label"]) : undefined;
+    const registration = isObject(item) ? registrationOf(item["registration"]) : undefined;
+    if (label === undefined || registration === undefined) return undefined;
+    attributed.push({ label, registration });
+  }
   return finalScanProblem(defaultFolder, attributed).pipe(
     Effect.map((problem): JsonObject => ({ status: "done", problem })),
   );
@@ -929,16 +948,21 @@ const SCAN_REPORT_MARGIN_MS = 1_000;
 /**
  * Runs one registry scan, entry matching included, in a scan child process (`SCAN_COMMAND`) under one deadline
  * of `REGISTRY_TIMEOUT_MS`. A file system call that stalls blocks only the child: at the deadline the smoke kills
- * it and gives up on it at once, also when the killed child does not exit yet. Gives the JSON result, or
- * undefined when the child did not end by the deadline, exited with an error, or printed no JSON object.
+ * the process group of the child, with each process that the child started, and gives up on it at once, also
+ * when the killed child does not exit yet. Gives the JSON result, or undefined when the child did not end by the
+ * deadline, exited with an error, or printed no JSON object.
  */
 function scanInChild(request: JsonObject): Promise<JsonObject | undefined> {
   const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
   const payload = JSON.stringify({ ...request, stopAt: deadline - SCAN_REPORT_MARGIN_MS });
+  // The child leads its own process group (`detached`), so one kill reaches each process that it started. The
+  // smoke refuses to run on Windows, so it needs no Windows process tree kill.
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), SCAN_COMMAND, payload], {
+    detached: true,
     stdio: ["ignore", "pipe", "ignore"],
   });
-  children.add(child);
+  const pid = child.pid;
+  if (pid !== undefined) scanGroups.add(pid);
   const output: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
   const scanned = Promise.withResolvers<JsonObject | undefined>();
@@ -947,13 +971,14 @@ function scanInChild(request: JsonObject): Promise<JsonObject | undefined> {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
-    children.delete(child);
+    if (pid !== undefined) scanGroups.delete(pid);
     scanned.resolve(result);
   };
   // A child in an uninterruptible file system call ends only when the call returns, so the scan does not wait
   // for its exit after the kill.
   const timer = setTimeout(() => {
-    child.kill("SIGKILL");
+    if (pid === undefined) child.kill("SIGKILL");
+    else killScanGroup(pid);
     settle(undefined);
   }, REGISTRY_TIMEOUT_MS);
   child.on("error", () => settle(undefined));
@@ -965,12 +990,15 @@ function scanInChild(request: JsonObject): Promise<JsonObject | undefined> {
   return scanned.promise;
 }
 
+const isInstanceId = Schema.is(InstanceId);
+
 /**
  * The registry attribution of one live omp session (H7). A default folder that holds an entry of the omp child
  * fails at once: a session that lost `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the
  * private folder holds a valid entry of the registration. An unsafe or unreadable folder, or a private entry
  * that talk peers reject, fails at once. Entries of other sessions do not count, because each check matches
  * the process id and the folder together. The polls run in one scan child under one deadline (`scanInChild`).
+ * A passed check must name a valid instance id; a result without one counts as a scan that did not end.
  */
 async function registryAttribution(
   privateFolder: string,
@@ -983,19 +1011,21 @@ async function registryAttribution(
     defaultFolder,
     registration: registrationJson(registration),
   });
-  const within = `within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+  const deadline = `${REGISTRY_TIMEOUT_MS / 1_000} s`;
   if (result?.["status"] === "none")
     return {
-      problem: `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} ${within}`,
+      problem: `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} while the scan child polled, for ${(REGISTRY_TIMEOUT_MS - SCAN_REPORT_MARGIN_MS) / 1_000} s of the deadline of ${deadline}`,
       instanceId: undefined,
     };
   const problem = text(result?.["problem"]);
-  if (result?.["status"] !== "done" || problem === undefined)
+  const instanceId = text(result?.["instanceId"]);
+  const passedWithId = problem === "" && instanceId !== undefined && isInstanceId(instanceId);
+  if (result?.["status"] !== "done" || problem === undefined || (problem === "" && !passedWithId))
     return {
-      problem: `the scans of the talk registry folders ${privateFolder} and ${defaultFolder} did not end ${within}`,
+      problem: `the scans of the talk registry folders ${privateFolder} and ${defaultFolder} did not end within ${deadline}`,
       instanceId: undefined,
     };
-  return { problem, instanceId: text(result["instanceId"]) };
+  return { problem, instanceId: problem === "" ? instanceId : undefined };
 }
 
 /**
@@ -3502,16 +3532,17 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     await screen.waitFor(UI_READY_TEXT, 0, "footer with the model name");
     if (checks === OLD_OMP_CHECKS) await oldOmpFlow(screen);
     else {
+      // The TUI omp runs talk from here on, so its final scan runs also when the peer does not start.
+      terminalAttributed.push({
+        label: "TUI",
+        registration: { processId: screen.pid, cwd: run.workDir },
+      });
       peer = await startRpcOmp(
         ["--mode", "rpc", "--model", `${MODEL_PROVIDER}/${PEER_MODEL_ID}`, "--no-title"],
         run.workDir,
         env,
       );
       // Both omp processes are live: the TUI omp shows its footer, and the peer waits for RPC commands.
-      terminalAttributed.push({
-        label: "TUI",
-        registration: { processId: screen.pid, cwd: run.workDir },
-      });
       if (peer.pid !== undefined)
         peerAttributed.push({ label: "peer", registration: { processId: peer.pid, cwd: run.workDir } });
       results.set(

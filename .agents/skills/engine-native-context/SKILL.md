@@ -122,7 +122,10 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
   snapshotTreeResult`. An entry that it cannot read, such as a deployed file
   without read permission, fails that case with a problem line, and the
   matrix goes on. The case then has no golden: the driver compares and records
-  no partial snapshot, and `--update-goldens` writes nothing.
+  no partial snapshot, and `--update-goldens` writes nothing. The checks that
+  read the tree again (`seededTreeProblems` and the kit plugin checks of a
+  pi-intercom case) also turn a read error into a problem line of the case,
+  not a throw.
 
 ## JSON Helpers
 

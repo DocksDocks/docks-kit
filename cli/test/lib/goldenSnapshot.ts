@@ -129,7 +129,7 @@ export function snapshotTreeResult(root: string): TreeSnapshotResult {
   } catch (error) {
     return {
       kind: "failed",
-      problem: `  the snapshot of HOME cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      problem: `  the snapshot of HOME cannot be read: ${errorMessage(error)}`,
     };
   }
 }
@@ -198,18 +198,28 @@ export function writeSeededTree(home: string, seed: SeededTree): void {
   }
 }
 
+/** The message of a thrown value, for a problem line. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * The differences between the seeded folder below `home` and `seed`: first
  * the sorted entry list (files and folders), compared name by name, then the
  * raw bytes of each seeded file, and each seeded file that is missing. Unlike
  * `snapshotTree`, it normalizes no line ending and no path, so a rewrite from
- * CRLF to LF and a new lock file both show.
+ * CRLF to LF and a new lock file both show. A folder or file that cannot be
+ * read is a problem line, not a throw, so the driver fails one case and goes on.
  */
 export function seededTreeProblems(home: string, seed: SeededTree): Array<string> {
   const folder = join(home, ...seed.root.split("/"));
-  if (lstatSync(folder, { throwIfNoEntry: false })?.isDirectory() !== true) {
-    return [`  seeded folder ${seed.root} is missing`];
+  let isFolder: boolean;
+  try {
+    isFolder = lstatSync(folder, { throwIfNoEntry: false })?.isDirectory() === true;
+  } catch (error) {
+    return [`  seeded folder ${seed.root} cannot be read: ${errorMessage(error)}`];
   }
+  if (!isFolder) return [`  seeded folder ${seed.root} is missing`];
   const names = Object.keys(seed.files).sort();
   const expected = [
     ...new Set(
@@ -219,25 +229,36 @@ export function seededTreeProblems(home: string, seed: SeededTree): Array<string
       }),
     ),
   ].sort();
-  const actual = readdirSync(folder, { recursive: true, encoding: "utf8" })
-    .map((entry) => entry.replaceAll("\\", "/"))
-    .sort();
   const problems: Array<string> = [];
-  if (expected.length !== actual.length || expected.some((name, index) => name !== actual[index])) {
-    problems.push(
-      `  seeded folder ${seed.root} entries differ: expected ${JSON.stringify(expected)} actual ${JSON.stringify(actual)}`,
-    );
+  try {
+    const actual = readdirSync(folder, { recursive: true, encoding: "utf8" })
+      .map((entry) => entry.replaceAll("\\", "/"))
+      .sort();
+    if (
+      expected.length !== actual.length ||
+      expected.some((name, index) => name !== actual[index])
+    ) {
+      problems.push(
+        `  seeded folder ${seed.root} entries differ: expected ${JSON.stringify(expected)} actual ${JSON.stringify(actual)}`,
+      );
+    }
+  } catch (error) {
+    problems.push(`  seeded folder ${seed.root} entries cannot be read: ${errorMessage(error)}`);
   }
   for (const name of names) {
     const path = join(folder, ...name.split("/"));
-    const stat = lstatSync(path, { throwIfNoEntry: false });
-    if (stat === undefined) {
-      problems.push(`  seeded file ${seed.root}/${name} is missing`);
-    } else if (
-      !stat.isFile() ||
-      !readFileSync(path).equals(Buffer.from(seed.files[name]!, "utf8"))
-    ) {
-      problems.push(`  seeded file ${seed.root}/${name} changed its bytes`);
+    try {
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      if (stat === undefined) {
+        problems.push(`  seeded file ${seed.root}/${name} is missing`);
+      } else if (
+        !stat.isFile() ||
+        !readFileSync(path).equals(Buffer.from(seed.files[name]!, "utf8"))
+      ) {
+        problems.push(`  seeded file ${seed.root}/${name} changed its bytes`);
+      }
+    } catch (error) {
+      problems.push(`  seeded file ${seed.root}/${name} cannot be read: ${errorMessage(error)}`);
     }
   }
   return problems;

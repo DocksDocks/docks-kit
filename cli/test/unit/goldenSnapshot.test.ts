@@ -63,6 +63,47 @@ describe("seededTreeProblems", () => {
     });
   });
 
+  // A permission does not stop root, and Windows ignores the POSIX mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a seeded file that cannot be read as a problem, without a throw",
+    () => {
+      withSnapshotRoot((root) => {
+        writeSeededTree(root, SEED);
+        chmodSync(join(root, ".pi", "agent", "intercom", "config.json"), 0o000);
+
+        expect(seededTreeProblems(root, SEED)).toEqual([
+          expect.stringMatching(
+            /^ {2}seeded file \.pi\/agent\/intercom\/config\.json cannot be read: .*EACCES/,
+          ),
+        ]);
+      });
+    },
+  );
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a seeded folder that cannot be listed as a problem, without a throw",
+    () => {
+      withSnapshotRoot((root) => {
+        writeSeededTree(root, SEED);
+        const notes = join(root, ".pi", "agent", "intercom", "notes");
+        chmodSync(notes, 0o000);
+        try {
+          expect(seededTreeProblems(root, SEED)).toEqual([
+            expect.stringMatching(
+              /^ {2}seeded folder \.pi\/agent\/intercom entries cannot be read: .*EACCES/,
+            ),
+            expect.stringMatching(
+              /^ {2}seeded file \.pi\/agent\/intercom\/notes\/marker cannot be read: .*EACCES/,
+            ),
+          ]);
+        } finally {
+          // The cleanup must list the folder.
+          chmodSync(notes, 0o700);
+        }
+      });
+    },
+  );
+
   it("compares raw bytes, so a CRLF to LF rewrite is a problem", () => {
     withSnapshotRoot((root) => {
       writeSeededTree(root, SEED);
