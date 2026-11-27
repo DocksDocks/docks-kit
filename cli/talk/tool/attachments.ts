@@ -44,14 +44,41 @@ export type Attachment = typeof Attachment.Type;
  */
 export const oneLine = (text: string): string => text.replaceAll(/[\p{Cc}\u2028\u2029]+/gu, " ");
 
-/** A backtick fence longer than every backtick run in the content, and at least three. */
-const fenceFor = (content: string): string => {
-  const longestRun = Math.max(0, ...Array.from(content.matchAll(/`+/gu), (run) => run[0].length));
-  return "`".repeat(Math.max(3, longestRun + 1));
+const BACKTICK = 0x60;
+
+/**
+ * The length of the longest backtick run in the text. It is one scan, so a
+ * text with many runs never becomes the argument list of one call.
+ */
+const longestBacktickRun = (text: string): number => {
+  let longest = 0;
+  let run = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    run = text.charCodeAt(index) === BACKTICK ? run + 1 : 0;
+    if (run > longest) longest = run;
+  }
+  return longest;
 };
 
+/** Text that is empty, or that starts or ends with a backtick or a space, needs a space inside each fence. */
+const NEEDS_PADDING = /^$|^[` ]|[` ]$/u;
+
+/**
+ * Peer metadata (a name, a folder, a session id) as literal text on one
+ * line: one Markdown code span. The text goes through `oneLine`, and the
+ * fence is longer than every backtick run in it, so the text cannot end the
+ * span, start a line or a row, or add Markdown structure.
+ */
+export const literal = (text: string): string => {
+  const flat = oneLine(text);
+  const fence = "`".repeat(longestBacktickRun(flat) + 1);
+  const pad = NEEDS_PADDING.test(flat) ? " " : "";
+  return `${fence}${pad}${flat}${pad}${fence}`;
+};
+
+/** The content in a backtick fence longer than every backtick run in it, and at least three. */
 const fenced = (content: string, language = ""): string => {
-  const fence = fenceFor(content);
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(content) + 1));
   return `${fence}${language}\n${content}\n${fence}`;
 };
 
@@ -60,7 +87,7 @@ const fenced = (content: string, language = ""): string => {
  * message in epoch milliseconds; only a `file` block shows it.
  */
 export const formatAttachment = (attachment: Attachment, sentAt: number): string => {
-  const label = `**Attachment (${attachment.type}): ${oneLine(attachment.name)}**`;
+  const label = `**Attachment (${attachment.type}): ${literal(attachment.name)}**`;
   switch (attachment.type) {
     case "file": {
       const sent = DateTime.formatIso(DateTime.makeUnsafe(sentAt));

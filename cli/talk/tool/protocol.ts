@@ -86,6 +86,22 @@ export const DeliverOutcome = Schema.Literals([
 ]);
 export type DeliverOutcome = typeof DeliverOutcome.Type;
 
+const ACCEPTED: Record<DeliverOutcome, boolean> = {
+  delivered: true,
+  queued: true,
+  submitted: true,
+  busy: false,
+  "not-live": false,
+  "no-reply-route": false,
+};
+
+/**
+ * Whether the receiver accepted a message: it is in the session, in the
+ * queue of the registration, or handed to omp (E5). `send` and `ask` share
+ * this rule.
+ */
+export const acceptsDelivery = (outcome: DeliverOutcome): boolean => ACCEPTED[outcome];
+
 /**
  * The outcome of a `reply` request (E6): `delivered` also when the reply
  * completed a waiter; `not-found` for a reply with the flag `sub` that

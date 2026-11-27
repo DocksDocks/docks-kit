@@ -45,7 +45,10 @@ export const SEND_WAIT_MS = 20_000;
 export const HOLD_MS = 30_000;
 /** A request answers the outcome of a watch that ends within this time, else `submitted` (E4). */
 export const ANSWER_WAIT_MS = 1_000;
-/** The watch reads `getEntries()` at this interval after its microtask checks (E4). */
+/**
+ * The watch reads the entries that omp appended since its last read, at this
+ * interval after its microtask checks (E4).
+ */
 export const WATCH_INTERVAL_MS = 10;
 /** A watch that sees neither the entry nor a session id change ends `unknown` after this time (E4). */
 export const WATCH_LIMIT_MS = 10 * 60 * 1_000;
@@ -57,6 +60,10 @@ export const WATCH_LIMIT_MS = 10 * 60 * 1_000;
 export const MICROTASK_CHECKS = 8;
 /** A queue that cannot go out yet tries again after this time (E5). */
 export const QUEUE_RETRY_MS = 100;
+/** The most messages that the queue of one registration holds (E5); one more answers `busy`. */
+export const MAX_QUEUED_MESSAGES = 64;
+/** The most UTF-8 bytes of message text that the queue of one registration holds (E5). */
+export const MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** The finished outcomes that a receiver keeps for `cancel` answers; older ones read `not-found`. */
 export const KEPT_OUTCOMES = 1_024;
 
@@ -93,6 +100,8 @@ interface MessageRecord {
 interface QueuedMessage {
   readonly record: MessageRecord;
   readonly content: string;
+  /** The UTF-8 size of `content`, counted against `MAX_QUEUED_BYTES`. */
+  readonly bytes: number;
   readonly triggerTurn: boolean;
 }
 
@@ -135,11 +144,14 @@ export interface DeliveryOptions {
 
 /** The receiver of one factory binding. */
 export interface TalkDelivery {
-  /** The registration of the binding; its queue belongs to it. */
+  /** The registration of the binding; its queue and its pending asks belong to it. */
   readonly registration: Target | undefined;
   /** Sets the registration of the binding; another previous one ends as in `detach`. */
   readonly attach: (registration: Target) => void;
-  /** Ends the registration: its queue is dropped, and each dropped message reads `not-live`. */
+  /**
+   * Ends the registration: its queue is dropped, each dropped message reads
+   * `not-live`, and its pending asks end.
+   */
   readonly detach: () => void;
   /** Open while no before-handler runs and no hold remains (E2). */
   readonly gateOpen: boolean;
@@ -167,6 +179,15 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   const drainWaiters = new Set<() => void>();
   const holds = new Map<Hold, CancelTimer>();
   let queue: Array<QueuedMessage> = [];
+  let queuedBytes = 0;
+  /**
+   * The confirmation reads only the entries appended since its last read:
+   * `scanned` is the entry list that it read last, `scannedTo` its length
+   * then. Another list, or a shorter one, is a reset and is read again from
+   * the start.
+   */
+  let scanned: ReadonlyArray<unknown> | undefined;
+  let scannedTo = 0;
   let handlersRunning = 0;
   let registration: Target | undefined;
   let cancelFlush: CancelTimer | undefined;
@@ -217,29 +238,40 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     for (const drained of [...drainWaiters]) drained();
   };
 
-  /** One read of the session for the given watches; a failed read ends them `unknown`. */
-  const check = (targets: ReadonlyArray<Watch>): void => {
+  /**
+   * One read of the session for every watch: the entries appended since the
+   * last read end their watches `delivered`. A failed read ends them `unknown`.
+   */
+  const check = (): void => {
     try {
       const sessionId = host.sessionId();
-      const found = new Set<string>();
-      for (const entry of host.entries()) {
-        const messageId = talkMessageId(entry);
-        if (messageId !== undefined && watches.has(messageId)) found.add(messageId);
+      const entries = host.entries();
+      if (entries !== scanned || entries.length < scannedTo) {
+        scanned = entries;
+        scannedTo = 0;
       }
+      const found = new Set<Watch>();
+      for (let index = scannedTo; index < entries.length; index += 1) {
+        const messageId = talkMessageId(entries[index]);
+        const watch = messageId === undefined ? undefined : watches.get(messageId);
+        if (watch !== undefined) found.add(watch);
+      }
+      scannedTo = entries.length;
       const now = clock.now();
-      for (const watch of targets) {
+      for (const watch of [...watches.values()]) {
         if (sessionId !== watch.sessionId) endWatch(watch, "not-live");
-        else if (found.has(watch.record.messageId)) endWatch(watch, "delivered");
+        else if (found.has(watch)) endWatch(watch, "delivered");
         else if (now >= watch.deadline) endWatch(watch, "unknown");
       }
     } catch {
-      for (const watch of targets) endWatch(watch, "unknown");
+      scanned = undefined;
+      for (const watch of [...watches.values()]) endWatch(watch, "unknown");
     }
   };
 
   const tick = (): void => {
     cancelTick = undefined;
-    check([...watches.values()]);
+    check();
     if (watches.size > 0) cancelTick = clock.schedule(WATCH_INTERVAL_MS, tick);
   };
 
@@ -247,7 +279,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     for (let turn = 0; turn < MICROTASK_CHECKS; turn += 1) {
       await Promise.resolve();
       if (watches.get(watch.record.messageId) !== watch) return;
-      check([watch]);
+      check();
     }
   };
 
@@ -324,6 +356,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     }
     if (busy()) return;
     queue.shift();
+    queuedBytes -= next.bytes;
     send(next, registration);
   };
 
@@ -347,6 +380,13 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   const accept = async (target: Target, incoming: Incoming): Promise<AcceptOutcome> => {
     const admission = admit(target);
     if (admission === "not-live" || admission === "busy") return admission;
+    const bytes = Buffer.byteLength(incoming.content, "utf8");
+    // A full queue refuses before a record or a pending ask exists (E5).
+    if (
+      admission === "queued" &&
+      (queue.length >= MAX_QUEUED_MESSAGES || queuedBytes + bytes > MAX_QUEUED_BYTES)
+    )
+      return "busy";
     const record: MessageRecord = {
       messageId: incoming.messageId,
       senderSessionId: incoming.senderSessionId,
@@ -359,10 +399,12 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     const message: QueuedMessage = {
       record,
       content: incoming.content,
+      bytes,
       triggerTurn: incoming.triggerTurn,
     };
     if (admission === "queued") {
       queue.push(message);
+      queuedBytes += bytes;
       // A closed gate plans the next try when it opens.
       if (gateOpen()) scheduleFlush(QUEUE_RETRY_MS);
       return "queued";
@@ -418,10 +460,13 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       event.previousSessionFile === undefined ||
       hold.sessionFile === event.previousSessionFile);
 
+  /** Ends the registration: its queue reads `not-live`, and its pending asks end (E6). */
   const detach = (): void => {
     registration = undefined;
     for (const { record } of queue) settle(record, "not-live");
     queue = [];
+    queuedBytes = 0;
+    pending.clear();
     cancelFlush?.();
     cancelFlush = undefined;
     flushAt = Number.POSITIVE_INFINITY;
@@ -516,7 +561,9 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       )
         return result("not-found");
       if (record.state !== "queued") return result(record.state);
-      queue = queue.filter((message) => message.record !== record);
+      const index = queue.findIndex((message) => message.record === record);
+      const [removed] = index === -1 ? [] : queue.splice(index, 1);
+      if (removed !== undefined) queuedBytes -= removed.bytes;
       settle(record, "cancelled");
       return result("cancelled");
     },

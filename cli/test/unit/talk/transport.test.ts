@@ -44,6 +44,7 @@ import {
   encodeEntry,
   entryFileName,
 } from "../../../talk/transport/registry";
+import type { Target } from "../../../talk/transport/request";
 import { TalkDpapi, sealEntries } from "../../../talk/transport/sealWindows";
 import { TRANSPORT_DEFAULTS, TalkTransport } from "../../../talk/transport/transport";
 import { TalkFileError, TalkPosixSystem } from "../../../talk/transport/trustPosix";
@@ -175,6 +176,8 @@ interface FakeOptions {
   readonly pair?: { readonly instanceId: string; readonly sessionId: string };
   /** Holds back each challenge until it settles (the gated-challenge fixture). */
   readonly gate?: Promise<void>;
+  /** Holds back each response until it settles. */
+  readonly respond?: Promise<void>;
   readonly gauge?: Gauge;
   /** Receives the label of each hello, in order. */
   readonly hellos?: Array<string>;
@@ -242,12 +245,14 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
           socket.write(frame({ type: options.mode === "ended" ? "ended" : "ready" }));
         } else if (received["type"] === "request") {
           requests += 1;
-          socket.write(
-            frame({
-              type: "response",
-              id: received["id"],
-              result: { status: "ok", body: options.label ?? null },
-            }),
+          void (options.respond ?? Promise.resolve()).then(() =>
+            socket.write(
+              frame({
+                type: "response",
+                id: received["id"],
+                result: { status: "ok", body: options.label ?? null },
+              }),
+            ),
           );
         }
       }
@@ -276,13 +281,39 @@ function writePosixEntry(folder: string, entry: RegistryEntry): string {
   return path;
 }
 
-/** Runs `body` with an in-process client on the POSIX registry `folder`, with the default timeouts. */
+/** Counts the reads of the socket names in the registry folder. */
+interface SocketReads {
+  count: number;
+}
+
+/**
+ * Runs `body` with an in-process client on the POSIX registry `folder`, with
+ * the default timeouts. With `reads`, it counts each read of the socket names.
+ */
 function withClient<A>(
   folder: string,
   body: (client: Client) => Effect.Effect<A, unknown, Scope.Scope>,
   clock: "live" | "test" = "live",
+  reads?: SocketReads,
 ): Promise<A> {
-  const registry = TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer));
+  const posix = TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer));
+  const registry =
+    reads === undefined
+      ? posix
+      : Layer.effect(
+          TalkRegistry,
+          Effect.gen(function* () {
+            const inner = yield* TalkRegistry;
+            return TalkRegistry.of({
+              ...inner,
+              sockets: Effect.tap(inner.sockets, () =>
+                Effect.sync(() => {
+                  reads.count += 1;
+                }),
+              ),
+            });
+          }),
+        ).pipe(Layer.provide(posix));
   const layer = clock === "test" ? Layer.merge(registry, TestClock.layer()) : registry;
   return Effect.runPromise(
     Effect.scoped(
@@ -296,6 +327,14 @@ function withClient<A>(
     ).pipe(Effect.provide(layer)),
   );
 }
+
+/** A probe batch of one target; the failure of that target is the failure. */
+const probeOne = (client: Client, target: Target) =>
+  Effect.flatMap(client.probeAll([target]), ([result]) =>
+    result === undefined
+      ? Effect.die(new Error("probeAll gave no result"))
+      : Effect.fromResult(result),
+  );
 
 // --- Pure parts ----------------------------------------------------------------
 
@@ -875,52 +914,84 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
     return { path, fake: started };
   };
 
-  it("waits for a live cached endpoint whose challenge is held 300 ms beside a same-process socket that refuses", async () => {
+  /** Forks `call` and tells whether it ended; the test clock holds its deadline meanwhile. */
+  const track = <A, E>(call: Effect.Effect<A, E>) =>
+    Effect.gen(function* () {
+      const state = { ended: false };
+      const fiber = yield* Effect.forkChild(
+        Effect.ensuring(
+          call,
+          Effect.sync(() => {
+            state.ended = true;
+          }),
+        ),
+      );
+      return { fiber, ended: () => state.ended };
+    });
+
+  /** Runs `call` under the test clock and gives its failure once it ended without a clock step. */
+  const failsAtOnce = <A, E>(call: Effect.Effect<A, E>, what: string) =>
+    Effect.gen(function* () {
+      const running = yield* track(Effect.flip(call));
+      yield* promised(() => waitFor(running.ended, SETTLE_MS, what));
+      return yield* Fiber.join(running.fiber);
+    });
+
+  it("answers a probe whose cached challenge is held 300 ms of the 500 ms deadline beside a same-process socket that refuses", async () => {
     fresh();
     try {
-      const gateMs = 300;
       const gate = Promise.withResolvers<void>();
       const cached = await fake({ mode: "answer", gate: gate.promise });
       refusingSocket(join(folder, socketName(process.pid)));
       writePosixEntry(folder, entryAt(cached.path));
-      const elapsed = await withClient(folder, (client) =>
-        Effect.gen(function* () {
-          yield* client.list;
-          const started = Date.now();
-          // Real time on purpose: the case checks the held challenge against the real default
-          // probe deadline of 500 ms, which a test clock would not run.
-          setTimeout(gate.resolve, gateMs);
-          yield* client.probe(target);
-          return Date.now() - started;
-        }),
+      await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const probing = yield* track(probeOne(client, target));
+            // The listener holds its challenge while the test clock runs 300 ms of the probe deadline.
+            yield* promised(() =>
+              waitFor(() => cached.fake.hellos() === 1, SETTLE_MS, "the gated hello"),
+            );
+            yield* TestClock.adjust(300);
+            expect(probing.ended()).toBe(false);
+            gate.resolve();
+            yield* Fiber.join(probing.fiber);
+          }),
+        "test",
       );
-      expect(elapsed).toBeGreaterThanOrEqual(gateMs - 20);
-      expect(elapsed).toBeLessThan(TRANSPORT_DEFAULTS.probeTimeoutMs);
       expect(cached.fake.hellos()).toBe(1);
     } finally {
       cleanUp();
     }
   });
 
-  it("reads unreachable before the deadline when every route fails at once", async () => {
+  it("reads unreachable before the deadline when every route fails at once, for a request and for a probe", async () => {
     fresh();
     try {
       // The cached socket is missing, the process id is alive, and its other socket refuses.
       writePosixEntry(folder, entryAt(join(folder, socketName(process.pid))));
       refusingSocket(join(folder, socketName(process.pid)));
-      const [requested, probed, elapsed] = await withClient(folder, (client) =>
-        Effect.gen(function* () {
-          yield* client.list;
-          const started = Date.now();
-          const request = yield* Effect.flip(client.request(target, "echo", null));
-          const probe = yield* Effect.flip(client.probe(target));
-          return [request, probe, Date.now() - started] as const;
-        }),
+      // The test clock never moves, so each call ends before its deadline or not at all.
+      const [requested, probed] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const request = yield* failsAtOnce(
+              client.request(target, "echo", null),
+              "the end of the request",
+            );
+            const probe = yield* failsAtOnce(probeOne(client, target), "the end of the probe");
+            return [request, probe] as const;
+          }),
+        "test",
       );
       expect(requested.outcome).toBe("unreachable");
       expect(requested.reason).toMatch(/is in use/);
       expect(probed.outcome).toBe("unreachable");
-      expect(elapsed).toBeLessThan(TRANSPORT_DEFAULTS.probeTimeoutMs);
+      expect(probed.reason).toMatch(/is in use/);
     } finally {
       cleanUp();
     }
@@ -948,40 +1019,36 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
             badDials = 2;
           }
           writePosixEntry(folder, entryAt(cachedPath));
-          const failure = await withClient(folder, (client) =>
-            Effect.gen(function* () {
-              yield* client.list;
-              writePosixEntry(folder, entryAt(bad.path));
-              let settled = false;
-              const running = yield* Effect.forkChild(
-                (call === "request"
-                  ? Effect.asVoid(client.request(target, "echo", null))
-                  : client.probe(target)
-                ).pipe(
-                  Effect.flip,
-                  Effect.ensuring(
-                    Effect.sync(() => {
-                      settled = true;
-                    }),
+          // The test clock holds the deadline, so only the release of the held dial ends the call.
+          const failure = await withClient(
+            folder,
+            (client) =>
+              Effect.gen(function* () {
+                yield* client.list;
+                writePosixEntry(folder, entryAt(bad.path));
+                const running = yield* track(
+                  Effect.flip(
+                    call === "request"
+                      ? Effect.asVoid(client.request(target, "echo", null))
+                      : probeOne(client, target),
                   ),
-                ),
-              );
-              yield* promised(() =>
-                waitFor(
-                  () =>
-                    bad.fake.closed() === badDials &&
-                    held.fake.accepted() === 1 &&
-                    held.fake.closed() === 0,
-                  SETTLE_MS,
-                  "the bad proof beside the held dial",
-                ),
-              );
-              // The #249 path failed; the call still waits for the process-id dial.
-              yield* promised(() => sleep(50));
-              expect(settled).toBe(false);
-              held.fake.release();
-              return yield* Fiber.join(running);
-            }),
+                );
+                yield* promised(() =>
+                  waitFor(
+                    () =>
+                      bad.fake.closed() === badDials &&
+                      held.fake.accepted() === 1 &&
+                      held.fake.closed() === 0,
+                    SETTLE_MS,
+                    "the bad proof beside the held dial",
+                  ),
+                );
+                // The #249 path failed; the call still waits for the process-id dial.
+                expect(running.ended()).toBe(false);
+                held.fake.release();
+                return yield* Fiber.join(running.fiber);
+              }),
+            "test",
           );
           expect(failure.outcome).toBe("auth-failed");
         } finally {
@@ -1007,9 +1074,7 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
           Effect.gen(function* () {
             yield* client.list;
             // The test clock holds the deadlines, so the slots stay taken while the test looks.
-            const probes = yield* Effect.forkChild(
-              Effect.all([client.probe(target), client.probe(other)], { concurrency: 2 }),
-            );
+            const probes = yield* Effect.forkChild(client.probeAll([target, other]));
             yield* promised(() =>
               waitFor(() => gauge.open === DIAL_SLOTS, SETTLE_MS, "eight open connections"),
             );
@@ -1022,6 +1087,110 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
         "test",
       );
       expect(gauge.max).toBe(DIAL_SLOTS);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("reads the socket names once for a probe batch, and again for a request alone, which finds a socket that a rebind made", async () => {
+    fresh();
+    const reads: SocketReads = { count: 0 };
+    try {
+      const pairs = [
+        target,
+        { instanceId: hex(8), sessionId: "route-2" },
+        { instanceId: hex(8), sessionId: "route-3" },
+      ];
+      const listeners: Array<{ path: string; fake: FakeListener }> = [];
+      for (const pair of pairs) {
+        const started = await fake({ mode: "answer", pair });
+        listeners.push(started);
+        writePosixEntry(folder, entryAt(started.path, pair));
+      }
+      const [probed, batchReads, answer] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            reads.count = 0;
+            const results = yield* client.probeAll(pairs);
+            const counted = reads.count;
+            // The listener of the target rebinds: its old socket and its entry go away.
+            const old = listeners[0]!;
+            old.fake.server.close();
+            rmSync(old.path, { force: true });
+            rmSync(join(folder, entryFileName(target.instanceId, target.sessionId)));
+            yield* promised(() => fake({ mode: "answer", label: "rebound" }));
+            const body = yield* client.request(target, "echo", null);
+            return [results, counted, body] as const;
+          }),
+        "test",
+        reads,
+      );
+      expect(probed.map((result) => result._tag)).toEqual(["Success", "Success", "Success"]);
+      expect(batchReads).toBe(1);
+      expect(answer).toBe("rebound");
+      expect(reads.count).toBe(2);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("ends the losing routes and their slot waits at the first completed proof, so a probe of the same process gets a slot", async () => {
+    fresh();
+    const gauge: Gauge = { open: 0, max: 0 };
+    try {
+      const challenge = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      // The winner holds its challenge until the other routes fill the slots, then holds its answer.
+      const winner = await fake({
+        mode: "answer",
+        label: "winner",
+        gate: challenge.promise,
+        respond: response.promise,
+        gauge,
+      });
+      // Seven silent sockets take the free slots in the handshake; seven more routes wait for a slot.
+      for (let index = 0; index < 2 * (DIAL_SLOTS - 1); index += 1)
+        await fake({ mode: "silent", gauge });
+      const other = { instanceId: hex(8), sessionId: "route-2" };
+      const second = await fake({ mode: "answer", label: "second", pair: other });
+      writePosixEntry(folder, entryAt(winner.path));
+      writePosixEntry(folder, entryAt(second.path, other));
+      const [probed, answer] = await withClient(
+        folder,
+        (client) =>
+          Effect.gen(function* () {
+            yield* client.list;
+            const requesting = yield* track(client.request(target, "echo", null));
+            yield* promised(() =>
+              waitFor(
+                () => gauge.open === DIAL_SLOTS && winner.fake.hellos() === 1,
+                SETTLE_MS,
+                "eight connections in the handshake",
+              ),
+            );
+            challenge.resolve();
+            yield* promised(() =>
+              waitFor(() => winner.fake.requests() === 1, SETTLE_MS, "the request body"),
+            );
+            // The winner holds its answer; the probe of another pair of the process needs a slot.
+            const probing = yield* track(client.probeAll([other]));
+            yield* promised(() => waitFor(probing.ended, SETTLE_MS, "the end of the probe"));
+            const results = yield* Fiber.join(probing.fiber);
+            yield* promised(() =>
+              waitFor(() => gauge.open === 1, SETTLE_MS, "the closes of the losing routes"),
+            );
+            // The route that won still runs.
+            expect(requesting.ended()).toBe(false);
+            response.resolve();
+            return [results, yield* Fiber.join(requesting.fiber)] as const;
+          }),
+        "test",
+      );
+      expect(probed.map((result) => result._tag)).toEqual(["Success"]);
+      expect(answer).toBe("winner");
+      expect(winner.fake.requests()).toBe(1);
     } finally {
       cleanUp();
     }
@@ -1907,7 +2076,7 @@ describe("talk transport between spawned Bun peers", () => {
               // holds their deadline while the test looks.
               const before = silent.accepted();
               const probes = yield* Effect.forEach(Array.from({ length: DIAL_SLOTS }), () =>
-                Effect.forkChild(Effect.flip(client.probe(target))),
+                Effect.forkChild(Effect.flip(probeOne(client, target))),
               );
               yield* promised(() =>
                 waitFor(() => gauge.open === DIAL_SLOTS, SETTLE_MS, "eight silent dials"),
@@ -1921,7 +2090,7 @@ describe("talk transport between spawned Bun peers", () => {
                 Array.from({ length: DIAL_SLOTS }, () => "timeout"),
               );
               // With free slots, the same client gets the proof of the end.
-              expect((yield* Effect.flip(client.probe(target))).outcome).toBe("not-live");
+              expect((yield* Effect.flip(probeOne(client, target))).outcome).toBe("not-live");
             }),
           "test",
         );

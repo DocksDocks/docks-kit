@@ -45,7 +45,11 @@ export interface TalkHost {
   readonly sessionId: () => string;
   /** `ctx.sessionManager.getSessionFile()`; undefined for a session without a file. */
   readonly sessionFile: () => string | undefined;
-  /** `ctx.sessionManager.getEntries()`. */
+  /**
+   * The entries of the session, read only: omp's live `getEntriesView()`
+   * where it exists, else the copy of `getEntries()`. The confirmation reads
+   * only the entries after its last read of the same list (E4).
+   */
   readonly entries: () => ReadonlyArray<unknown>;
   /** `ctx.isIdle()`. */
   readonly isIdle: () => boolean;

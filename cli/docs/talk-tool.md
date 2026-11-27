@@ -63,7 +63,9 @@ main session's `session_start` reads `ctx.agent`, `ctx.mode`, `ctx.isIdle`,
 `ctx.sessionManager`. The tool reads `ctx.agent`, `getSessionId`, and
 `getCwd`. When one is missing or has the wrong type, that call fails with the
 error `talk: this omp gives no valid <members>. talk needs omp 19.2.0 or
-later.`
+later.` `ctx.isIdle()` and `ctx.hasPendingMessages()` must return booleans:
+another value fails the delivery with that error instead of a guess, and the
+request gets no answer.
 
 ### Process singleton
 
@@ -125,13 +127,14 @@ broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
 ### Actions
 
 - `list` lists the registry and probes each registration (the authenticated
-  ping of the transport), except the registration of this session, which it
+  ping of the transport), the registration of this session too, which it
   marks `(this session)`. It omits each registration that the probe proves
   ended (`not-live`). It marks each other failure as
   `unresolved: <outcome>`. Each line shows the name, a 4-character instance
   prefix for display only, the first 8 characters of the session id, the
   folder, and the full instance id. Use the full instance id as `instance`.
-  When the registry cannot be listed, the call fails.
+  When the registry cannot be listed, the call fails. All probes of one call
+  go out as one batch of the transport, which reads the socket folder once.
 - `send` resolves the target, sends the message, and returns the result of
   [Results](#results).
 - `ask` sends the message as an ask and waits for the reply. See
@@ -140,19 +143,24 @@ broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
 - `pending` shows the asks that wait for a reply from this session, oldest
   first: the ask id, the sender's name, the first 8 characters of the
   sender's session id, the age in seconds, and the first 80 characters of the
-  text on one line.
+  text on one line. It shows only the asks of this session's current
+  registration (see [Reply](#reply)).
 - `status` shows this session's name, the first 8 characters of its session
   id, and its folder; its registration (the full instance id, or none); the
-  live peer count; the number of queued messages; and the pending asks. The
-  live peer count counts the other registrations whose probe answered. When
-  the registry cannot be listed, it reads `unknown` with the reason.
+  live peer count; the number of queued messages; and the pending asks, as
+  `pending` shows them. The live peer count counts the other registrations
+  whose probe answered. When the registry cannot be listed, it reads
+  `unknown` with the reason.
 - `cancel` withdraws a queued message, or reads the current outcome of
   another message. See [Results](#results).
 
 The result of `send`, `ask`, `reply`, and `cancel` names the message id and
 the full instance id of the registration that received the request, and the
 name of the target when the tool knows it. So the model can cancel with
-`instance` and `messageId`, also after the peer renamed itself.
+`instance` and `messageId`, also after the peer renamed itself. Once the body
+of a request went out, every failure names the message id and the instance id
+too, also a transport failure or an answer that does not decode, because the
+target can hold the message.
 
 A call that fails throws an error whose message names the reason, so omp
 shows a tool error. Each result also carries `details`: the action and, where
@@ -175,13 +183,16 @@ in this order:
 1. The exact name, without regard to case.
 2. The full session id.
 3. A session id prefix of at least 4 characters. A prefix that starts more
-   than one session id is an error: the tool lists the candidates and probes
-   and sends nothing.
+   than one session id is an error: the tool lists the candidates without a
+   probe, so the error does not tell which candidate is live, and it sends
+   nothing.
 
 One match can hold several registrations, for example two registrations of
 one session. The tool then probes each matched registration, because a listed
-entry can outlive its registration for a short time. The own registration of
-this session counts as answered without a probe. The outcomes:
+entry can outlive its registration for a short time. It probes the own
+registration of this session too: that registration can have ended since the
+tool read it, for example after a persistence move that the repair timer did
+not see yet. The outcomes:
 
 | Probe results                                                    | Result                                                                                             |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -202,9 +213,12 @@ session id, or a prefix never matches, so a session title that equals an
 instance id cannot capture it. The tool looks for the id in the listing and
 then among the entries that this process kept from an earlier listing or
 request (`known` of the transport). An instance id that this process never
-saw fails with `not-found`. The request itself proves liveness: a kept target
-that ended reads `not-live` on the transport's proof, or another transport
-failure without one, and the request never reaches a replacement.
+saw fails with `not-found`. When the listing fails and this process kept no
+entry with that id, the call fails with the listing error instead, because no
+lookup proved that the instance is absent. The request itself proves
+liveness: a kept target that ended reads `not-live` on the transport's proof,
+or another transport failure without one, and the request never reaches a
+replacement.
 
 ## Messages and attachments
 
@@ -215,16 +229,20 @@ ask is also its ask id. The receiving session shows the message as a custom
 message (`customType` `talk`, displayed, `details.messageId` set) with this
 text:
 
-1. `**From <name>** (<cwd>)`.
+1. `**From <name>** (<cwd>)`, with the name and the folder as literals.
 2. For an ask: `This is an ask. Answer it with the talk tool: action "reply",
    replyTo "<ask id>".` For a reply that reaches the session as a message:
    `Reply to ask <ask id>.`
 3. The text.
 4. Each attachment as a labeled block, after a blank line.
 
-In the From line and in each attachment label, each run of control
-characters or line separators becomes one space, so a peer cannot start a
-line of its own there.
+Peer metadata (a name, a folder, or a session id) shows as a literal: one
+Markdown code span on one line. Each run of control characters or line
+separators becomes one space, and the fence of the span is longer than every
+backtick run in the text. So a peer cannot start a line or a row, or add
+Markdown structure. The From line, the attachment labels, the reply heading,
+and the rows of `list`, `pending`, and the candidate lists show peer metadata
+this way.
 
 ### Size limit
 
@@ -241,7 +259,8 @@ listener closes the connection, and the sender's request fails at once.
 | `snippet` | `name`, `content`, `language`? | The label, then the content in a fence with the language                              |
 | `context` | `name`, `content`              | The label, then the fenced content                                                    |
 
-The label is `**Attachment (<type>): <name>**`. `name` must not be empty. A
+The label is `**Attachment (<type>): <name>**`, with the name as a literal.
+`name` must not be empty. A
 `language` is 1 to 64 characters of letters, digits, and `_ + # . -`. Each
 fence is a run of backticks longer than every backtick run in the content,
 and at least three.
@@ -281,6 +300,10 @@ The binding runs a synchronous guard in the tick of the send:
 5. No message waits in the queue. Otherwise the message goes behind them:
    `queued`.
 
+A message that would join the queue gets `busy` instead when the queue is
+full (see [Queue and busy rules](#queue-and-busy-rules)). That check runs
+before the binding keeps a record of the message or a pending ask.
+
 When every check passes, the binding calls `pi.sendMessage` in the same tick.
 For an ask, the receiver first retains the route to the reply address (see
 [Asks and replies](#asks-and-replies)).
@@ -299,19 +322,27 @@ With `noWake`, the message goes out as a plain append without a turn.
 
 ### Confirmation
 
-After the send, the binding watches `getEntries()` for an entry with the
-message id: in each of the next 8 microtask turns, then every 10 ms. The
-watch ends:
+After the send, the binding watches the entries of the session for an entry
+with the message id: in each of the next 8 microtask turns, then every 10 ms.
+It reads omp's live read-only list `getEntriesView()` where omp has it, else
+the copy of `getEntries()`. Each read inspects only the entries that came
+after its last read of the same list; another list, or a shorter one, is a
+reset, and the binding reads it again from its start. So a watch that runs
+for minutes does not copy or scan the whole transcript each 10 ms. The watch
+ends:
 
 - `delivered` when the entry appears while `getSessionId()` still equals the
   target session id.
 - `not-live` when the session id changes first.
 - `unknown` after 10 minutes, or when a read of the session throws.
 
-The request answers the outcome when the watch ends within 1 s, and
-`submitted` otherwise. No deadline proves an outcome: omp can wait for
-deferred extension loading, refuse or hold a turn-requesting send, or put the
-send into its steer queue, which a later `/clear` drops without an event. The
+The request answers `delivered` or `not-live` when the watch ends so within
+1 s, and `submitted` otherwise. A watch that ends `unknown` within 1 s, for
+example because a read of the session threw, also gives `submitted` to the
+request; the receiver keeps `unknown` as the outcome, so a later `cancel`
+answers `unknown`. No deadline proves an outcome: omp can wait for deferred
+extension loading, refuse or hold a turn-requesting send, or put the send
+into its steer queue, which a later `/clear` drops without an event. The
 receiver keeps the outcome of each message for `cancel` answers. It keeps at
 most 1,024 messages when it can: above that, it drops the oldest final
 outcomes first, and a dropped message reads `not-found`.
@@ -323,14 +354,14 @@ no answer, and the sender's request fails at once.
 
 ### `send` and `ask`
 
-| Outcome          | Meaning                                                                                                                             | Call  |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| `delivered`      | The watch saw the entry in the target session                                                                                       | ok    |
-| `queued`         | `talk` holds the message in the queue of the registration, outside the transcript; `cancel` can withdraw it                         | ok    |
-| `submitted`      | omp has the message and the append is not confirmed. This is no proof that omp still holds it, and `talk` can no longer withdraw it | ok    |
-| `busy`           | The target is busy and runs one task and exits (`print` or `json` mode); nothing was delivered                                      | fails |
-| `not-live`       | The extension is inactive, the session id changed, or the registration ended; nothing was delivered                                 | fails |
-| `no-reply-route` | Only for an ask: the receiver cannot retain the route to the reply address, so it refused the ask                                   | fails |
+| Outcome          | Meaning                                                                                                                                                     | Call  |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `delivered`      | The watch saw the entry in the target session                                                                                                               | ok    |
+| `queued`         | `talk` holds the message in the queue of the registration, outside the transcript; `cancel` can withdraw it                                                 | ok    |
+| `submitted`      | `talk` handed the message to omp and the append is not confirmed. This is no proof that omp still holds it, and `talk` can no longer withdraw it            | ok    |
+| `busy`           | The target is busy and runs one task and exits (`print` or `json` mode), or the queue that `talk` holds for the registration is full; nothing was delivered | fails |
+| `not-live`       | The extension is inactive, the session id changed, or the registration ended; nothing was delivered                                                         | fails |
+| `no-reply-route` | Only for an ask: the receiver cannot retain the route to the reply address, so it refused the ask                                                           | fails |
 
 A transport failure fails the call with its outcome and reason: `not-live`,
 `not-found`, `auth-failed`, `timeout`, `unreachable`, or `unknown-kind`. The
@@ -341,9 +372,10 @@ transport has its own section on these outcomes in
 
 `reply` has the outcomes of `send`, except `no-reply-route`, and adds
 `not-found`: a reply from a subagent's ask that matches no waiter, which the
-receiver drops. `delivered` also covers a reply that completed a waiter.
-`busy`, `not-live`, and `not-found` fail the call, and the ask stays pending.
-Any other outcome removes the ask from the pending asks.
+receiver drops. `delivered` also covers a reply that completed a waiter
+without a transcript append, so the tool text says only that the reply
+reached the asker. `busy`, `not-live`, and `not-found` fail the call, and the
+ask stays pending. Any other outcome removes the ask from the pending asks.
 
 ### `cancel`
 
@@ -354,7 +386,7 @@ sender's session id.
 | Outcome     | Meaning                                                                                      |
 | ----------- | -------------------------------------------------------------------------------------------- |
 | `cancelled` | The message was still queued, and `talk` removed it; it never goes out                       |
-| `submitted` | The watch still runs; omp has the message, so it cannot be cancelled                         |
+| `submitted` | The watch still runs: `talk` handed the message to omp, so it cannot be cancelled            |
 | `delivered` | The message is in the session                                                                |
 | `not-live`  | The message or its registration ended                                                        |
 | `unknown`   | The watch ended without an outcome                                                           |
@@ -376,6 +408,10 @@ guard and the queue use the same rule.
   `json`) answers `busy`, unless the message is a reply that matches a
   waiter.
 - A closed gate queues the message in every mode.
+- A full queue answers `busy` in every mode. The queue of one registration
+  holds at most 64 messages and at most 4 MiB of message text (UTF-8). This
+  bounds what a peer can make the receiving omp process hold while the
+  session cannot take messages.
 
 Each registration has one queue, first in first out, outside the transcript.
 The binding tries the queue from a fresh task: once 100 ms after a message
@@ -425,33 +461,57 @@ An ask carries a reply address and an origin flag:
 - A subagent session uses the registration of the nearest main session that
   it descends from, with the flag `sub`. Each binding records its agent id
   and parent id (`ctx.agent`) in the agent map of the singleton at
-  `session_start`, and the ask walks that map.
+  `session_start`, and the ask walks that map. At `session_shutdown`, the
+  binding releases its entry; the map keeps it only while the entry of a
+  live subagent names it as parent, and then drops it.
 
-When the walk finds no live registration, the ask fails at once with
-`no reply address` and sends nothing, so a reply never goes to an unrelated
-session of the process. A session has at most one waiting ask; a second ask
-fails at once and sends nothing.
+A reply address is live only while it is still the current registration of
+its owning binding: that binding is active, and its session id equals the
+registered id or a transition is pending. When the walk finds no live
+registration, the ask fails at once with `no reply address` and sends
+nothing, so a reply never goes to an unrelated session of the process. This
+check runs before the tool resolves the target, so it reads no listing and
+probes nothing, and the ask store checks the address again when the ask goes
+out. A session has at most one waiting ask; a second ask fails at once and
+sends nothing.
 
 The waiter starts before the ask goes out, so a fast reply finds it. The
 receiver retains the route to the reply address (`retain` of the transport)
 before it accepts the ask, so the later reply needs no registry entry of the
 asker. When it cannot retain the route, it answers `no-reply-route`, and the
-ask fails at once. A `busy` or `not-live` answer also ends the ask at once.
-After `delivered`, `queued`, or `submitted`, the call waits until:
+ask fails at once. A `busy` or `not-live` answer also ends the ask at once,
+unless the reply already came. After `delivered`, `queued`, or `submitted`,
+the call waits until:
 
-- a reply comes: the result shows `**Reply from <name>:**`, the reply text,
-  its attachment blocks, the message id, and the instance id;
+- a reply comes: the result shows `**Reply from <name>:**`, with the name as a
+  literal, the reply text, its attachment blocks, the message id, and the
+  instance id;
 - 10 minutes pass: the call fails with the outcome `timeout`; or
 - the tool `signal` aborts: the call fails with the outcome `aborted`.
+
+A reply or an abort ends the call also before the acknowledgement of the ask
+request arrives, for example when the reply overtakes that acknowledgement. A
+request that then fails, or that the receiver refuses, does not undo the
+reply. A request that fails while no reply came fails the call with the
+outcome of the transport, the ask id, and the instance id, so `cancel` can
+still withdraw an ask that the receiver queued.
 
 ### Reply
 
 The receiver of an ask keeps it as a pending ask until a successful reply,
 the 10-minute ask timeout, or the end of the message (`cancelled` or
-`not-live`). `reply` picks the ask by `replyTo`, or the only pending ask when
-`replyTo` is unset. It fails when `replyTo` names no pending ask, when no ask
-waits, or when several asks wait and `replyTo` is unset; the last error lists
-the asks.
+`not-live`). A timer of the pending asks ends each ask at its timeout, also
+when no call reads them; it runs only while an ask is pending. Each pending
+ask belongs to the registration that received it. It stays across an
+after-event that keeps the session id, and it ends with that registration:
+at a withdrawal, at an unseen session id change, and at `session_shutdown`. A
+successor session never sees it in `pending` or `status`, and cannot answer
+it with `reply`. While a transition is pending and the session id differs
+from the registered one, `pending` shows none of them either.
+
+`reply` picks the ask by `replyTo`, or the only pending ask when `replyTo` is
+unset. It fails when `replyTo` names no pending ask, when no ask waits, or
+when several asks wait and `replyTo` is unset; the last error lists the asks.
 
 `reply` sends a `reply` request to the reply address of the ask. The body
 names the registration that received the ask and repeats the origin flag. At
@@ -491,13 +551,13 @@ again.
 
 After-events:
 
-- `session_tree` keeps the registration and its queue.
+- `session_tree` keeps the registration, its queue, and its pending asks.
 - A `session_switch` or `session_branch` that leaves `getSessionId()` equal
   to the registered id keeps them too, for example a resume of the current
   session file.
 - A `session_switch` or `session_branch` that changes the id withdraws the
-  old registration, whose queued messages read `not-live`, and registers the
-  new id from a fresh task once the gate is open.
+  old registration, whose queued messages read `not-live` and whose pending
+  asks end, and registers the new id from a fresh task once the gate is open.
 
 `session_shutdown` stops the binding's timer and withdraws its registration.
 The listener stays open until the process exits.
@@ -525,7 +585,10 @@ transition is pending. A refusal answers `not-live` and withdraws the
 registration at once. When the refusal comes from a changed session id, the
 binding registers the current id from a fresh task. A registration that is
 still starting, between the `register` call and its claim, is admitted while
-its binding is active.
+its binding is active. The binding chooses the instance id of that
+registration before it calls `register`, so the starting record names the
+exact pair; a request for another registration of the same session id, with
+no owner and no starting record of its own, is refused.
 
 ### Repair timer
 

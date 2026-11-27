@@ -73,7 +73,7 @@ export const makeConnection = Effect.fnUntraced(function* (socket: Socket) {
         paused = false;
         socket.resume();
       }
-      ready.push(...(yield* decoder.push(chunk)));
+      for (const value of yield* decoder.push(chunk)) ready.push(value);
     }
     return ready.shift();
   });

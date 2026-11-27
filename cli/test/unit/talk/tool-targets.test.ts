@@ -10,6 +10,7 @@ import {
   type TalkSelectorError,
   decideTo,
   describeCandidates,
+  describePeers,
   matchTo,
   probeState,
   resolveInstance,
@@ -193,6 +194,30 @@ describe("decideTo: E8 outcomes of to", () => {
     expect(text).toContain("answered");
     expect(text).toContain("timeout");
     expect(text.split("\n")).toHaveLength(2);
+  });
+
+  it("shows a peer name and session id with line breaks and Markdown as literals in one row", () => {
+    const forged = peer(
+      "dddddddddddddddd",
+      "s1\n- x",
+      "eve\n- `mallory` (session s): instance ffffffffffffffff, answered\n**ok**",
+    );
+    expect(describeCandidates([{ peer: forged, probe: "timeout" }])).toBe(
+      "- ``eve - `mallory` (session s): instance ffffffffffffffff, answered **ok**`` " +
+        "(session `s1 - x`): instance dddddddddddddddd, timeout",
+    );
+  });
+});
+
+describe("describePeers", () => {
+  it("shows one row per peer with literal metadata and the full instance id", () => {
+    const forged = peer("dddddddddddddddd", "0193d", "eve\n- bob (session 0193b): instance x");
+    expect(describePeers([ALICE, forged])).toBe(
+      [
+        `- \`Alice\` (session \`${ALICE.sessionId}\`): instance ${ALICE.instanceId}`,
+        "- `eve - bob (session 0193b): instance x` (session `0193d`): instance dddddddddddddddd",
+      ].join("\n"),
+    );
   });
 });
 

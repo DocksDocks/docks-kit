@@ -7,6 +7,7 @@ import { Result, Schema } from "effect";
 
 import { InstanceId } from "../transport/handshake";
 import type { RequestOutcome, Target } from "../transport/request";
+import { literal } from "./attachments";
 
 /** The shortest session id prefix that `to` accepts. */
 export const MIN_PREFIX_LENGTH = 4;
@@ -214,14 +215,17 @@ const PROBE_TEXT: Record<ProbeResult, string> = {
   "unknown-kind": "unknown-kind",
 };
 
-/** One line per candidate: its name, session id, full instance id, and probe result. */
+/** The row of one peer: its name and session id as literals, and its full instance id. */
+const peerRow = (peer: ListedTarget): string =>
+  `- ${literal(peer.name)} (session ${literal(peer.sessionId)}): instance ${peer.instanceId}`;
+
+/** One row per peer, for the peers that an ambiguous prefix matched. */
+export const describePeers = (peers: ReadonlyArray<ListedTarget>): string =>
+  peers.map(peerRow).join("\n");
+
+/** One row per candidate: the row of its peer and its probe result. */
 export const describeCandidates = (candidates: ReadonlyArray<Candidate<ListedTarget>>): string =>
-  candidates
-    .map(
-      ({ peer, probe }) =>
-        `- ${peer.name} (session ${peer.sessionId}): instance ${peer.instanceId}, ${PROBE_TEXT[probe]}`,
-    )
-    .join("\n");
+  candidates.map(({ peer, probe }) => `${peerRow(peer)}, ${PROBE_TEXT[probe]}`).join("\n");
 
 /** The E8 outcome of `instance`. The request itself then proves liveness. */
 export type InstanceResolution =

@@ -29,7 +29,7 @@ Per-folder conventions live in nested `AGENTS.md` nodes. An agent can load only 
 | `docks-kit` / `docks-kit.ps1` | POSIX and Windows CLI launchers. Each rejects a host outside the support matrix, then runs the checkout source with Bun and auto-installs Bun plus `node_modules` when they are missing. A launcher never runs a file in `cli/dist/`. |
 | `.oxlintrc.json` / `bunfig.toml` | Mechanical lint (correctness, suspicious, eqeqeq, no-var, prefer-const, no-unused) and the `bun fmt` code format settings (`[fmt]`) |
 | `cli/` | Effect 4 CLI + bundled docs topics |
-| `cli/talk/` | Source of the `talk` omp extension (messages between live sessions), outside the npm `files` list; `cli/scripts/build-talk.ts` bundles it into one `talk.js`. Design: `cli/docs/talk-tool.md` (the tool) and `cli/docs/talk-transport.md` (the transport) |
+| `cli/talk/` | Source of the `talk` omp extension (messages between live sessions), outside the npm `files` list; `cli/scripts/build-talk.ts` bundles it into one `talk.js`. Design: `cli/docs/talk-transport.md` |
 | `SoT/toolchain.json` | Toolchain floors manifest (verified pins consumed by EngineNative; optional `upstream` source read by `docks-kit toolchain outdated`) |
 | `SoT/.omp/` | Kit-owned omp SoT: `AGENTS.md`, `config.yml`, `models.yml`, `mcp.json`, `intercom.json`, and the kit plugin source `plugin/` |
 | `install.sh` / `install.ps1` | POSIX and Windows global installers. Each installer stops on a host outside the support matrix before it downloads anything. |

@@ -23,6 +23,7 @@ import {
   randomNameHex,
 } from "./endpoint";
 import {
+  InstanceId,
   PROTOCOL_VERSION,
   type RequestFrame,
   SessionId,
@@ -45,6 +46,7 @@ import { PING_KIND, type RequestHandler, type ResponseResult, type Target } from
 const SECRET_BYTES = 32;
 
 const decodeSessionId = Schema.decodeUnknownEffect(SessionId);
+const decodeInstanceId = Schema.decodeUnknownEffect(InstanceId);
 
 export interface ListenerOptions {
   readonly platform: NodeJS.Platform;
@@ -71,6 +73,12 @@ export interface RegistrationInput {
   readonly sessionId: string;
   readonly name: string;
   readonly cwd: string;
+  /**
+   * The instance id of the new registration (16 lowercase hex digits), so the
+   * caller knows the exact pair before the entry is published (#250 E7).
+   * Default: a random one. An id that this listener already served fails.
+   */
+  readonly instanceId?: string | undefined;
 }
 
 /** The new name and folder of a live registration (#250 E7, E8). */
@@ -249,12 +257,17 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   let repairPasses = 0;
   let lastRepairFailure = "";
 
-  const entryOf = (served: Served, endpoint: Endpoint): RegistryEntry => ({
+  /** The entry of a registration; `metadata` gives the name and folder to publish. */
+  const entryOf = (
+    served: Served,
+    endpoint: Endpoint,
+    metadata: RegistrationUpdate = served,
+  ): RegistryEntry => ({
     version: PROTOCOL_VERSION,
     instanceId: served.instanceId,
     sessionId: served.sessionId,
-    name: served.name,
-    cwd: served.cwd,
+    name: metadata.name,
+    cwd: metadata.cwd,
     processId: process.pid,
     endpoint,
     startTime: served.startTime,
@@ -404,15 +417,23 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   const bind = bindEndpoint({ folder: registry.folder, platform: options.platform, onConnection });
 
   /**
-   * Publishes the entry of a registration with `endpoint`. The kept descriptor
-   * of the last publication stays until the new one succeeds; a failure leaves
-   * the entry stale and passes up.
+   * Publishes the entry of a registration with `endpoint`, and with
+   * `metadata` as its name and folder. The kept descriptor of the last
+   * publication stays until the new one succeeds, and the served name and
+   * folder change only then; a failure leaves the entry stale with the old
+   * name and folder, and passes up.
    */
-  const publishServed = Effect.fnUntraced(function* (served: Served, endpoint: Endpoint) {
+  const publishServed = Effect.fnUntraced(function* (
+    served: Served,
+    endpoint: Endpoint,
+    metadata: RegistrationUpdate = served,
+  ) {
     served.stale = true;
-    const published = yield* registry.publish(entryOf(served, endpoint));
+    const published = yield* registry.publish(entryOf(served, endpoint, metadata));
     const previous = served.published;
     served.published = published;
+    served.name = metadata.name;
+    served.cwd = metadata.cwd;
     served.stale = false;
     // A replacement of that name is published: a pending removal of the name must not remove it.
     pendingRemovals.delete(served.fileName);
@@ -429,11 +450,28 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
           }),
       ),
     );
+    const chosen =
+      input.instanceId === undefined
+        ? undefined
+        : yield* decodeInstanceId(input.instanceId).pipe(
+            Effect.mapError(
+              (issue) =>
+                new TalkRegisterError({
+                  sessionId,
+                  reason: `the instance id is not valid: ${issue.message}`,
+                }),
+            ),
+          );
     return yield* locked(
       Effect.gen(function* () {
+        if (
+          chosen !== undefined &&
+          [...registrations.values()].some((served) => served.instanceId === chosen)
+        )
+          return yield* new TalkRegisterError({ sessionId, reason: "the instance id is in use" });
         yield* registry.prepare;
         if (bound === undefined) bound = yield* bind;
-        const instanceId = randomNameHex();
+        const instanceId = chosen ?? randomNameHex();
         const served: Served = {
           instanceId,
           sessionId,
@@ -453,8 +491,10 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
         return registration;
       }),
     ).pipe(
-      Effect.mapError(
-        (error) => new TalkRegisterError({ sessionId, reason: describeFailure(error) }),
+      Effect.mapError((error) =>
+        error._tag === "TalkRegisterError"
+          ? error
+          : new TalkRegisterError({ sessionId, reason: describeFailure(error) }),
       ),
     );
   });
@@ -473,10 +513,9 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
             reason: "no live registration of this listener matches",
           });
         }
-        served.name = input.name;
-        served.cwd = input.cwd;
-        // A failed publication leaves the entry stale, so the repair pass publishes it again.
-        yield* publishServed(served, bound.endpoint);
+        // The publication commits the new name and folder only when it succeeds, so a failed
+        // one leaves the old ones, and the repair pass publishes those again.
+        yield* publishServed(served, bound.endpoint, input);
       }),
     ).pipe(
       Effect.mapError((error) =>

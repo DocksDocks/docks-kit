@@ -3,7 +3,7 @@
  * From line, the reply hint of an ask or the ask that a reply answers, the
  * text, and then each attachment as a labeled block.
  */
-import { formatAttachment, oneLine } from "./attachments";
+import { formatAttachment, literal } from "./attachments";
 import type { DeliverBody, ReplyBody } from "./protocol";
 
 /** The line that tells the receiver how to answer an ask. */
@@ -13,7 +13,7 @@ export const replyHint = (askId: string): string =>
 type MessageParts = Pick<DeliverBody, "from" | "text" | "attachments" | "sentAt">;
 
 const formatMessage = (message: MessageParts, note: string | undefined): string => {
-  const head = `**From ${oneLine(message.from.name)}** (${oneLine(message.from.cwd)})`;
+  const head = `**From ${literal(message.from.name)}** (${literal(message.from.cwd)})`;
   const blocks = message.attachments.map((attachment) =>
     formatAttachment(attachment, message.sentAt),
   );

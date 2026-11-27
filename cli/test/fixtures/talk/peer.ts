@@ -109,7 +109,16 @@ async function perform(command: Command): Promise<unknown> {
         ),
       );
     case "probe":
-      return run(TalkTransport.use((transport) => transport.probe(target(command))));
+      // A batch of one target: the failure of that target fails the op.
+      return run(
+        TalkTransport.use((transport) =>
+          Effect.flatMap(transport.probeAll([target(command)]), ([result]) =>
+            result === undefined
+              ? Effect.die(new Error("probeAll gave no result"))
+              : Effect.fromResult(result),
+          ),
+        ),
+      );
     case "status":
       return run(TalkTransport.use((transport) => transport.status));
     case "dispose":

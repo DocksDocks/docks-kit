@@ -22,9 +22,11 @@
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
+  constants,
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -36,7 +38,7 @@ import {
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -724,6 +726,31 @@ function manifestName(failures: string[]): string {
   return name;
 }
 
+/** The entries of the `omp.extensions` list of a plugin manifest that load a `talk.js` file. */
+function talkExtensionEntries(manifest: JsonObject | null): string[] {
+  const ompField = manifest?.["omp"];
+  const extensions = isObject(ompField) ? ompField["extensions"] : undefined;
+  return Array.isArray(extensions)
+    ? extensions.filter(
+        (entry): entry is string => typeof entry === "string" && basename(entry) === TALK_BUNDLE,
+      )
+    : [];
+}
+
+/** The load mode runs before the talk cutover: the manifest of the linked plugin has no `talk.js` entry. */
+function linkedTalkEntries(plugin: LinkedPlugin, failures: string[]): void {
+  const manifest = join(plugin.realPath, "package.json");
+  if (!existsSync(manifest)) {
+    failures.push(`the linked manifest ${manifest} does not exist`);
+    return;
+  }
+  const entries = talkExtensionEntries(
+    parseJson(readFileSync(manifest, "utf8"), manifest, failures),
+  );
+  if (entries.length > 0)
+    failures.push(`the linked manifest ${manifest} has the talk entry ${entries.join(", ")}`);
+}
+
 async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
   const failures: string[] = [];
   if (!existsSync(pluginDir)) {
@@ -750,8 +777,10 @@ async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
   ]);
 
   const lines = [`${name} -> ${run.plugin?.realPath ?? "missing"}`];
-  if (run.plugin !== null && run.plugin.realPath !== realpathSync(pluginDir)) {
-    failures.push(`${PACKAGE_NAME} resolves to ${run.plugin.realPath}, expected ${pluginDir}`);
+  if (run.plugin !== null) {
+    if (run.plugin.realPath !== realpathSync(pluginDir))
+      failures.push(`${PACKAGE_NAME} resolves to ${run.plugin.realPath}, expected ${pluginDir}`);
+    linkedTalkEntries(run.plugin, failures);
   }
 
   const roots = run.plugin === null ? [] : pluginRoots(run.plugin);
@@ -1224,6 +1253,8 @@ const SENDER_MODEL_ID = "talk-sender";
 /** omp offers each enabled tool to the provider and mounts none as a Bash command, so `talk` is a provider tool. */
 const TALK_CONFIG_YAML = "tools:\n  commands: false\n";
 const TALK_TOOL = "talk";
+/** The `customType` of a talk message entry in a session (`TALK_MESSAGE_TYPE` in `cli/talk/tool/host.ts`). */
+const TALK_ENTRY_TYPE = "talk";
 /** A prompt with this marker makes the fake model hold the peer turn until the cancel check ends. */
 const SLOW_MARKER = "SLOW-TURN";
 const SLOW_PROMPT = `${SLOW_MARKER}: wait for the driver.`;
@@ -1232,9 +1263,13 @@ const ASK_HINT = /action "reply", replyTo "([0-9a-f]{16})"/;
 /** The id lines of a `send`, `ask`, or `cancel` result (`idLines` in `cli/talk/tool/tool.ts`). */
 const MESSAGE_ID_LINE = /^Message id: ([0-9a-f]{16})$/m;
 const INSTANCE_LINE = /^Instance: (\S+)/m;
-/** One session line of a `list` result: the own marker, the short session id, and the full instance id. */
+/**
+ * One session line of a `list` result: the own marker, the short session id, and the full instance id. The
+ * tool shows peer metadata as code spans (`literal` in `cli/talk/tool/attachments.ts`); a session id has no
+ * backtick and no edge space, so its span is one backtick on each side.
+ */
 const LIST_LINE =
-  /^- .* \[[^\]]*\]( \(this session\))?: session (\S+), folder .*, instance ([^\s;]+)/;
+  /^- .* \[[^\]]*\]( \(this session\))?: session `([^`\s]+)`, folder .*, instance ([^\s;]+)/;
 const NOT_LIVE_SEND = "the send failed: not-live";
 const PONG = "talk smoke pong";
 /** The longest wait of one step: a tool call, an RPC command, or a peer state. */
@@ -1452,7 +1487,7 @@ class PeerModel {
 
 /** An omp process in RPC mode: one JSON command per stdin line, one JSON response or event per stdout line. */
 interface RpcPeer {
-  /** Sends a command; gives the `data` of its response, and fails on a failed response. */
+  /** Sends a command; gives the `data` of a response with `success: true`, and fails on any other response. */
   readonly send: (command: JsonObject) => Promise<Json>;
   /** Ends stdin and waits for the exit; SIGTERM, then SIGKILL, when omp does not exit in time. */
   readonly close: () => Promise<OmpResult>;
@@ -1487,7 +1522,7 @@ async function startRpcOmp(
     const reply = waiting.get(id);
     if (reply === undefined) return;
     waiting.delete(id);
-    if (message["success"] === false)
+    if (message["success"] !== true)
       reply.reject(
         new Error(
           `RPC ${String(message["command"])} failed: ${JSON.stringify(message["error"] ?? null)}`,
@@ -1531,9 +1566,17 @@ async function startRpcOmp(
   return { send, close };
 }
 
+/** Whether `path` is a symbolic link; false when nothing is at `path`. */
+function isSymlink(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+}
+
 /**
  * Builds the talk bundle in the scratch folder, copies the kit plugin folder there, and adds the bundle and
- * its manifest entry to the copy. Returns the copy, which omp links.
+ * its manifest entry to the copy. Returns the copy, which omp links. The copy keeps each symbolic link as it
+ * is, so a relative link does not point into the source folder. A write through a link can change a file
+ * outside the scratch folder, so the mode refuses a link on each path that it writes, and the bundle is a
+ * new file of the copy.
  */
 function talkPluginCopy(scratchDir: string, failures: string[]): string {
   const buildDir = join(scratchDir, "talk-build");
@@ -1542,7 +1585,7 @@ function talkPluginCopy(scratchDir: string, failures: string[]): string {
     encoding: "utf8",
   });
   const copy = join(scratchDir, "plugin");
-  cpSync(pluginDir, copy, { recursive: true });
+  cpSync(pluginDir, copy, { recursive: true, verbatimSymlinks: true });
   const bundle = join(buildDir, TALK_BUNDLE);
   if (build.status !== 0 || !existsSync(bundle)) {
     failures.push(
@@ -1550,8 +1593,21 @@ function talkPluginCopy(scratchDir: string, failures: string[]): string {
     );
     return copy;
   }
-  copyFileSync(bundle, join(copy, "extensions", TALK_BUNDLE));
+  const extensions = join(copy, "extensions");
+  const target = join(extensions, TALK_BUNDLE);
   const manifestPath = join(copy, "package.json");
+  const links = [copy, extensions, manifestPath].filter(isSymlink);
+  if (links.length > 0) {
+    failures.push(
+      `the plugin copy has a symbolic link on a path that the talk mode writes: ${links.join(", ")}`,
+    );
+    return copy;
+  }
+  if (lstatSync(target, { throwIfNoEntry: false }) !== undefined) {
+    failures.push(`the plugin copy already has ${target}`);
+    return copy;
+  }
+  copyFileSync(bundle, target, constants.COPYFILE_EXCL);
   const manifest = parseJson(readFileSync(manifestPath, "utf8"), manifestPath, failures);
   const ompField = manifest?.["omp"];
   if (manifest === null || !isObject(ompField) || !Array.isArray(ompField["extensions"])) {
@@ -1592,8 +1648,30 @@ function isAssistantEntry(entry: JsonObject): boolean {
   return entry["type"] === "message" && isObject(message) && message["role"] === "assistant";
 }
 
-function holdsMessage(entries: readonly JsonObject[], messageId: string): boolean {
-  return entries.some((entry) => JSON.stringify(entry).includes(messageId));
+/** The index of the talk message entry whose `details.messageId` is `messageId`, else -1. */
+function talkEntryIndex(entries: readonly JsonObject[], messageId: string): number {
+  return entries.findIndex((entry) => {
+    const details = entry["details"];
+    return (
+      entry["type"] === "custom_message" &&
+      entry["customType"] === TALK_ENTRY_TYPE &&
+      isObject(details) &&
+      details["messageId"] === messageId
+    );
+  });
+}
+
+/** Whether an entry holds, in any field, the message id or the payload text of a message. */
+function mentionsMessage(
+  entries: readonly JsonObject[],
+  messageId: string,
+  payload: string,
+): boolean {
+  const escaped = JSON.stringify(payload).slice(1, -1);
+  return entries.some((entry) => {
+    const serialized = JSON.stringify(entry);
+    return serialized.includes(messageId) || serialized.includes(escaped);
+  });
 }
 
 /** The talk mode (#250 E13): two isolated omp processes that talk through a private registry folder. */
@@ -1657,10 +1735,14 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     };
     const peerSessionId = async (): Promise<string> =>
       text((await peerState())["sessionId"]) ?? failStep("RPC get_state gives no sessionId");
-    // RPC get_entries without a cursor: every entry of the current session.
+    // RPC get_entries without a cursor gives `{ entries, leafId }`: every entry of the current session.
     const peerEntries = async (): Promise<JsonObject[]> => {
       const data = await rpc.send({ type: "get_entries" });
-      return objects(Array.isArray(data) ? data : isObject(data) ? data["entries"] : []);
+      const entries = isObject(data) ? data["entries"] : undefined;
+      if (Array.isArray(entries) && entries.every(isObject)) return entries;
+      return failStep(
+        `RPC get_entries gives no array of entry objects: ${short(JSON.stringify(data))}`,
+      );
     };
     const waitFor = async (what: string, probe: () => Promise<boolean>): Promise<void> => {
       const deadline = Date.now() + STEP_TIMEOUT_MS;
@@ -1680,7 +1762,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         failStep(`the send reached instance ${ids.instance}, expected ${instance}`);
       await waitFor(`entry of message ${ids.messageId} with an answer after it`, async () => {
         const entries = await peerEntries();
-        const at = entries.findIndex((entry) => JSON.stringify(entry).includes(ids.messageId));
+        const at = talkEntryIndex(entries, ids.messageId);
         return at >= 0 && entries.slice(at + 1).some(isAssistantEntry);
       });
       await waitPeerIdle();
@@ -1776,10 +1858,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     const slow = rpc.send({ type: "prompt", message: SLOW_PROMPT });
     slow.catch(() => undefined);
     await withTimeout(peerModel.slowStarted, STEP_TIMEOUT_MS, "the slow peer turn");
+    const queuedText = "talk smoke: while busy";
     const queuedResult = await sender.call(TALK_TOOL, {
       action: "send",
       instance: firstInstance,
-      message: "talk smoke: while busy",
+      message: queuedText,
     });
     if (!queuedResult.includes("Queued:"))
       failStep(`the send to the busy peer did not read Queued: ${short(queuedResult)}`);
@@ -1805,8 +1888,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     await slow;
     await waitPeerIdle();
     await sleep(SETTLE_MS);
-    if (holdsMessage(await peerEntries(), queued.messageId))
-      failStep(`the peer session holds the cancelled message ${queued.messageId}`);
+    if (mentionsMessage(await peerEntries(), queued.messageId, queuedText))
+      failStep(`the peer session holds the cancelled message ${queued.messageId} or its text`);
     pass();
 
     /**
@@ -1842,10 +1925,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       pass();
 
       step = `${prefix}-old-instance-not-live`;
+      const staleText = `talk smoke: to the instance before ${prefix}`;
       const stale = await sender.call(TALK_TOOL, {
         action: "send",
         instance: before.instance,
-        message: `talk smoke: to the instance before ${prefix}`,
+        message: staleText,
       });
       if (!stale.includes(NOT_LIVE_SEND))
         failStep(`the send to the old instance did not fail not-live: ${short(stale)}`);
@@ -1854,9 +1938,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       const current = await peerSessionId();
       if (current !== sessionId) failStep(`the peer moved to session ${current}`);
       const entries = await peerEntries();
-      if (holdsMessage(entries, staleId))
-        failStep(`RPC get_entries of session ${sessionId} holds the message ${staleId}`);
-      if (inherited !== null && !holdsMessage(entries, inherited))
+      if (mentionsMessage(entries, staleId, staleText))
+        failStep(
+          `RPC get_entries of session ${sessionId} holds the message ${staleId} or its text`,
+        );
+      if (inherited !== null && talkEntryIndex(entries, inherited) < 0)
         failStep(`RPC get_entries of session ${sessionId} lost the inherited message ${inherited}`);
       pass();
       return { sessionId, instance, delivered };

@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { Effect, Predicate, Result, Schema } from "effect";
 
 import type { AgentRef, AskOutcome, AskStore, PendingAsk, PendingAsks } from "./asks";
-import { Attachment, formatAttachment, oneLine } from "./attachments";
+import { Attachment, formatAttachment, literal, oneLine } from "./attachments";
 import type { TalkClock } from "./host";
 import {
   type AskRoute,
@@ -20,6 +20,8 @@ import {
   MessageId,
   REPLY_KIND,
   type ReplyBody,
+  type TalkBodyInvalid,
+  acceptsDelivery,
   decodeCancelResult,
   decodeDeliverResult,
   decodeReplyResult,
@@ -34,6 +36,7 @@ import {
   type TalkAction,
   decideTo,
   describeCandidates,
+  describePeers,
   matchTo,
   probeState,
   resolveInstance,
@@ -152,7 +155,11 @@ export type RequestAnswer =
  */
 export interface PeerTransport {
   readonly list: () => Promise<ListAnswer>;
-  readonly probe: (target: Target) => Promise<ProbeResult>;
+  /**
+   * Pings each target under the dial limit, in one batch that shares one
+   * socket snapshot. The results come in the order of the targets.
+   */
+  readonly probeAll: (targets: ReadonlyArray<Target>) => Promise<ReadonlyArray<ProbeResult>>;
   readonly request: (target: Target, kind: string, body: Schema.Json) => Promise<RequestAnswer>;
   /** The pair of an entry that this process kept, by its full instance id. */
   readonly known: (instanceId: string) => Promise<Target | undefined>;
@@ -208,6 +215,15 @@ export class TalkToolFailed extends Schema.TaggedError<
   outcome: Schema.optionalKey(Schema.String),
 }) {}
 
+/** The ask request reached no answer: the transport failure of the request. */
+class TalkAskRequestFailed extends Schema.TaggedError<
+  TalkAskRequestFailed,
+  { readonly brand: unique symbol }
+>()("TalkAskRequestFailed", {
+  outcome: Schema.String,
+  reason: Schema.String,
+}) {}
+
 /** The number of session id characters that `list` and `status` show. */
 const SHORT_ID_LENGTH = 8;
 /** The number of instance id characters that `list` shows as display only (E8). */
@@ -216,23 +232,23 @@ const MESSAGE_ID_BYTES = 8;
 
 const newMessageId = (): string => randomBytes(MESSAGE_ID_BYTES).toString("hex");
 
-const fail = (
-  message: string,
-  ids: {
-    readonly messageId?: string;
-    readonly instanceId?: string;
-    readonly outcome?: string;
-  } = {},
-): Effect.Effect<never, TalkToolFailed> => Effect.fail(new TalkToolFailed({ message, ...ids }));
+interface FailureIds {
+  readonly messageId?: string;
+  readonly instanceId?: string;
+  readonly outcome?: string;
+}
+
+const fail = (message: string, ids: FailureIds = {}): Effect.Effect<never, TalkToolFailed> =>
+  Effect.fail(new TalkToolFailed({ message, ...ids }));
+
+const causeText = (cause: unknown): string =>
+  Predicate.isError(cause) ? cause.message : String(cause);
 
 /** A transport call; a rejection becomes a failure of the call. */
 const transportCall = <A>(what: string, run: () => Promise<A>): Effect.Effect<A, TalkToolFailed> =>
   Effect.tryPromise({
     try: run,
-    catch: (cause) =>
-      new TalkToolFailed({
-        message: `talk: ${what} failed: ${Predicate.isError(cause) ? cause.message : String(cause)}`,
-      }),
+    catch: (cause) => new TalkToolFailed({ message: `talk: ${what} failed: ${causeText(cause)}` }),
   });
 
 const present = (value: string | undefined): string | undefined => {
@@ -253,6 +269,14 @@ const isOwn = (self: TalkSelf, peer: Target): boolean =>
   self.registration.instanceId === peer.instanceId &&
   self.registration.sessionId === peer.sessionId;
 
+/**
+ * The registration whose pending asks this session sees (E6): its own, while
+ * the session id still equals the registered one. A successor session sees
+ * none of them.
+ */
+const askReceiver = (self: TalkSelf): Target | undefined =>
+  self.registration?.sessionId === self.sessionId ? self.registration : undefined;
+
 const listPeers = (
   transport: PeerTransport,
 ): Effect.Effect<ReadonlyArray<ListedPeer>, TalkToolFailed> =>
@@ -264,28 +288,38 @@ const listPeers = (
     ),
   );
 
-/** Probes each peer under the dial limit of the transport; the own registration needs no probe. */
+/**
+ * Probes each peer in one batch under the dial limit of the transport (E8).
+ * The own registration is probed too: a captured registration can have ended
+ * since the tool read it.
+ */
 const probeAll = (
   context: ToolContext,
   peers: ReadonlyArray<ListedPeer>,
 ): Effect.Effect<ReadonlyArray<Candidate<ListedPeer>>, TalkToolFailed> =>
-  Effect.forEach(
-    peers,
-    (peer) =>
-      isOwn(context.self, peer)
-        ? Effect.succeed<Candidate<ListedPeer>>({ peer, probe: "ok" })
-        : transportCall("a probe", () => context.transport.probe(peer)).pipe(
-            Effect.map((probe): Candidate<ListedPeer> => ({ peer, probe })),
-          ),
-    { concurrency: "unbounded" },
+  transportCall("the probes", () =>
+    context.transport.probeAll(
+      peers.map(({ instanceId, sessionId }) => ({ instanceId, sessionId })),
+    ),
+  ).pipe(
+    Effect.flatMap((results) =>
+      results.length === peers.length
+        ? Effect.succeed(
+            peers.flatMap((peer, index): ReadonlyArray<Candidate<ListedPeer>> => {
+              const probe = results[index];
+              return probe === undefined ? [] : [{ peer, probe }];
+            }),
+          )
+        : fail(`talk: the probes gave ${results.length} results for ${peers.length} sessions.`),
+    ),
   );
 
 const peerLine = (self: TalkSelf, { peer, probe }: Candidate<ListedPeer>): string => {
   const own = isOwn(self, peer) ? " (this session)" : "";
   const unresolved = probeState(probe) === "unresolved" ? `; unresolved: ${probe}` : "";
   return (
-    `- ${oneLine(peer.name)} [${peer.instanceId.slice(0, INSTANCE_DISPLAY_LENGTH)}]${own}: ` +
-    `session ${peer.sessionId.slice(0, SHORT_ID_LENGTH)}, folder ${oneLine(peer.cwd)}, ` +
+    `- ${literal(peer.name)} [${peer.instanceId.slice(0, INSTANCE_DISPLAY_LENGTH)}]${own}: ` +
+    `session ${literal(peer.sessionId.slice(0, SHORT_ID_LENGTH))}, folder ${literal(peer.cwd)}, ` +
     `instance ${peer.instanceId}${unresolved}`
   );
 };
@@ -307,18 +341,23 @@ const resolveTarget = Effect.fnUntraced(function* (
       return yield* fail(NO_TARGET);
     case "Instance": {
       const { instanceId } = selector;
-      const listing = yield* transportCall("the listing", () => context.transport.list()).pipe(
-        Effect.map((answer) => (answer._tag === "Listed" ? answer.peers : [])),
-      );
+      const answer = yield* transportCall("the listing", () => context.transport.list());
+      const listing = answer._tag === "Listed" ? answer.peers : [];
       const kept = yield* transportCall("the instance lookup", () =>
         context.transport.known(instanceId),
       );
       const resolution = resolveInstance(instanceId, listing, kept === undefined ? [] : [kept]);
       if (resolution._tag === "NotFound")
-        return yield* fail(
-          `talk: this process never saw the instance ${instanceId} (not-found). Run the action list.`,
-          { instanceId, outcome: "not-found" },
-        );
+        // A listing that failed established no absence.
+        return yield* answer._tag === "ListFailed"
+          ? fail(
+              `talk: the registry could not be listed (${answer.reason}), and this process kept no entry of the instance ${instanceId}. Nothing was sent.`,
+              { instanceId },
+            )
+          : fail(
+              `talk: this process never saw the instance ${instanceId} (not-found). Run the action list.`,
+              { instanceId, outcome: "not-found" },
+            );
       return {
         target: resolution.target,
         name: listing.find((peer) => peer.instanceId === instanceId)?.name,
@@ -334,12 +373,7 @@ const resolveTarget = Effect.fnUntraced(function* (
         );
       if (match._tag === "AmbiguousPrefix")
         return yield* fail(
-          `talk: "${to}" starts more than one session id. Nothing was sent. Candidates:\n` +
-            match.peers
-              .map(
-                (peer) => `- ${peer.name} (session ${peer.sessionId}): instance ${peer.instanceId}`,
-              )
-              .join("\n"),
+          `talk: "${to}" starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
         );
       const candidates = yield* probeAll(context, match.peers);
       const decision = decideTo(candidates);
@@ -376,7 +410,29 @@ const sender = (self: TalkSelf): DeliverBody["from"] => ({
 
 const idLines = (messageId: string, target: Resolved): string =>
   `Message id: ${messageId}\nInstance: ${target.target.instanceId}` +
-  (target.name === undefined ? "" : ` (${oneLine(target.name)})`);
+  (target.name === undefined ? "" : ` (${literal(target.name)})`);
+
+/**
+ * Once a request went out, its target can hold the message, so every failure
+ * names the message id and the instance id, and `cancel` stays possible (E5).
+ */
+const afterDispatch = <A>(
+  effect: Effect.Effect<A, TalkToolFailed | TalkBodyInvalid>,
+  messageId: string,
+  target: Resolved,
+): Effect.Effect<A, TalkToolFailed> =>
+  Effect.mapError(effect, (error) =>
+    error._tag === "TalkToolFailed" && error.messageId !== undefined
+      ? error
+      : new TalkToolFailed({
+          message: `${error._tag === "TalkToolFailed" ? error.message : `talk: ${error.message}`}\n${idLines(messageId, target)}`,
+          messageId,
+          instanceId: target.target.instanceId,
+          ...(error._tag === "TalkToolFailed" && error.outcome !== undefined
+            ? { outcome: error.outcome }
+            : {}),
+        }),
+  );
 
 /** The headline of each outcome of a `deliver` or `reply` request (E5). */
 const OUTCOME_TEXT: Record<DeliverResult["outcome"] | "not-found", string> = {
@@ -384,22 +440,19 @@ const OUTCOME_TEXT: Record<DeliverResult["outcome"] | "not-found", string> = {
   queued:
     "Queued: the session is busy or changes its session, so talk holds the message and sends it when it can. cancel can withdraw it.",
   submitted:
-    "Submitted: omp has the message, but its append is not confirmed yet. talk can no longer withdraw it.",
-  busy: "Busy: the session runs one task and exits, so it takes no message now. Nothing was delivered.",
+    "Submitted: talk handed the message to omp, and its append is not confirmed. This does not prove that omp still holds it, and talk can no longer withdraw it.",
+  busy: "Busy: the session takes no message now: it runs one task and exits, or the queue that talk holds for it is full. Nothing was delivered.",
   "not-live": "Not live: the session ended or moved. Nothing was delivered.",
   "no-reply-route":
     "No reply route: the receiver cannot reach the reply address of this session, so it refused the ask.",
   "not-found": "Not found: no waiting ask matches this reply, so the receiver dropped it.",
 };
 
-const ACCEPTED: Record<DeliverResult["outcome"], boolean> = {
-  delivered: true,
-  queued: true,
-  submitted: true,
-  busy: false,
-  "not-live": false,
-  "no-reply-route": false,
-};
+/**
+ * `delivered` of a reply also covers a reply that completed the waiting ask
+ * without a transcript append (E6), so it claims no append.
+ */
+const REPLY_DELIVERED = "Delivered: the reply reached the asker.";
 
 const requestFailed = (
   what: string,
@@ -410,6 +463,26 @@ const requestFailed = (
   fail(
     `talk: ${what} failed: ${answer.outcome} (${answer.reason}).\n${idLines(messageId, target)}`,
     { messageId, instanceId: target.target.instanceId, outcome: answer.outcome },
+  );
+
+/** A request after its body went out; every failure names the ids (E5). */
+const dispatched = <R>(
+  what: string,
+  run: () => Promise<RequestAnswer>,
+  decode: (json: Schema.Json) => Effect.Effect<R, TalkBodyInvalid>,
+  messageId: string,
+  target: Resolved,
+): Effect.Effect<R, TalkToolFailed> =>
+  afterDispatch(
+    transportCall(what, run).pipe(
+      Effect.flatMap((answer): Effect.Effect<R, TalkToolFailed | TalkBodyInvalid> =>
+        answer._tag === "Failed"
+          ? requestFailed(what, answer, messageId, target)
+          : decode(answer.body),
+      ),
+    ),
+    messageId,
+    target,
   );
 
 const runSend = Effect.fnUntraced(function* (
@@ -428,14 +501,16 @@ const runSend = Effect.fnUntraced(function* (
     sentAt: context.clock.now(),
     noWake: params.noWake ?? false,
   });
-  const answer = yield* transportCall("the send", () =>
-    context.transport.request(target.target, DELIVER_KIND, json),
+  const { outcome } = yield* dispatched(
+    "the send",
+    () => context.transport.request(target.target, DELIVER_KIND, json),
+    decodeDeliverResult,
+    messageId,
+    target,
   );
-  if (answer._tag === "Failed") return yield* requestFailed("the send", answer, messageId, target);
-  const { outcome } = yield* decodeDeliverResult(answer.body);
   const report = `${OUTCOME_TEXT[outcome]}\n${idLines(messageId, target)}`;
   const ids = { messageId, instanceId: target.target.instanceId, outcome };
-  if (!ACCEPTED[outcome]) return yield* fail(`talk: ${report}`, ids);
+  if (!acceptsDelivery(outcome)) return yield* fail(`talk: ${report}`, ids);
   return { ok: true, text: report, details: { action: "send", ...ids } } satisfies TalkToolOutcome;
 });
 
@@ -458,16 +533,25 @@ const deliverAsk =
       throw new Error("the reply address changed while the ask started; ask again");
     const answer = await context.transport.request(target, DELIVER_KIND, json);
     if (answer._tag === "Failed")
-      throw new Error(`the ask request failed: ${answer.outcome} (${answer.reason})`);
+      throw new TalkAskRequestFailed({ outcome: answer.outcome, reason: answer.reason });
     const decoded = decodeDeliverResultNow(answer.body);
     if (Result.isFailure(decoded))
       throw new Error(`not a valid deliver result: ${decoded.failure.message}`);
     return decoded.success;
   };
 
+/** A rejected ask: the failed request keeps its transport outcome. */
+const askFailed = (cause: unknown): TalkToolFailed =>
+  cause instanceof TalkAskRequestFailed
+    ? new TalkToolFailed({
+        message: `talk: the ask failed: ${cause.outcome} (${cause.reason}).`,
+        outcome: cause.outcome,
+      })
+    : new TalkToolFailed({ message: `talk: the ask failed: ${causeText(cause)}` });
+
 const replyText = (reply: ReplyBody): string =>
   [
-    `**Reply from ${oneLine(reply.from.name)}:**\n\n${reply.text}`,
+    `**Reply from ${literal(reply.from.name)}:**\n\n${reply.text}`,
     ...reply.attachments.map((attachment) => formatAttachment(attachment, reply.sentAt)),
   ].join("\n\n");
 
@@ -510,10 +594,10 @@ const runAsk = Effect.fnUntraced(function* (
   selector: Selector,
 ) {
   const text = yield* requireMessage("ask", params.message);
-  const target = yield* resolveTarget(context, selector);
-  // E6: without a live reply address the ask fails at once and sends nothing.
+  // E6: without a live reply address the ask fails at once, before any discovery, and sends nothing.
   const route = context.asks.replyAddress(context.self.agent);
   if (route === undefined) return yield* fail(NO_REPLY_ADDRESS);
+  const target = yield* resolveTarget(context, selector);
   const askId = newMessageId();
   const json = yield* encodeDeliverBody({
     messageId: askId,
@@ -524,27 +608,34 @@ const runAsk = Effect.fnUntraced(function* (
     noWake: params.noWake ?? false,
     ask: route,
   });
-  const outcome = yield* transportCall("the ask", () =>
-    context.asks.ask({
-      agent: context.self.agent,
-      askId,
-      target: target.target,
-      timeoutMs: context.askTimeoutMs,
-      signal: context.signal,
-      deliver: deliverAsk(context, target.target, json, route),
+  // The store reads the reply address again at dispatch, against its binding's current registration.
+  const outcome = yield* afterDispatch(
+    Effect.tryPromise({
+      try: () =>
+        context.asks.ask({
+          agent: context.self.agent,
+          askId,
+          target: target.target,
+          timeoutMs: context.askTimeoutMs,
+          signal: context.signal,
+          deliver: deliverAsk(context, target.target, json, route),
+        }),
+      catch: askFailed,
     }),
+    askId,
+    target,
   );
   return yield* askOutcome(outcome, askId, target);
 });
 
 const askLine = (ask: PendingAsk): string =>
-  `- ${ask.askId} from ${oneLine(ask.from.name)} (session ${ask.from.sessionId.slice(0, SHORT_ID_LENGTH)}), ` +
+  `- ${ask.askId} from ${literal(ask.from.name)} (session ${literal(ask.from.sessionId.slice(0, SHORT_ID_LENGTH))}), ` +
   `${Math.floor(ask.ageMs / 1_000)} s ago: ${ask.preview}`;
 
 const runReply = Effect.fnUntraced(function* (context: ToolContext, params: TalkParams) {
   const text = yield* requireMessage("reply", params.message);
   const replyTo = present(params.replyTo);
-  const selection = context.self.pending.select(replyTo);
+  const selection = context.self.pending.select(askReceiver(context.self), replyTo);
   switch (selection._tag) {
     case "NotFound":
       return yield* fail(
@@ -573,12 +664,15 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
     askId: ask.askId,
     origin: ask.route.origin,
   });
-  const answer = yield* transportCall("the reply", () =>
-    context.transport.request(ask.route.replyTo, REPLY_KIND, json),
+  const { outcome } = yield* dispatched(
+    "the reply",
+    () => context.transport.request(ask.route.replyTo, REPLY_KIND, json),
+    decodeReplyResult,
+    messageId,
+    target,
   );
-  if (answer._tag === "Failed") return yield* requestFailed("the reply", answer, messageId, target);
-  const { outcome } = yield* decodeReplyResult(answer.body);
-  const report = `${OUTCOME_TEXT[outcome]}\nAsk id: ${ask.askId}\n${idLines(messageId, target)}`;
+  const headline = outcome === "delivered" ? REPLY_DELIVERED : OUTCOME_TEXT[outcome];
+  const report = `${headline}\nAsk id: ${ask.askId}\n${idLines(messageId, target)}`;
   const ids = { messageId, instanceId: ask.route.replyTo.instanceId, outcome };
   if (outcome === "busy" || outcome === "not-live" || outcome === "not-found")
     return yield* fail(`talk: ${report}`, ids);
@@ -588,7 +682,7 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
 
 const CANCEL_TEXT: Record<string, string> = {
   cancelled: "Cancelled: the message was still queued, and talk removed it.",
-  submitted: "Not cancelled: omp has the message, and its append is not confirmed yet.",
+  submitted: "Not cancelled: talk handed the message to omp, and its append is not confirmed yet.",
   delivered: "Not cancelled: the message is already in the session.",
   "not-live": "Not cancelled: the registration ended (not-live).",
   unknown: "Not cancelled: the outcome of the message is unknown.",
@@ -609,12 +703,13 @@ const runCancel = Effect.fnUntraced(function* (
     );
   const target = yield* resolveTarget(context, selector);
   const json = yield* encodeCancelBody({ messageId, senderSessionId: context.self.sessionId });
-  const answer = yield* transportCall("the cancel", () =>
-    context.transport.request(target.target, CANCEL_KIND, json),
+  const { outcome } = yield* dispatched(
+    "the cancel",
+    () => context.transport.request(target.target, CANCEL_KIND, json),
+    decodeCancelResult,
+    messageId,
+    target,
   );
-  if (answer._tag === "Failed")
-    return yield* requestFailed("the cancel", answer, messageId, target);
-  const { outcome } = yield* decodeCancelResult(answer.body);
   return {
     ok: true,
     text: `${CANCEL_TEXT[outcome] ?? outcome}\n${idLines(messageId, target)}`,
@@ -635,7 +730,7 @@ const runList = Effect.fnUntraced(function* (context: ToolContext) {
 });
 
 const runPending = (context: ToolContext): TalkToolOutcome => {
-  const asks = context.self.pending.list();
+  const asks = context.self.pending.list(askReceiver(context.self));
   return {
     ok: true,
     text:
@@ -671,7 +766,7 @@ const runStatus = Effect.fnUntraced(function* (context: ToolContext) {
       Effect.succeed(`Live peers: unknown (${error.message})`),
     ),
   );
-  const asks = self.pending.list();
+  const asks = self.pending.list(askReceiver(self));
   const pending =
     asks.length === 0
       ? "Pending asks: none"

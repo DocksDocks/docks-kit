@@ -5,6 +5,8 @@ import { makeAskStore } from "../../../talk/tool/asks";
 import {
   ANSWER_WAIT_MS,
   HOLD_MS,
+  MAX_QUEUED_BYTES,
+  MAX_QUEUED_MESSAGES,
   SEND_WAIT_MS,
   WATCH_LIMIT_MS,
   type TalkDelivery,
@@ -278,6 +280,57 @@ describe("confirmation and wake (E4)", () => {
     await vi.advanceTimersByTimeAsync(20);
     expect(cancelOf(delivery, body.messageId)).toBe("unknown");
     expect(WATCH_LIMIT_MS).toBe(600_000);
+  });
+
+  it("reads each old entry once over many checks, not on each check (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    let reads = 0;
+    const backing: Array<unknown> = Array.from({ length: 5_000 }, () => ({ type: "message" }));
+    const entries = new Proxy(backing, {
+      get: (target, key, receiver) => {
+        if (typeof key === "string" && /^\d+$/u.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    fake.state = { ...fake.state, entries };
+    const body = sendBody();
+    const state = peek(delivery.deliver(REG_A, body));
+    await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS);
+    // About a hundred checks ran; together they read each old entry once.
+    expect(state.value?.outcome).toBe("submitted");
+    expect(reads).toBe(5_000);
+    fake.releaseHeld();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(cancelOf(delivery, body.messageId)).toBe("delivered");
+    expect(reads).toBe(5_001);
+  });
+
+  it("reads a replaced entry list of the same session again from its start (C6)", async () => {
+    const { fake, delivery } = setup();
+    fake.holdAppends = true;
+    fake.state.entries.push({ type: "message" }, { type: "message" }, { type: "message" });
+    const body = sendBody();
+    const state = peek(delivery.deliver(REG_A, body));
+    await flushMicrotasks();
+    // omp rebuilds the list of the same session: a new, longer array whose first entry is the message.
+    fake.state = {
+      ...fake.state,
+      entries: [
+        {
+          type: "custom_message",
+          customType: TALK_MESSAGE_TYPE,
+          content: "",
+          display: true,
+          details: { messageId: body.messageId },
+        },
+        { type: "message" },
+        { type: "message" },
+        { type: "message" },
+      ],
+    };
+    await vi.advanceTimersByTimeAsync(10);
+    expect(state.value?.outcome).toBe("delivered");
   });
 });
 
@@ -613,6 +666,46 @@ describe("results, queue, and busy rules (E5)", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fake.sent).toEqual([]);
   });
+
+  it("answers busy beyond 64 queued messages, before it keeps a record or a pending ask (C8)", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    const first = sendBody();
+    expect((await delivery.deliver(REG_A, first)).outcome).toBe("queued");
+    for (let count = 1; count < MAX_QUEUED_MESSAGES; count += 1)
+      expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
+    const over = askBody();
+    expect((await delivery.deliver(REG_A, over)).outcome).toBe("busy");
+    expect(delivery.queuedCount).toBe(MAX_QUEUED_MESSAGES);
+    expect(cancelOf(delivery, over.messageId)).toBe("not-found");
+    expect(delivery.pending.list(REG_A)).toEqual([]);
+    // A cancelled message frees its place.
+    expect(cancelOf(delivery, first.messageId)).toBe("cancelled");
+    expect((await delivery.deliver(REG_A, askBody())).outcome).toBe("queued");
+    expect(delivery.pending.list(REG_A)).toHaveLength(1);
+  });
+
+  it("answers busy when the queued text would pass 4 MiB, and frees the bytes as messages leave (C8)", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    // Each message is a little above 1,000,000 bytes, so four fit and a fifth does not.
+    const big = (): DeliverBody => sendBody({ text: "x".repeat(1_000_000) });
+    const queued = [big(), big(), big(), big()];
+    for (const body of queued) expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    expect(4 * 1_000_000).toBeLessThan(MAX_QUEUED_BYTES);
+    expect((await delivery.deliver(REG_A, big())).outcome).toBe("busy");
+    // A small message still fits.
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
+    const [cancelled] = queued;
+    expect(cancelOf(delivery, cancelled?.messageId ?? "")).toBe("cancelled");
+    expect((await delivery.deliver(REG_A, big())).outcome).toBe("queued");
+    fake.idle = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(delivery.queuedCount).toBe(0);
+    fake.idle = false;
+    for (const body of [big(), big(), big(), big()])
+      expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+  });
 });
 
 describe("asks and replies at the receiver (E6)", () => {
@@ -627,14 +720,14 @@ describe("asks and replies at the receiver (E6)", () => {
     expect(retained).toEqual([{ pair: ASKER, sentBefore: 0 }]);
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0]?.message.content).toBe(formatDelivery(body));
-    expect(delivery.pending.list().map((entry) => entry.askId)).toEqual([body.messageId]);
+    expect(delivery.pending.list(REG_A).map((entry) => entry.askId)).toEqual([body.messageId]);
   });
 
   it("answers no-reply-route and sends nothing when the route cannot be retained", async () => {
     const { fake, delivery } = setup(async () => false);
     expect((await delivery.deliver(REG_A, askBody())).outcome).toBe("no-reply-route");
     expect(fake.sent).toEqual([]);
-    expect(delivery.pending.list()).toEqual([]);
+    expect(delivery.pending.list(REG_A)).toEqual([]);
   });
 
   it("removes the pending ask of a cancelled or dropped message", async () => {
@@ -644,11 +737,24 @@ describe("asks and replies at the receiver (E6)", () => {
     const dropped = askBody();
     await delivery.deliver(REG_A, cancelled);
     await delivery.deliver(REG_A, dropped);
-    expect(delivery.pending.list()).toHaveLength(2);
+    expect(delivery.pending.list(REG_A)).toHaveLength(2);
     cancelOf(delivery, cancelled.messageId);
-    expect(delivery.pending.list().map((entry) => entry.askId)).toEqual([dropped.messageId]);
+    expect(delivery.pending.list(REG_A).map((entry) => entry.askId)).toEqual([dropped.messageId]);
     delivery.detach();
-    expect(delivery.pending.list()).toEqual([]);
+    expect(delivery.pending.list(REG_A)).toEqual([]);
+    // The asks ended with their registration: a new one of the same session sees none (C1).
+    delivery.attach(REG_A);
+    expect(delivery.pending.list(REG_A)).toEqual([]);
+  });
+
+  it("ends the pending asks when a new registration replaces the old one (C1)", async () => {
+    const { delivery } = setup();
+    const body = askBody();
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    expect(delivery.pending.list(REG_A)).toHaveLength(1);
+    delivery.attach(REG_A2);
+    expect(delivery.pending.list(REG_A)).toEqual([]);
+    expect(delivery.pending.list(REG_A2)).toEqual([]);
   });
 
   it("delivers a main reply without a waiter as a message", async () => {
@@ -684,7 +790,7 @@ describe("request handlers", () => {
   const handlersFor = (delivery: TalkDelivery | undefined) => {
     const asks = makeAskStore(clock);
     asks.noteAgent({ id: "asker", parentId: undefined, main: true });
-    asks.setRegistration("asker", ASKER);
+    asks.setRegistration("asker", { registration: ASKER, isCurrent: () => true });
     const handlers = new Map(
       talkRequestHandlers({
         receiverFor: (registration) =>

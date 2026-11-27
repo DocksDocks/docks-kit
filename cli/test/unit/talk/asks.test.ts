@@ -82,7 +82,7 @@ const storeWithMain = () => {
   store.noteAgent(MAIN);
   store.noteAgent(CHILD);
   store.noteAgent(GRANDCHILD);
-  store.setRegistration(MAIN.id, MAIN_REG);
+  store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
   return store;
 };
 
@@ -99,7 +99,7 @@ describe("reply address", () => {
 
   it("gives no address when no ancestor has a live registration", () => {
     const store = storeWithMain();
-    store.setRegistration(MAIN.id, undefined);
+    store.clearRegistration(MAIN.id, MAIN_REG);
     expect(store.replyAddress(MAIN)).toBeUndefined();
     expect(store.replyAddress(GRANDCHILD)).toBeUndefined();
     expect(store.replyAddress({ id: "orphan", parentId: "unknown", main: false })).toBeUndefined();
@@ -110,6 +110,61 @@ describe("reply address", () => {
     store.noteAgent({ id: "loop-a", parentId: "loop-b", main: false });
     store.noteAgent({ id: "loop-b", parentId: "loop-a", main: false });
     expect(store.replyAddress({ id: "loop-a", parentId: "loop-b", main: false })).toBeUndefined();
+  });
+
+  it("gives no address when the kept registration is no longer its binding's current one", () => {
+    const store = storeWithMain();
+    let current = true;
+    store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => current });
+    expect(store.replyAddress(CHILD)).toEqual({ origin: "sub", replyTo: MAIN_REG });
+    current = false;
+    expect(store.replyAddress(MAIN)).toBeUndefined();
+    expect(store.replyAddress(CHILD)).toBeUndefined();
+    store.setRegistration(MAIN.id, {
+      registration: MAIN_REG,
+      isCurrent: () => {
+        throw new Error("getAllTools is missing");
+      },
+    });
+    expect(store.replyAddress(MAIN)).toBeUndefined();
+  });
+
+  it("never skips a stale nearer registration for a farther one", () => {
+    const store = storeWithMain();
+    store.setRegistration(CHILD.id, { registration: OTHER_REG, isCurrent: () => false });
+    expect(store.replyAddress(GRANDCHILD)).toBeUndefined();
+  });
+
+  it("clears a registration only when it is the kept one", () => {
+    const store = storeWithMain();
+    store.clearRegistration(MAIN.id, OTHER_REG);
+    expect(store.replyAddress(MAIN)).toEqual({ origin: "main", replyTo: MAIN_REG });
+  });
+});
+
+describe("agent map release (C13)", () => {
+  /** An agent whose parent is `parentId`: its walk shows whether the map still holds that parent. */
+  const probeOf = (parentId: string): AgentRef => ({ id: "probe", parentId, main: false });
+
+  it("keeps an ended agent while a live subagent names it, and releases the chain after", () => {
+    const store = storeWithMain();
+    store.forgetAgent(CHILD.id);
+    // The grandchild still walks through the ended child.
+    expect(store.replyAddress(GRANDCHILD)).toEqual({ origin: "sub", replyTo: MAIN_REG });
+    expect(store.replyAddress(probeOf(CHILD.id))).toEqual({ origin: "sub", replyTo: MAIN_REG });
+    store.forgetAgent(GRANDCHILD.id);
+    // Both entries are gone: a walk that starts at the child finds no parent.
+    expect(store.replyAddress(probeOf(CHILD.id))).toBeUndefined();
+    expect(store.replyAddress(probeOf(GRANDCHILD.id))).toBeUndefined();
+  });
+
+  it("ignores an agent that it never noted, and keeps an agent noted again", () => {
+    const store = storeWithMain();
+    store.forgetAgent("never-noted");
+    store.forgetAgent(CHILD.id);
+    store.noteAgent(CHILD);
+    store.forgetAgent(GRANDCHILD.id);
+    expect(store.replyAddress(probeOf(CHILD.id))).toEqual({ origin: "sub", replyTo: MAIN_REG });
   });
 });
 
@@ -214,7 +269,7 @@ describe("ask", () => {
   it("allows one waiter per session", async () => {
     const store = storeWithMain();
     store.noteAgent({ id: "main-2", parentId: undefined, main: true });
-    store.setRegistration("main-2", OTHER_REG);
+    store.setRegistration("main-2", { registration: OTHER_REG, isCurrent: () => true });
     const deliver = vi.fn(async () => result("delivered"));
     const first = peek(store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver }));
     await flushMicrotasks();
@@ -294,6 +349,61 @@ describe("ask", () => {
   });
 });
 
+describe("ask before its acknowledgement (C3)", () => {
+  /** A deliver whose acknowledgement the test settles later. */
+  const heldDeliver = () => {
+    const acknowledgement = Promise.withResolvers<DeliverResult>();
+    return { acknowledgement, deliver: () => acknowledgement.promise };
+  };
+
+  it("ends with a reply that comes before the acknowledgement, which a later failure does not undo", async () => {
+    const store = storeWithMain();
+    const { acknowledgement, deliver } = heldDeliver();
+    const state = peek(store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver }));
+    await flushMicrotasks();
+    expect(store.complete(reply())).toBe(true);
+    await flushMicrotasks();
+    expect(state.value).toEqual({ _tag: "Replied", result: undefined, reply: reply() });
+    acknowledgement.reject(new Error("timeout"));
+    await flushMicrotasks();
+    expect(state.value?._tag).toBe("Replied");
+  });
+
+  it("ends at once with an abort that comes before the acknowledgement", async () => {
+    const store = storeWithMain();
+    const controller = new AbortController();
+    const { deliver } = heldDeliver();
+    const state = peek(
+      store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, signal: controller.signal, deliver }),
+    );
+    await flushMicrotasks();
+    controller.abort();
+    await flushMicrotasks();
+    expect(state.value).toEqual({ _tag: "Aborted", result: undefined });
+  });
+
+  it("keeps a reply that came first when the acknowledgement refuses", async () => {
+    const store = storeWithMain();
+    const { acknowledgement, deliver } = heldDeliver();
+    const state = peek(store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver }));
+    await flushMicrotasks();
+    store.complete(reply());
+    acknowledgement.resolve(result("not-live"));
+    await flushMicrotasks();
+    expect(state.value?._tag).toBe("Replied");
+  });
+
+  it("fails with the request error while no reply came", async () => {
+    const store = storeWithMain();
+    const { acknowledgement, deliver } = heldDeliver();
+    const failure = new Error("unreachable");
+    const asked = store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver });
+    acknowledgement.reject(failure);
+    await expect(asked).rejects.toBe(failure);
+    expect(store.complete(reply())).toBe(false);
+  });
+});
+
 describe("pending inbound asks", () => {
   const ask = (
     messageId: string,
@@ -312,7 +422,7 @@ describe("pending inbound asks", () => {
     const pending = makePendingAsks(clock);
     pending.add(ask("0000000000000001", `line one\nline two ${"x".repeat(200)}`), PEER);
     await vi.advanceTimersByTimeAsync(5_000);
-    const [entry] = pending.list();
+    const [entry] = pending.list(PEER);
     expect(entry).toMatchObject({
       askId: "0000000000000001",
       from: { name: "alice", sessionId: "session-alice" },
@@ -329,27 +439,60 @@ describe("pending inbound asks", () => {
     pending.add(ask("0000000000000001"), PEER);
     pending.add(ask("0000000000000002"), PEER);
     pending.remove("0000000000000001");
-    expect(pending.list().map((entry) => entry.askId)).toEqual(["0000000000000002"]);
+    expect(pending.list(PEER).map((entry) => entry.askId)).toEqual(["0000000000000002"]);
     await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS - 1);
-    expect(pending.list()).toHaveLength(1);
+    expect(pending.list(PEER)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(pending.list()).toEqual([]);
+    expect(pending.list(PEER)).toEqual([]);
+  });
+
+  it("expires asks from a timer of its own, without a read, and keeps no timer when empty", async () => {
+    const pending = makePendingAsks(clock);
+    expect(vi.getTimerCount()).toBe(0);
+    pending.add(ask("0000000000000001"), PEER);
+    await vi.advanceTimersByTimeAsync(5_000);
+    pending.add(ask("0000000000000002"), PEER);
+    expect(vi.getTimerCount()).toBe(1);
+    // The first ask expires; the timer plans the expiry of the second.
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS - 5_000);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    // The store is empty: no read ran, and no timer stays.
+    expect(vi.getTimerCount()).toBe(0);
+    pending.add(ask("0000000000000003"), PEER);
+    pending.remove("0000000000000003");
+    expect(vi.getTimerCount()).toBe(0);
+    pending.add(ask("0000000000000004"), PEER);
+    pending.clear();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(pending.list(PEER)).toEqual([]);
+  });
+
+  it("shows each ask only to the registration that received it (C1)", () => {
+    const pending = makePendingAsks(clock);
+    pending.add(ask("0000000000000001"), PEER);
+    expect(pending.list(IMPOSTOR)).toEqual([]);
+    expect(pending.list(undefined)).toEqual([]);
+    expect(pending.select(IMPOSTOR, undefined)).toEqual({ _tag: "None" });
+    expect(pending.select(IMPOSTOR, "0000000000000001")).toEqual({ _tag: "NotFound" });
+    expect(pending.select(undefined, "0000000000000001")).toEqual({ _tag: "NotFound" });
+    expect(pending.list(PEER).map((entry) => entry.askId)).toEqual(["0000000000000001"]);
   });
 
   it("selects the reply target by replyTo or as the only pending ask", () => {
     const pending = makePendingAsks(clock);
-    expect(pending.select(undefined)).toEqual({ _tag: "None" });
+    expect(pending.select(PEER, undefined)).toEqual({ _tag: "None" });
     pending.add(ask("0000000000000001"), PEER);
-    expect(pending.select(undefined)).toMatchObject({
+    expect(pending.select(PEER, undefined)).toMatchObject({
       _tag: "Found",
       ask: { askId: "0000000000000001" },
     });
     pending.add(ask("0000000000000002"), PEER);
-    expect(pending.select(undefined)).toMatchObject({ _tag: "Ambiguous" });
-    expect(pending.select("0000000000000002")).toMatchObject({
+    expect(pending.select(PEER, undefined)).toMatchObject({ _tag: "Ambiguous" });
+    expect(pending.select(PEER, "0000000000000002")).toMatchObject({
       _tag: "Found",
       ask: { askId: "0000000000000002" },
     });
-    expect(pending.select("00000000000000ff")).toEqual({ _tag: "NotFound" });
+    expect(pending.select(PEER, "00000000000000ff")).toEqual({ _tag: "NotFound" });
   });
 });

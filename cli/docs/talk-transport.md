@@ -154,9 +154,11 @@ valid.
   maximum frame plus its header waits unread.
 - Requests: `{ type: "request", id, kind, body }` and
   `{ type: "response", id, result }`. The kind `ping` answers liveness. A
-  request times out after 5 s by default, and a probe after 500 ms. When the
-  listener cannot send a response, for example a result above 1 MiB, it
-  closes the connection.
+  request times out after 5 s by default, and a probe after 500 ms.
+  `probeAll(targets)` pings each target at the same time, each with its own
+  probe deadline, and gives one result per target in the order of the
+  targets. When the listener cannot send a response, for example a result
+  above 1 MiB, it closes the connection.
 - Admission: the transport option `admit` is a hook that the listener asks in
   the tick that it admits a request for a registration, `ping` included. When
   the hook gives false or throws, the request gets `not-live` and the listener
@@ -170,13 +172,22 @@ registration has its own instance id, secret, and entry. Requests and
 withdrawals go to a registration by its pair: the instance id and the
 session id.
 
+`register` takes an optional `instanceId` (16 lowercase hex digits), so the
+caller knows the exact pair before the entry is published; the `talk`
+extension uses it to key its startup admission by the pair (#250 E7).
+Without it, the listener picks a random one. An instance id that does not
+match the pattern, or that the listener already served, gives
+`TalkRegisterError`.
+
 `update(target, { name, cwd })` publishes a live registration again with a
 new name and folder. The instance id, the session id, the secret, the start
 time, and the endpoint stay the same, so an entry that a client kept still
 reaches the registration. A registration that is not live gives
 `TalkUpdateError`. When the publication fails, the call gives
-`TalkUpdateError`, the entry stays stale, and the next repair pass publishes
-it with the new name and folder.
+`TalkUpdateError`, the registration keeps its old name and folder, the entry
+stays stale, and the next repair pass publishes it with the old name and
+folder. The new name and folder take effect only when a publication
+succeeds.
 
 ### Withdrawal
 
@@ -215,10 +226,17 @@ A request tries these routes for the pair:
    entry, so a listener that withdrew its last registration and then bound a
    new socket still gives its proof of the end.
 
+The client reads the socket names of the folder once for each request and
+once for each `probeAll` batch. Every probe of the batch uses that one read,
+indexed by process id. A request alone reads the names again, so it finds a
+socket that a listener bound just before the request.
+
 Every handshake runs under the whole deadline of the caller; no route stops
-because other routes exist. The first connection that completes the mutual
-proof over the secret and the session id of the pair is the only one that
-sends the request body; the other connections close. The client never
+because other routes exist before one route completes the mutual proof. The
+first connection that completes the mutual proof over the secret and the
+session id of the pair is the only one that sends the request body. At that
+moment every other route of the request stops: its connection closes, and it
+frees its dial slot or stops its wait for one. The client never
 retries after it sent the body. Only the listener that served the pair can
 complete that proof, so a `not-live` or `ended` answer through any route is
 authenticated. When the deadline expires first, the request gives `timeout`.

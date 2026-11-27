@@ -4,13 +4,14 @@
  * (E12), and the pending inbound asks of one session.
  */
 import { oneLine } from "./attachments";
-import type { TalkClock } from "./host";
-import type {
-  AskRoute as AskRouteSchema,
-  DeliverBody,
-  DeliverResult,
-  ReplyBody,
-  Sender as SenderSchema,
+import type { CancelTimer, TalkClock } from "./host";
+import {
+  type AskRoute as AskRouteSchema,
+  type DeliverBody,
+  type DeliverResult,
+  type ReplyBody,
+  type Sender as SenderSchema,
+  acceptsDelivery,
 } from "./protocol";
 import type { Target } from "../transport/request";
 
@@ -28,6 +29,16 @@ export interface AgentRef {
   readonly id: string;
   readonly parentId: string | undefined;
   readonly main: boolean;
+}
+
+/**
+ * The registration of a main session and the check of its owning binding:
+ * true while the registration is still the binding's current one. A check
+ * that throws counts as false.
+ */
+export interface LiveRegistration {
+  readonly registration: Target;
+  readonly isCurrent: () => boolean;
 }
 
 /** How a waiter ended. */
@@ -51,7 +62,10 @@ export interface AskRequest {
   readonly deliver: (route: AskRoute) => Promise<DeliverResult>;
 }
 
-/** The end of one ask. */
+/**
+ * The end of one ask. `result` is the receiver's acknowledgement; it is
+ * undefined when the waiter ended before the acknowledgement came.
+ */
 export type AskOutcome =
   /** No live registration of the session or of an ancestor: nothing was sent. */
   | { readonly _tag: "NoReplyAddress" }
@@ -59,24 +73,41 @@ export type AskOutcome =
   | { readonly _tag: "WaiterBusy" }
   /** The receiver did not accept the ask: `busy`, `not-live`, or `no-reply-route`. */
   | { readonly _tag: "Refused"; readonly result: DeliverResult }
-  | { readonly _tag: "Replied"; readonly result: DeliverResult; readonly reply: ReplyBody }
-  | { readonly _tag: "TimedOut"; readonly result: DeliverResult }
-  /** `result` is undefined when the signal aborted before the ask went out. */
+  | {
+      readonly _tag: "Replied";
+      readonly result: DeliverResult | undefined;
+      readonly reply: ReplyBody;
+    }
+  | { readonly _tag: "TimedOut"; readonly result: DeliverResult | undefined }
+  /** `result` is also undefined when the signal aborted before the ask went out. */
   | { readonly _tag: "Aborted"; readonly result: DeliverResult | undefined };
 
 /** The process store of E6. */
 export interface AskStore {
   /** Records the parent of an agent session; each binding calls it at `session_start`. */
   readonly noteAgent: (agent: AgentRef) => void;
-  /** Sets or clears the live registration of a main session. */
-  readonly setRegistration: (agentId: string, registration: Target | undefined) => void;
+  /**
+   * The binding of an agent session ended. Its entry of the agent map goes
+   * once no noted agent session names it as parent, and so on up the map.
+   */
+  readonly forgetAgent: (agentId: string) => void;
+  /** Sets the live registration of a main session. */
+  readonly setRegistration: (agentId: string, live: LiveRegistration) => void;
+  /** Clears the registration of a main session when it is the given one. */
+  readonly clearRegistration: (agentId: string, registration: Target) => void;
   /**
    * The reply address of an ask: the session's own registration for a main
    * session, else the registration of the nearest ancestor that has one.
-   * Undefined when none is live.
+   * Undefined when none is kept, or when the kept one is no longer the
+   * current registration of its binding.
    */
   readonly replyAddress: (agent: AgentRef) => AskRoute | undefined;
-  /** Sends an ask and waits for its reply, its timeout, or the abort of its signal. */
+  /**
+   * Sends an ask and waits for its reply, its timeout, or the abort of its
+   * signal. A reply or an abort ends the wait also before the receiver's
+   * acknowledgement; a refusal or a failed request ends it only while no
+   * reply came.
+   */
   readonly ask: (request: AskRequest) => Promise<AskOutcome>;
   /**
    * Completes the waiter of a reply that matches it by ask id and by the
@@ -85,48 +116,80 @@ export interface AskStore {
   readonly complete: (reply: ReplyBody) => boolean;
 }
 
-/** Whether an outcome of the receiver accepts an ask. */
-const ACCEPTS: Record<DeliverResult["outcome"], boolean> = {
-  delivered: true,
-  queued: true,
-  submitted: true,
-  busy: false,
-  "not-live": false,
-  "no-reply-route": false,
-};
-
 interface Waiter {
   readonly expected: Target;
   readonly settled: Promise<WaitResult>;
-  readonly settle: (result: WaitResult) => void;
+  /** Ends the wait; false when it ended before. */
+  readonly settle: (result: WaitResult) => boolean;
 }
+
+type Acknowledgement =
+  | { readonly _tag: "Acknowledged"; readonly result: DeliverResult }
+  | { readonly _tag: "RequestFailed"; readonly error: unknown };
+
+type FirstEnd = Acknowledgement | { readonly _tag: "Waited"; readonly ended: WaitResult };
+
+const isCurrent = (live: LiveRegistration): boolean => {
+  try {
+    return live.isCurrent();
+  } catch {
+    return false;
+  }
+};
+
+const waited = (ended: WaitResult, result: DeliverResult | undefined): AskOutcome =>
+  ended._tag === "Replied"
+    ? { _tag: "Replied", result, reply: ended.reply }
+    : { _tag: ended._tag, result };
 
 export const makeAskStore = (clock: TalkClock): AskStore => {
   const parents = new Map<string, string | undefined>();
-  const registrations = new Map<string, Target>();
+  /** Agents whose binding ended while a noted agent still named them as parent. */
+  const ended = new Set<string>();
+  const registrations = new Map<string, LiveRegistration>();
   const waitersByAsk = new Map<string, Waiter>();
   const waitingAgents = new Set<string>();
 
   const replyAddress = (agent: AgentRef): AskRoute | undefined => {
     if (agent.main) {
       const own = registrations.get(agent.id);
-      return own === undefined ? undefined : { origin: "main", replyTo: own };
+      return own === undefined || !isCurrent(own)
+        ? undefined
+        : { origin: "main", replyTo: own.registration };
     }
     const seen = new Set<string>([agent.id]);
     let ancestor = agent.parentId;
     while (ancestor !== undefined && !seen.has(ancestor)) {
-      const registration = registrations.get(ancestor);
-      if (registration !== undefined) return { origin: "sub", replyTo: registration };
+      const live = registrations.get(ancestor);
+      // The nearest registration decides: a stale one gives no address, never a farther one.
+      if (live !== undefined)
+        return isCurrent(live) ? { origin: "sub", replyTo: live.registration } : undefined;
       seen.add(ancestor);
       ancestor = parents.get(ancestor);
     }
     return undefined;
   };
 
+  const hasChild = (agentId: string): boolean => {
+    for (const parentId of parents.values()) if (parentId === agentId) return true;
+    return false;
+  };
+
+  /** Drops the entries of ended agents that no noted agent names as parent, up the map. */
+  const release = (agentId: string): void => {
+    let next: string | undefined = agentId;
+    while (next !== undefined && ended.has(next) && !hasChild(next)) {
+      const parentId = parents.get(next);
+      ended.delete(next);
+      parents.delete(next);
+      next = parentId;
+    }
+  };
+
   /** Registers a waiter before the ask goes out, so a fast reply finds it. */
   const begin = (request: AskRequest): Waiter => {
     const { promise: settled, resolve } = Promise.withResolvers<WaitResult>();
-    let cancelTimer: () => void = () => {};
+    let cancelTimer: CancelTimer = () => {};
     const onAbort = (): void => {
       waiter.settle({ _tag: "Aborted" });
     };
@@ -134,12 +197,13 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
       expected: request.target,
       settled,
       settle: (result) => {
-        if (waitersByAsk.get(request.askId) !== waiter) return;
+        if (waitersByAsk.get(request.askId) !== waiter) return false;
         waitersByAsk.delete(request.askId);
         waitingAgents.delete(request.agent.id);
         cancelTimer();
         request.signal?.removeEventListener("abort", onAbort);
         resolve(result);
+        return true;
       },
     };
     waitersByAsk.set(request.askId, waiter);
@@ -157,21 +221,30 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
     if (waitingAgents.has(request.agent.id)) return { _tag: "WaiterBusy" };
     if (request.signal?.aborted === true) return { _tag: "Aborted", result: undefined };
     const waiter = begin(request);
-    let result: DeliverResult;
-    try {
-      result = await request.deliver(route);
-    } catch (error) {
-      waiter.settle({ _tag: "Aborted" });
-      throw error;
+    const acknowledged: Promise<Acknowledgement> = request.deliver(route).then(
+      (result) => ({ _tag: "Acknowledged", result }),
+      (error: unknown) => ({ _tag: "RequestFailed", error }),
+    );
+    // A reply or an abort can come before the acknowledgement: it ends the call at once.
+    const first: FirstEnd = await Promise.race([
+      acknowledged,
+      waiter.settled.then((end): FirstEnd => ({ _tag: "Waited", ended: end })),
+    ]);
+    switch (first._tag) {
+      case "Waited":
+        return waited(first.ended, undefined);
+      case "RequestFailed":
+        // A reply that came first wins over the failure of its request.
+        if (!waiter.settle({ _tag: "Aborted" })) return waited(await waiter.settled, undefined);
+        throw first.error;
+      case "Acknowledged": {
+        const { result } = first;
+        if (acceptsDelivery(result.outcome)) return waited(await waiter.settled, result);
+        // A refusal ends the call only while no reply came.
+        if (!waiter.settle({ _tag: "Aborted" })) return waited(await waiter.settled, result);
+        return { _tag: "Refused", result };
+      }
     }
-    if (!ACCEPTS[result.outcome]) {
-      waiter.settle({ _tag: "Aborted" });
-      return { _tag: "Refused", result };
-    }
-    const ended = await waiter.settled;
-    return ended._tag === "Replied"
-      ? { _tag: "Replied", result, reply: ended.reply }
-      : { _tag: ended._tag, result };
   };
 
   const complete = (reply: ReplyBody): boolean => {
@@ -182,17 +255,26 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
       waiter.expected.sessionId !== reply.replier.sessionId
     )
       return false;
-    waiter.settle({ _tag: "Replied", reply });
-    return true;
+    return waiter.settle({ _tag: "Replied", reply });
   };
 
   return {
     noteAgent: (agent) => {
       parents.set(agent.id, agent.parentId);
+      ended.delete(agent.id);
     },
-    setRegistration: (agentId, registration) => {
-      if (registration === undefined) registrations.delete(agentId);
-      else registrations.set(agentId, registration);
+    forgetAgent: (agentId) => {
+      if (!parents.has(agentId)) return;
+      ended.add(agentId);
+      release(agentId);
+    },
+    setRegistration: (agentId, live) => {
+      registrations.set(agentId, live);
+    },
+    clearRegistration: (agentId, registration) => {
+      const kept = registrations.get(agentId)?.registration;
+      if (kept?.instanceId === registration.instanceId && kept.sessionId === registration.sessionId)
+        registrations.delete(agentId);
     },
     replyAddress,
     ask,
@@ -223,14 +305,23 @@ export type PendingSelection =
   /** No `replyTo` and more than one pending ask. */
   | { readonly _tag: "Ambiguous"; readonly asks: ReadonlyArray<PendingAsk> };
 
-/** The pending inbound asks of one session (E6). */
+/**
+ * The pending inbound asks of one binding (E6). Each ask belongs to the
+ * registration that received it: `list` and `select` show only the asks of
+ * the registration that the caller names, and none for an undefined one.
+ */
 export interface PendingAsks {
-  /** Keeps an accepted ask until its reply or the ask timeout. */
+  /** Keeps an accepted ask until its reply, the ask timeout, or `clear`. */
   readonly add: (body: DeliverBody & { readonly ask: AskRoute }, receivedBy: Target) => void;
   readonly remove: (askId: string) => void;
-  /** The unexpired asks, oldest first. */
-  readonly list: () => ReadonlyArray<PendingAsk>;
-  readonly select: (replyTo: string | undefined) => PendingSelection;
+  /** Ends every pending ask: their registration ended. */
+  readonly clear: () => void;
+  /** The unexpired asks of the registration, oldest first. */
+  readonly list: (receivedBy: Target | undefined) => ReadonlyArray<PendingAsk>;
+  readonly select: (
+    receivedBy: Target | undefined,
+    replyTo: string | undefined,
+  ) => PendingSelection;
 }
 
 interface StoredAsk {
@@ -242,15 +333,43 @@ interface StoredAsk {
   readonly preview: string;
 }
 
+/**
+ * The store expires each ask from a timer of its own, so an ask that no call
+ * reads does not stay; the timer runs only while the store holds an ask.
+ */
 export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): PendingAsks => {
   const asks = new Map<string, StoredAsk>();
+  let cancelExpiry: CancelTimer | undefined;
 
-  const list = (): ReadonlyArray<PendingAsk> => {
+  const stopExpiry = (): void => {
+    cancelExpiry?.();
+    cancelExpiry = undefined;
+  };
+
+  /** Removes the expired asks and plans the next expiry, or none for an empty store. */
+  const expire = (): void => {
+    stopExpiry();
+    const now = clock.now();
+    let next = Number.POSITIVE_INFINITY;
+    for (const [askId, stored] of asks) {
+      const deadline = stored.receivedAt + timeoutMs;
+      if (now >= deadline) asks.delete(askId);
+      else next = Math.min(next, deadline);
+    }
+    if (asks.size > 0) cancelExpiry = clock.schedule(next - now, expire);
+  };
+
+  const list = (receivedBy: Target | undefined): ReadonlyArray<PendingAsk> => {
+    if (receivedBy === undefined) return [];
     const now = clock.now();
     const live: Array<PendingAsk> = [];
-    for (const [askId, { receivedAt, ...stored }] of asks) {
-      if (now - receivedAt >= timeoutMs) asks.delete(askId);
-      else live.push({ ...stored, ageMs: now - receivedAt });
+    for (const { receivedAt, ...stored } of asks.values()) {
+      if (
+        now - receivedAt < timeoutMs &&
+        stored.receivedBy.instanceId === receivedBy.instanceId &&
+        stored.receivedBy.sessionId === receivedBy.sessionId
+      )
+        live.push({ ...stored, ageMs: now - receivedAt });
     }
     return live;
   };
@@ -265,13 +384,19 @@ export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): P
         receivedAt: clock.now(),
         preview: oneLine(body.text).slice(0, PREVIEW_LENGTH),
       });
+      cancelExpiry ??= clock.schedule(timeoutMs, expire);
     },
     remove: (askId) => {
       asks.delete(askId);
+      if (asks.size === 0) stopExpiry();
+    },
+    clear: () => {
+      asks.clear();
+      stopExpiry();
     },
     list,
-    select: (replyTo) => {
-      const live = list();
+    select: (receivedBy, replyTo) => {
+      const live = list(receivedBy);
       if (replyTo !== undefined) {
         const found = live.find((entry) => entry.askId === replyTo);
         return found === undefined ? { _tag: "NotFound" } : { _tag: "Found", ask: found };

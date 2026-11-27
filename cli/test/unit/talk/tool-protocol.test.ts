@@ -11,6 +11,7 @@ import {
   type ReplyResult,
   type TalkBodyInvalid,
   TalkMessageTooLarge,
+  acceptsDelivery,
   decodeCancelBody,
   decodeCancelResult,
   decodeDeliverBody,
@@ -208,6 +209,10 @@ describe("results", () => {
         result,
       );
     }
+  });
+
+  it("counts delivered, queued, and submitted as accepted, for send and ask alike (T15)", () => {
+    expect(deliverOutcomes.filter(acceptsDelivery)).toEqual(["delivered", "queued", "submitted"]);
   });
 
   it("round-trips each reply outcome", () => {

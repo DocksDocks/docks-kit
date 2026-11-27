@@ -18,7 +18,7 @@ import {
   makeListener,
 } from "./listener";
 import { TalkRegistry } from "./registry";
-import type { RequestHandler, Target, TalkRequestFailed } from "./request";
+import type { RequestHandler, Target } from "./request";
 
 /** The settings of the transport; each one has a default. */
 export interface TalkTransportOptions {
@@ -78,7 +78,8 @@ export class TalkTransport extends Context.Service<
     /** Lists the registrations in the folder, prunes dead ones, and keeps the listed entries. */
     readonly list: Effect.Effect<PeerListing, TalkListError>;
     readonly request: Client["request"];
-    readonly probe: (target: Target) => Effect.Effect<void, TalkRequestFailed>;
+    /** Pings each target with the probe timeout; the batch shares one socket snapshot. */
+    readonly probeAll: Client["probeAll"];
     /** Reads the entry of the pair now and keeps it like a listed entry; `not-found` without one. */
     readonly retain: Client["retain"];
     /** The pair of an entry that this process kept, by its full instance id. */
@@ -120,7 +121,7 @@ const makeTransport = Effect.fnUntraced(function* (options: TalkTransportOptions
     handle: listener.handle,
     list: client.list,
     request: client.request,
-    probe: client.probe,
+    probeAll: client.probeAll,
     retain: client.retain,
     known: client.known,
     status: Effect.map(listener.status, (status) => ({ ...status, folder: registry.folder })),

@@ -5,7 +5,8 @@
  * the mutual proof, the request, and the response. A request tries the #249
  * path (the kept endpoint, then the endpoint of a fresh entry) and, on POSIX,
  * each other socket whose name carries the process id of the target. The
- * first route that completes the mutual proof alone sends the request body.
+ * first route that completes the mutual proof alone sends the request body,
+ * and the other routes stop at that moment.
  */
 import { type Socket, createConnection } from "node:net";
 
@@ -25,6 +26,7 @@ import {
 import {
   type RegistryEntry,
   type RejectedEntry,
+  type SocketFile,
   TalkRegistry,
   describeFailure,
   entryFileName,
@@ -99,6 +101,21 @@ const LOST: Attempt = { _tag: "Lost" };
 const AUTH_FAILED: Attempt = { _tag: "AuthFailed" };
 const ENDED: Attempt = { _tag: "Ended" };
 
+/** POSIX: the paths of the talk sockets in the folder, by the process id that each name carries. */
+type SocketIndex = ReadonlyMap<number, ReadonlyArray<string>>;
+
+const NO_SOCKETS: SocketIndex = new Map();
+
+const indexSockets = (sockets: ReadonlyArray<SocketFile>): SocketIndex => {
+  const index = new Map<number, Array<string>>();
+  for (const socket of sockets) {
+    const paths = index.get(socket.processId);
+    if (paths === undefined) index.set(socket.processId, [socket.path]);
+    else paths.push(socket.path);
+  }
+  return index;
+};
+
 const targetKey = (target: Target): string => `${target.instanceId}\u0000${target.sessionId}`;
 
 const sameEndpoint = (left: Endpoint, right: Endpoint): boolean =>
@@ -163,8 +180,14 @@ export interface Client {
     body: Schema.Json,
     timeoutMs?: number,
   ) => Effect.Effect<Schema.Json, TalkRequestFailed>;
-  /** A `ping` with the probe timeout. */
-  readonly probe: (target: Target) => Effect.Effect<void, TalkRequestFailed>;
+  /**
+   * A `ping` to each target with the probe timeout, all at the same time; the
+   * results are in the order of the targets. The batch reads the socket names
+   * of the folder once and shares that snapshot.
+   */
+  readonly probeAll: (
+    targets: ReadonlyArray<Target>,
+  ) => Effect.Effect<ReadonlyArray<Result.Result<void, TalkRequestFailed>>>;
   /**
    * Reads the entry of the pair now and keeps it like a listed entry, so a
    * later request reaches the pair without its entry file; `not-found` when no
@@ -240,7 +263,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     endpoint: Endpoint,
     kind: string,
     body: Schema.Json,
-    take: () => boolean,
+    take: Effect.Effect<boolean>,
   ) {
     const clientNonce = yield* makeNonce;
     const { instanceId, sessionId } = entry;
@@ -268,7 +291,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     });
     const end = yield* Effect.flatMap(connection.read, decodeHandshakeEnd);
     // The mutual proof is complete; only the first route to get here sends the body.
-    if (!take()) return LOST;
+    if (!(yield* take)) return LOST;
     if (end.type === "ended") return ENDED;
     const id = nextRequestId;
     nextRequestId += 1;
@@ -290,7 +313,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     endpoint: Endpoint,
     kind: string,
     body: Schema.Json,
-    take: () => boolean,
+    take: Effect.Effect<boolean>,
     dialed: Effect.Effect<void> = Effect.void,
   ): Effect.Effect<Attempt> =>
     withDialSlot(
@@ -317,51 +340,76 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
       }),
     );
 
-  /** POSIX: the other sockets in the folder whose name carries the process id of the entry. */
-  const sameProcessSockets = (entry: RegistryEntry) => {
+  /**
+   * POSIX: one read of the socket names in the folder. A failed read gives no
+   * sockets, so only the #249 path dials.
+   */
+  const readSockets: Effect.Effect<SocketIndex> =
+    registry.endpointKind === "unix"
+      ? registry.sockets.pipe(
+          Effect.map(indexSockets),
+          Effect.orElseSucceed(() => NO_SOCKETS),
+        )
+      : Effect.succeed(NO_SOCKETS);
+
+  /** POSIX: the other sockets in the snapshot whose name carries the process id of the entry. */
+  const sameProcessSockets = (
+    entry: RegistryEntry,
+    sockets: SocketIndex,
+  ): ReadonlyArray<Endpoint> => {
     const cached = entry.endpoint;
-    if (cached.kind !== "unix") return Effect.succeed<ReadonlyArray<Endpoint>>([]);
-    return registry.sockets.pipe(
-      Effect.map((sockets) =>
-        sockets
-          .filter((socket) => socket.processId === entry.processId && socket.path !== cached.path)
-          .map((socket): Endpoint => ({ kind: "unix", path: socket.path })),
-      ),
-      Effect.orElseSucceed((): ReadonlyArray<Endpoint> => []),
-    );
+    if (cached.kind !== "unix") return [];
+    return (sockets.get(entry.processId) ?? [])
+      .filter((path) => path !== cached.path)
+      .map((path): Endpoint => ({ kind: "unix", path }));
   };
 
   /**
    * #250 Step 2: the routes of one request. The #249 path dials first: the
    * kept endpoint and, when that is missing or refuses, the endpoint of a
    * fresh entry of the pair. Once its first connect settled, each other
-   * socket of the process dials as a slot frees. No route stops because
-   * another one exists; the first route that completes the mutual proof alone
-   * sends the body, and the others close. Without such a route, the result of
-   * the #249 path stands.
+   * socket of the process in `sockets` dials as a slot frees. No route stops
+   * because another one exists before a route completes the mutual proof. The
+   * first route that completes it alone sends the body; at that moment every
+   * other route stops, so its connection closes and its slot, or its wait for
+   * a slot, ends. Without such a route, the result of the #249 path stands.
    */
-  const deliver = Effect.fnUntraced(function* (target: Target, kind: string, body: Schema.Json) {
+  const deliver = Effect.fnUntraced(function* (
+    target: Target,
+    kind: string,
+    body: Schema.Json,
+    sockets: Effect.Effect<SocketIndex>,
+  ) {
     const key = targetKey(target);
     const fileName = entryFileName(target.instanceId, target.sessionId);
     const first = kept.get(key) ?? Option.getOrUndefined(yield* readEntry(fileName));
     if (first === undefined) {
       return yield* failed("not-found", "no entry and no kept entry names the target");
     }
-    const others = yield* sameProcessSockets(first);
-    let claimed = false;
+    const others = sameProcessSockets(first, yield* sockets);
+    // The first route that completes the mutual proof completes the claim.
+    const claim = yield* Deferred.make<void>();
     // The entry of the last attempt of the #249 path.
     let last = first;
 
-    const route = (run: (take: () => boolean) => Effect.Effect<Attempt>) =>
+    const route = (run: (take: Effect.Effect<boolean>) => Effect.Effect<Attempt>) =>
       Effect.suspend(() => {
         let won = false;
-        const take = (): boolean => {
-          if (claimed) return false;
-          claimed = true;
+        // `won` is set before the claim completes: completion can resume the waiters at once.
+        const take = Effect.sync(() => {
+          if (Deferred.isDoneUnsafe(claim)) return false;
           won = true;
-          return true;
-        };
-        return Effect.map(run(take), (end): RouteEnd => ({ won, attempt: end }));
+          return Deferred.doneUnsafe(claim, Effect.void);
+        });
+        // Another route took the claim: this one stops. The route that took it runs to its end.
+        const lost = Effect.andThen(
+          Deferred.await(claim),
+          Effect.suspend(() => (won ? Effect.never : Effect.succeed(LOST))),
+        );
+        return Effect.map(Effect.raceFirst(run(take), lost), (end): RouteEnd => ({
+          won,
+          attempt: end,
+        }));
       });
 
     const path249 = (dialed: Effect.Effect<void>) =>
@@ -454,17 +502,40 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     }
   });
 
+  const deliverWithin = (
+    target: Target,
+    kind: string,
+    body: Schema.Json,
+    timeoutMs: number,
+    sockets: Effect.Effect<SocketIndex>,
+  ) =>
+    deliver(target, kind, body, sockets).pipe(
+      Effect.timeoutOrElse({
+        duration: timeoutMs,
+        orElse: () => Effect.fail(failed("timeout", `no answer within ${timeoutMs} ms`)),
+      }),
+    );
+
+  // A request alone reads the socket names now, so it finds a socket that a rebind made just before.
   const request = Effect.fn("TalkClient.request")(function* (
     target: Target,
     kind: string,
     body: Schema.Json,
     timeoutMs: number = options.requestTimeoutMs,
   ) {
-    return yield* deliver(target, kind, body).pipe(
-      Effect.timeoutOrElse({
-        duration: timeoutMs,
-        orElse: () => Effect.fail(failed("timeout", `no answer within ${timeoutMs} ms`)),
-      }),
+    return yield* deliverWithin(target, kind, body, timeoutMs, readSockets);
+  });
+
+  // A probe batch reads the socket names once, when its first route needs them.
+  const probeAll = Effect.fn("TalkClient.probeAll")(function* (targets: ReadonlyArray<Target>) {
+    const sockets = yield* Effect.cached(readSockets);
+    return yield* Effect.forEach(
+      targets,
+      (target) =>
+        Effect.result(
+          Effect.asVoid(deliverWithin(target, PING_KIND, null, options.probeTimeoutMs, sockets)),
+        ),
+      { concurrency: "unbounded" },
     );
   });
 
@@ -545,7 +616,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
   const client: Client = {
     list,
     request,
-    probe: (target) => Effect.asVoid(request(target, PING_KIND, null, options.probeTimeoutMs)),
+    probeAll,
     retain,
     known: (instanceId) => Effect.sync(() => Option.fromNullishOr(keptPairs.get(instanceId))),
   };

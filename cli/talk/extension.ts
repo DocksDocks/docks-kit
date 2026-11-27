@@ -13,10 +13,10 @@
 import { randomBytes } from "node:crypto";
 import { isMainThread } from "node:worker_threads";
 
-import { Effect, ManagedRuntime, Option, Predicate, Schema } from "effect";
+import { Effect, ManagedRuntime, Option, Predicate, Result, Schema } from "effect";
 
 import { version as packageVersion } from "../../package.json" with { type: "json" };
-import { type AgentRef, type AskStore, makeAskStore } from "./tool/asks";
+import { type AgentRef, type AskStore, type LiveRegistration, makeAskStore } from "./tool/asks";
 import { type TalkDelivery, makeDelivery, talkRequestHandlers } from "./tool/delivery";
 import {
   type SendOptions,
@@ -184,11 +184,14 @@ export const makeTalkTransport = (
           ),
         ),
       ),
-    probe: (target) =>
+    probeAll: (targets) =>
       run(
-        TalkTransport.use((transport) => transport.probe(target)).pipe(
-          Effect.map((): ProbeResult => "ok"),
-          Effect.catch((error) => Effect.succeed<ProbeResult>(error.outcome)),
+        TalkTransport.use((transport) => transport.probeAll(targets)).pipe(
+          Effect.map((results) =>
+            results.map((result): ProbeResult =>
+              Result.isSuccess(result) ? "ok" : result.failure.outcome,
+            ),
+          ),
         ),
       ),
     request: (target, kind, body) =>
@@ -222,9 +225,13 @@ interface RegistrationOwner {
   readonly ended: () => void;
 }
 
-/** A registration that a binding starts and that the listener can see before it is claimed. */
+/**
+ * A registration that a binding starts and that the listener can see before
+ * it is claimed (T2): the binding chose its instance id, so the record names
+ * the exact pair before the entry is published.
+ */
 interface StartingRegistration {
-  readonly sessionId: string;
+  readonly registration: Target;
   readonly isActive: () => boolean;
 }
 
@@ -281,9 +288,10 @@ const createProcess = ({ makeTransport, clock, report }: ProcessOptions): TalkPr
   /** E7: the listener asks this hook in the tick that it admits a request, `ping` included. */
   const admit: AdmissionCheck = (registration) => {
     const owner = ownerOf(registration);
+    // An unowned pair is admitted only while its own binding starts it.
     if (owner === undefined)
       return [...starting].some(
-        (pending) => pending.sessionId === registration.sessionId && holds(pending.isActive),
+        (pending) => sameTarget(pending.registration, registration) && holds(pending.isActive),
       );
     if (holds(owner.admit)) return true;
     end(owner);
@@ -532,6 +540,8 @@ const readContext = (ctx: unknown, needs: ReadonlyArray<ContextMember>): Session
     setInterval: method(ctx, "setInterval"),
     clearTimer: method(ctx, "clearTimer"),
   };
+  /** omp 19.2.1 also has a live read-only view of the entries beside the copy of `getEntries()`. */
+  const entriesView = method(manager, "getEntriesView");
   const readMode = (): unknown => (Predicate.hasProperty(ctx, "mode") ? ctx.mode : undefined);
   const readAgent = (): unknown => (Predicate.hasProperty(ctx, "agent") ? ctx.agent : undefined);
   const present: Record<ContextMember, boolean> = {
@@ -558,6 +568,12 @@ const readContext = (ctx: unknown, needs: ReadonlyArray<ContextMember>): Session
     if (!Predicate.isString(value)) throw contextError([member]);
     return value;
   };
+  /** A value that is no boolean fails the call instead of a guess (E5). */
+  const flag = (member: "isIdle" | "hasPendingMessages"): boolean => {
+    const value = call(member);
+    if (!Predicate.isBoolean(value)) throw contextError([member]);
+    return value;
+  };
   return {
     sessionId: () => text("sessionId"),
     cwd: () => text("cwd"),
@@ -565,13 +581,14 @@ const readContext = (ctx: unknown, needs: ReadonlyArray<ContextMember>): Session
       const file = call("sessionFile");
       return Predicate.isString(file) ? file : undefined;
     },
+    // omp's live view where it exists: `getEntries()` copies every entry on each call (E4).
     entries: () => {
-      const entries = call("entries");
+      const entries = entriesView === undefined ? call("entries") : entriesView();
       if (!Array.isArray(entries)) throw contextError(["entries"]);
       return entries;
     },
-    isIdle: () => call("isIdle") === true,
-    hasPendingMessages: () => call("hasPendingMessages") === true,
+    isIdle: () => flag("isIdle"),
+    hasPendingMessages: () => flag("hasPendingMessages"),
     mode: () => {
       const mode = readMode();
       if (!isSessionMode(mode)) throw contextError(["mode"]);
@@ -742,17 +759,26 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   const replyKeys = (): ReadonlyArray<string> =>
     identity === undefined ? [] : [bindingKey, `${env.scope}/${identity.id}`];
 
-  /** Ends this binding's hold on a registration: its queue reads `not-live` (E5). */
+  /** Ends this binding's hold on a registration: its queue reads `not-live` and its pending asks end (E5, E6). */
   const drop = (registration: Target): void => {
     if (!sameTarget(delivery.registration, registration)) return;
     delivery.detach();
     published = undefined;
-    for (const key of replyKeys()) {
-      const route = talk.asks.replyAddress({ id: key, parentId: undefined, main: true });
-      if (route?.replyTo.instanceId === registration.instanceId)
-        talk.asks.setRegistration(key, undefined);
-    }
+    for (const key of replyKeys()) talk.asks.clearRegistration(key, registration);
   };
+
+  /**
+   * E6: a reply address stays valid while it is this binding's registration,
+   * the extension is active, and the session id equals the registered one or
+   * a transition is pending, as admission requires.
+   */
+  const replyRoute = (registration: Target): LiveRegistration => ({
+    registration,
+    isCurrent: () =>
+      sameTarget(delivery.registration, registration) &&
+      isActive() &&
+      (requireSession().sessionId() === registration.sessionId || !delivery.gateOpen),
+  });
 
   const withdraw = async (registration: Target): Promise<void> => {
     drop(registration);
@@ -771,9 +797,16 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     readMarkerPath();
     if (!active() || !delivery.gateOpen) return;
     const sessionId = context.sessionId();
-    const input = { sessionId, name: currentName(sessionId), cwd: context.cwd() };
+    // T2: the binding chooses the instance id, so admission knows the exact pair before publication.
+    const pair: Target = { instanceId: randomBytes(8).toString("hex"), sessionId };
+    const input = {
+      sessionId,
+      instanceId: pair.instanceId,
+      name: currentName(sessionId),
+      cwd: context.cwd(),
+    };
     registering = true;
-    const done = talk.registrations.starting({ sessionId, isActive: active });
+    const done = talk.registrations.starting({ registration: pair, isActive: active });
     let answer: RegisterAnswer;
     try {
       answer = await talk.transport.register(input);
@@ -792,7 +825,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     }
     delivery.attach(registration);
     published = { name: input.name, cwd: input.cwd };
-    for (const key of replyKeys()) talk.asks.setRegistration(key, registration);
+    for (const key of replyKeys()) talk.asks.setRegistration(key, replyRoute(registration));
     talk.registrations.claim({
       registration,
       receiver: delivery,
@@ -915,6 +948,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     closed = true;
     if (timer !== undefined) session?.clearTimer(timer);
     timer = undefined;
+    // C13: the agent map keeps this binding's entry only while a live subagent names it.
+    if (identity !== undefined) talk.asks.forgetAgent(agentRef(env.scope, bindingKey, identity).id);
     const registration = delivery.registration;
     // Only this binding's registration ends; the listener stays until the process exits (E12).
     if (registration !== undefined) await withdraw(registration);
