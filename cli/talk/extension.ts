@@ -38,15 +38,36 @@ import {
   TALK_TOOL_NAME,
   TYPE_BUILDER_MEMBERS,
   type TalkSelf,
+  type ToolContext,
   type TypeBuilder,
+  listSessions,
+  resolveTarget,
   runTalkTool,
+  sendToPair,
   talkParameters,
 } from "./tool/tool";
 import type { AdmissionCheck, RegistrationInput, RegistrationUpdate } from "./transport/listener";
 import type { RequestHandler, Target } from "./transport/request";
 import { TalkTransport, type TalkTransportOptions } from "./transport/transport";
 import { type TalkCardRenderer, makeTalkCardRenderer } from "./ui/card";
+import {
+  type FlowServices,
+  type FlowUi,
+  type ListingAnswer,
+  type SendAnswer,
+  TALK_COMMAND,
+  TALK_COMMAND_DESCRIPTION,
+  TALK_SHORTCUT_DESCRIPTION,
+  type TalkCommand,
+  type TargetAnswer,
+  VIEWS_NEED_TUI,
+  makeFlowSlot,
+  parseTalkArgs,
+  talkCompletions,
+  talkErrorText,
+} from "./ui/command";
 import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
+import { TALK_SHORTCUT } from "./ui/views";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
 export const TALK_PROTOCOL_VERSION = 1;
@@ -531,6 +552,32 @@ const notifyUser = (ctx: unknown, text: string, writeError: (text: string) => vo
   else writeError(`${text}\n`);
 };
 
+/** `ctx.ui.custom` and `ctx.ui.notify` of a flow; undefined when one is missing (#251 G3). */
+const flowUi = (ctx: unknown): FlowUi | undefined => {
+  const ui = Predicate.hasProperty(ctx, "ui") ? ctx.ui : undefined;
+  const custom = method(ui, "custom");
+  const notify = method(ui, "notify");
+  if (custom === undefined || notify === undefined) return undefined;
+  return {
+    custom: (factory, options) =>
+      Promise.resolve(options === undefined ? custom(factory) : custom(factory, options)),
+    notify: (text, level) => {
+      notify(text, level);
+    },
+  };
+};
+
+const NO_FLOW_UI = `talk: this omp gives no ctx.ui.custom or ctx.ui.notify, so /talk has no views. talk needs omp ${OMP_VERSION_NEEDED} or later.`;
+
+/** #251 G4: the warning of a key that already holds `alt+t`. */
+const conflictNotice = (conflict: unknown): string => {
+  const kind =
+    Predicate.hasProperty(conflict, "kind") && Predicate.isString(conflict.kind)
+      ? conflict.kind
+      : "unknown";
+  return `talk: the shortcut ${TALK_SHORTCUT} is taken (${kind}), so it may not open the talk list. /talk still works.`;
+};
+
 const AgentIdentity = Schema.Struct({
   kind: Schema.Literals(["main", "sub"]),
   id: Schema.String,
@@ -713,6 +760,26 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   });
   // #251 G5: the card of each talk message in this session's transcript.
   api.registerMessageRenderer(TALK_MESSAGE_TYPE, makeTalkCardRenderer(env.ui));
+  // #251 G3: the one `/talk` flow of this binding.
+  const flows = makeFlowSlot(env.ui);
+  /** The names of the last listing of this binding, for the synchronous completion (F1, G2). */
+  let listedNames: ReadonlyArray<string> = [];
+  /**
+   * The transport of this binding's tool and flows. Each listing refreshes
+   * the completion snapshot (G2), so the `list` action, a target resolution,
+   * and the list view all keep it current.
+   */
+  const peers: PeerTransport = {
+    list: async () => {
+      const answer = await talk.transport.list();
+      if (answer._tag === "Listed") listedNames = answer.peers.map((peer) => peer.name);
+      return answer;
+    },
+    probeAll: (targets) => talk.transport.probeAll(targets),
+    request: (target, kind, body) => talk.transport.request(target, kind, body),
+    known: (instanceId) => talk.transport.known(instanceId),
+  };
+  let conflictWarned = false;
 
   let rawContext: unknown;
   let session: SessionContext | undefined;
@@ -813,6 +880,20 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   });
 
   const currentName = (sessionId: string): string => sessionName(api.getSessionName(), sessionId);
+
+  /** The calling session as the tool and the `/talk` flows see it. */
+  const toolSelf = (context: SessionContext): TalkSelf => {
+    const sessionId = context.sessionId();
+    return {
+      agent: agentRef(env.scope, bindingKey, context.agent()),
+      sessionId,
+      name: currentName(sessionId),
+      cwd: context.cwd(),
+      registration: delivery.registration,
+      pending: delivery.pending,
+      queuedCount: delivery.queuedCount,
+    };
+  };
 
   /** The keys under which the ask store finds this binding's registration: its own, and its subagents' ancestor. */
   const replyKeys = (): ReadonlyArray<string> =>
@@ -920,6 +1001,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
 
   /** The repair timer of E7: activity, the session id, and the name and folder. */
   const repair = (): void => {
+    // #251 G3: a session id change ends the open flow.
+    flows.check();
     const context = session;
     if (closed || context === undefined || identity?.kind !== "main") return;
     readMarkerPath();
@@ -955,6 +1038,14 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
 
   api.on("session_start", async (_event, ctx) => {
     rawContext = ctx;
+    // #251 G4: one warning per binding when another key holds the shortcut.
+    if (!conflictWarned) {
+      const conflict = api.getShortcutConflict(TALK_SHORTCUT);
+      if (conflict !== undefined) {
+        conflictWarned = true;
+        notifyUser(ctx, conflictNotice(conflict), env.writeError);
+      }
+    }
     identity = readContext(ctx, ["agent"]).agent();
     talk.asks.noteAgent(agentRef(env.scope, bindingKey, identity), listed);
     // A subagent session is no target (#248 D2): it has no registration and no timer.
@@ -968,6 +1059,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   const before =
     (kind: TransitionKind): EventHandler =>
     async (event) => {
+      // #251 G3: a transition ends the open flow, in every binding.
+      flows.end();
       // A subagent session has no registration, so it holds nothing.
       if (session === undefined || identity?.kind !== "main") return undefined;
       // E2: the hold never cancels the transition.
@@ -1002,9 +1095,15 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   api.on("session_switch", after("switch"));
   api.on("session_branch", after("branch"));
   api.on("session_tree", after("tree"));
+  // #251 G3: an in-place reset keeps the session id and ends the open flow.
+  api.on("session_clear", async () => {
+    flows.end();
+    return undefined;
+  });
 
   api.on("session_shutdown", async () => {
     closed = true;
+    flows.end();
     if (timer !== undefined) session?.clearTimer(timer);
     timer = undefined;
     // C13: the agent map keeps this binding's entry only while a live subagent names it.
@@ -1028,22 +1127,13 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       ctx: unknown,
     ) => {
       const context = readContext(ctx, TOOL_NEEDS);
-      const sessionId = context.sessionId();
-      const self: TalkSelf = {
-        agent: agentRef(env.scope, bindingKey, context.agent()),
-        sessionId,
-        name: currentName(sessionId),
-        cwd: context.cwd(),
-        registration: delivery.registration,
-        pending: delivery.pending,
-        queuedCount: delivery.queuedCount,
-      };
+      const self = toolSelf(context);
       // A row that the sweep released while the extension was suspended comes back.
       talk.asks.noteAgent(self.agent, listed);
       const outcome = await Effect.runPromise(
         runTalkTool(
           {
-            transport: talk.transport,
+            transport: peers,
             asks: talk.asks,
             self,
             clock: env.clock,
@@ -1054,6 +1144,92 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       );
       if (!outcome.ok) throw new Error(outcome.text);
       return { content: [{ type: "text", text: outcome.text }], details: outcome.details };
+    },
+  });
+
+  /** The listing, the resolver, and the pair send of one flow, bound to its context (#251 G3). */
+  const flowServices = (context: SessionContext): FlowServices => {
+    const toolContext = (): ToolContext => ({
+      transport: peers,
+      asks: talk.asks,
+      self: toolSelf(context),
+      clock: env.clock,
+      signal: undefined,
+    });
+    return {
+      sessionId: () => context.sessionId(),
+      list: async () => {
+        const answer = await Effect.runPromise(
+          listSessions(toolContext()).pipe(
+            Effect.match({
+              onFailure: (error): ListingAnswer => ({ _tag: "Failed", text: error.message }),
+              onSuccess: (rows): ListingAnswer => ({ _tag: "Listed", rows }),
+            }),
+          ),
+        );
+        // The probed rows replace the raw listing that `peers` kept: they leave out ended entries.
+        if (answer._tag === "Listed") listedNames = answer.rows.flatMap((row) => row.name ?? []);
+        return answer;
+      },
+      resolve: (target) =>
+        Effect.runPromise(
+          resolveTarget(toolContext(), { _tag: "To", to: target }).pipe(
+            Effect.match({
+              onFailure: (error): TargetAnswer => ({ _tag: "Failed", text: error.message }),
+              onSuccess: (resolved): TargetAnswer => ({
+                _tag: "Resolved",
+                destination: { ...resolved.target, name: resolved.name, cwd: resolved.cwd },
+              }),
+            }),
+          ),
+        ),
+      send: (pair, text) =>
+        Effect.runPromise(
+          sendToPair(toolContext(), pair, { text, attachments: [], noWake: false }).pipe(
+            Effect.match({
+              onFailure: (error): SendAnswer => ({ ok: false, text: error.message }),
+              onSuccess: (outcome): SendAnswer => ({ ok: true, text: outcome.text }),
+            }),
+          ),
+        ),
+    };
+  };
+
+  /** G1: a flow in a TUI session; in `rpc`, `print`, and `json`, the one notice. */
+  const startFlow = (ctx: unknown, command: TalkCommand): Promise<void> => {
+    try {
+      if (readContext(ctx, ["mode"]).mode() !== "tui") {
+        notifyUser(ctx, VIEWS_NEED_TUI, env.writeError);
+        return Promise.resolve();
+      }
+      const ui = flowUi(ctx);
+      if (ui === undefined) {
+        notifyUser(ctx, NO_FLOW_UI, env.writeError);
+        return Promise.resolve();
+      }
+      return flows.run(ui, flowServices(readContext(ctx, TOOL_NEEDS)), command);
+    } catch (error) {
+      notifyUser(ctx, talkErrorText(error), env.writeError);
+      return Promise.resolve();
+    }
+  };
+
+  api.registerCommand(TALK_COMMAND, {
+    description: TALK_COMMAND_DESCRIPTION,
+    getArgumentCompletions: (prefix: unknown) =>
+      talkCompletions(Predicate.isString(prefix) ? prefix : "", listedNames),
+    // G3: omp awaits a command handler with no deadline, so the command awaits its flow.
+    handler: async (args: unknown, ctx: unknown) => {
+      await startFlow(ctx, parseTalkArgs(Predicate.isString(args) ? args : ""));
+    },
+  });
+  api.registerShortcut(TALK_SHORTCUT, {
+    description: TALK_SHORTCUT_DESCRIPTION,
+    // G3: no source states the deadline of a shortcut handler, so it starts the flow and returns.
+    handler: (ctx: unknown) => {
+      startFlow(ctx, { _tag: "List" }).catch((error: unknown) => {
+        notifyUser(ctx, talkErrorText(error), env.writeError);
+      });
     },
   });
 };

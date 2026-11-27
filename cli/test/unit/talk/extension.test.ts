@@ -44,6 +44,7 @@ import { DIAL_SLOTS } from "../../../talk/transport/client";
 import { socketFileName } from "../../../talk/transport/endpoint";
 import { entryFileName } from "../../../talk/transport/registry";
 import { PING_KIND, type Target } from "../../../talk/transport/request";
+import { VIEWS_NEED_TUI } from "../../../talk/ui/command";
 import type { HostModuleLoader } from "../../../talk/ui/host";
 
 // The extension factory of #250 Step 4: capability probe (E11), process
@@ -334,17 +335,46 @@ const fakeType = {
   Optional: builder("Optional"),
 };
 
+/** One node that the fake `jsx` built: its kind and its props, as given. */
+interface FakeNode {
+  readonly kind: string;
+  readonly props: Readonly<Record<string, unknown>>;
+}
+
+const isFakeNode = (value: unknown): value is FakeNode =>
+  Predicate.hasProperty(value, "kind") &&
+  Predicate.isString(value.kind) &&
+  Predicate.hasProperty(value, "props") &&
+  Predicate.isObject(value.props);
+
+/** A signal without reactivity: tests read each accessor again after each step. */
+const fakeSignal = (initial: unknown): unknown => {
+  let value = initial;
+  return Object.assign(() => value, {
+    set: (next: unknown) => {
+      value = next;
+    },
+    update: (fn: (current: unknown) => unknown) => {
+      value = fn(value);
+    },
+    peek: () => value,
+  });
+};
+
 /** The `@oh-my-pi/pi-tui` exports that the capability probe checks (#251 G7), as stand-ins. */
 const fakeTuiModule = (): Record<string, unknown> => ({
-  jsx: (kind: unknown, props: unknown) => ({ kind, props }),
-  signal: (value: unknown) => () => value,
-  isUiNode: () => false,
+  jsx: (kind: unknown, props: Readonly<Record<string, unknown>>): FakeNode => ({
+    kind: String(kind),
+    props,
+  }),
+  signal: fakeSignal,
+  isUiNode: isFakeNode,
 });
 
 /** The `@oh-my-pi/pi-tui/text/width` exports that the capability probe checks, as stand-ins. */
 const fakeWidthModule = (): Record<string, unknown> => ({
   visibleWidth: (text: string) => text.length,
-  truncate: (text: string) => text,
+  truncate: (text: string, width: number) => text.slice(0, width),
   wrap: (text: string) => [text],
 });
 
@@ -360,6 +390,33 @@ interface ToolCall {
   readonly ok: boolean;
   readonly text: string;
 }
+
+/** One `ctx.ui.custom` view of the fake TUI. */
+interface UiView {
+  readonly node: FakeNode;
+  readonly options: unknown;
+  readonly closed: () => boolean;
+}
+
+interface CommandOptions {
+  readonly description: string;
+  readonly getArgumentCompletions: (prefix: string) => unknown;
+  readonly handler: (args: string, ctx: unknown) => Promise<void>;
+}
+
+interface ShortcutOptions {
+  readonly description: string;
+  readonly handler: (ctx: unknown) => unknown;
+}
+
+const isCommandOptions = (value: unknown): value is CommandOptions =>
+  Predicate.hasProperty(value, "handler") &&
+  Predicate.isFunction(value.handler) &&
+  Predicate.hasProperty(value, "getArgumentCompletions") &&
+  Predicate.isFunction(value.getArgumentCompletions);
+
+const isShortcutOptions = (value: unknown): value is ShortcutOptions =>
+  Predicate.hasProperty(value, "handler") && Predicate.isFunction(value.handler);
 
 /**
  * One omp session that a factory binding serves. An append lands two
@@ -389,6 +446,16 @@ class FakeSession {
   readonly sent: Array<{ readonly message: TalkMessage; readonly options: SendOptions }> = [];
   /** The commands, shortcuts, and message renderers that the binding registered. */
   readonly uiRegistrations: Array<string> = [];
+  readonly commands = new Map<string, CommandOptions>();
+  readonly shortcuts = new Map<string, ShortcutOptions>();
+  /** What `pi.getShortcutConflict` answers. */
+  shortcutConflict: unknown = undefined;
+  /** The space that `ui.size()` of a view factory reports. */
+  size = { columns: 120, rows: 40 };
+  /** Each `ctx.ui.custom` view, in order. */
+  readonly views: Array<UiView> = [];
+  /** Each `ctx.ui` call by method name. */
+  readonly uiCalls: Array<string> = [];
   /** The managed timers of the binding: each handle maps to its stop function. */
   readonly timers = new Map<object, () => void>();
   registerCalls = 0;
@@ -422,13 +489,17 @@ class FakeSession {
       },
       getAllTools: () => this.rows(),
       getSessionName: () => this.name,
-      registerCommand: (name: string) => {
+      registerCommand: (name: string, options: unknown) => {
         this.uiRegistrations.push(`command ${name}`);
+        if (!isCommandOptions(options)) throw new Error("not command options");
+        this.commands.set(name, options);
       },
-      registerShortcut: (key: string) => {
+      registerShortcut: (key: string, options: unknown) => {
         this.uiRegistrations.push(`shortcut ${key}`);
+        if (!isShortcutOptions(options)) throw new Error("not shortcut options");
+        this.shortcuts.set(key, options);
       },
-      getShortcutConflict: () => undefined,
+      getShortcutConflict: () => this.shortcutConflict,
       registerMessageRenderer: (customType: string) => {
         this.uiRegistrations.push(`renderer ${customType}`);
       },
@@ -448,7 +519,29 @@ class FakeSession {
       hasPendingMessages: () => this.pendingMessages,
       ui: {
         notify: (text: string) => {
+          this.uiCalls.push("notify");
           this.notices.push(text);
+        },
+        custom: (
+          factory: (
+            ui: unknown,
+            theme: unknown,
+            keys: unknown,
+            done: (value: unknown) => void,
+          ) => unknown,
+          options: unknown,
+        ): Promise<unknown> => {
+          this.uiCalls.push("custom");
+          const { promise, resolve } = Promise.withResolvers<unknown>();
+          let closed = false;
+          const node = factory({ size: () => this.size }, {}, {}, (value) => {
+            if (closed) throw new Error("done called twice");
+            closed = true;
+            resolve(value);
+          });
+          if (!isFakeNode(node)) throw new Error("the factory gave no node");
+          this.views.push({ node, options, closed: () => closed });
+          return promise;
         },
       },
       setInterval: (callback: () => void, delayMs: number) => {
@@ -532,6 +625,27 @@ class FakeSession {
         ? [entry.content]
         : [],
     );
+  }
+
+  /** Runs `/talk <args>`, as omp does: the promise ends with the flow. */
+  command(args: string): Promise<void> {
+    const talk = this.commands.get("talk");
+    if (talk === undefined) throw new Error("no talk command");
+    return talk.handler(args, this.ctx);
+  }
+
+  /** Presses `alt+t` outside a view: omp calls the shortcut handler. */
+  shortcut(): unknown {
+    const talk = this.shortcuts.get("alt+t");
+    if (talk === undefined) throw new Error("no alt+t shortcut");
+    return talk.handler(this.ctx);
+  }
+
+  /** The open view; it must be the last one. */
+  get top(): UiView {
+    const view = this.views.at(-1);
+    if (view === undefined || view.closed()) throw new Error("no open view");
+    return view;
   }
 }
 
@@ -2079,5 +2193,308 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
     } finally {
       await runtime.dispose();
     }
+  });
+});
+
+// ── The /talk command, the shortcut, and the views (#251 G1 to G4) ──
+
+/** A prop as the host reads it: an accessor gives its current value. */
+const nodeProp = (node: FakeNode, name: string): unknown => {
+  const value = node.props[name];
+  return Predicate.isFunction(value) ? Reflect.apply(value, undefined, []) : value;
+};
+
+/** Calls the handler `name` of a node, as the host does. */
+const fireNode = (node: FakeNode, name: string, ...args: ReadonlyArray<unknown>): unknown => {
+  const handler = node.props[name];
+  if (!Predicate.isFunction(handler)) throw new Error(`no ${name} on ${node.kind}`);
+  return Reflect.apply(handler, undefined, args);
+};
+
+const pressKey = (node: FakeNode, id: string): unknown =>
+  fireNode(node, "onKey", { id, kind: "press", raw: id });
+
+/** The id and the label of each picker item. */
+const pickerItems = (
+  node: FakeNode,
+): ReadonlyArray<{ readonly id: string; readonly label: string }> => {
+  const items = nodeProp(node, "items");
+  if (!Array.isArray(items)) throw new Error("picker without items");
+  return items.map((item: unknown) => {
+    if (
+      !Predicate.hasProperty(item, "id") ||
+      !Predicate.isString(item.id) ||
+      !Predicate.hasProperty(item, "label") ||
+      !Predicate.isString(item.label)
+    )
+      throw new Error("not a picker item");
+    return { id: item.id, label: item.label };
+  });
+};
+
+/** The instance id and the code of the first line of a confirm view. */
+const confirmCode = (node: FakeNode): { readonly instanceId: string; readonly code: string } => {
+  const children = nodeProp(node, "children");
+  const first: unknown = Array.isArray(children) ? children[0] : undefined;
+  const line = isFakeNode(first) ? nodeProp(first, "text") : undefined;
+  const match = /^Send to ([0-9a-f]{16}): type ([a-z]{2})$/u.exec(
+    Predicate.isString(line) ? line : "",
+  );
+  if (match === null) throw new Error(`no confirm line: ${String(line)}`);
+  return { instanceId: match[1] ?? "", code: match[2] ?? "" };
+};
+
+/** Lets microtasks and zero-delay timers run until `ready` holds. */
+const until = async (ready: () => boolean): Promise<void> => {
+  for (let round = 0; round < 50 && !ready(); round += 1) await settle();
+  expect(ready()).toBe(true);
+};
+
+/** Starts `/talk` in `session`, opens compose for `instanceId` from the list, and types `text`. */
+const listToConfirm = async (
+  session: FakeSession,
+  instanceId: string,
+  text: string,
+): Promise<{ readonly flow: Promise<void>; readonly confirm: FakeNode }> => {
+  const flow = session.command("");
+  const before = session.views.length;
+  await until(() => session.views.length === before + 1);
+  const list = session.top.node;
+  const item = pickerItems(list).find((candidate) => candidate.label.startsWith(instanceId));
+  if (item === undefined) throw new Error(`no item of ${instanceId}`);
+  fireNode(list, "onActivate", item.id);
+  await until(() => session.views.length === before + 2);
+  const compose = session.top.node;
+  fireNode(compose, "onEdit", { from: 0, to: 0, text, cursor: text.length, len: 0 });
+  pressKey(compose, "enter");
+  await until(() => session.views.length === before + 3);
+  return { flow, confirm: session.top.node };
+};
+
+const typeCode = (node: FakeNode, code: string): void => {
+  for (const letter of code) pressKey(node, letter);
+};
+
+describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
+  const pair = async (): Promise<{ readonly alpha: FakeSession; readonly beta: FakeSession }> => {
+    const bind = factory();
+    const beta = await start(bind, "s-beta", (fake) => {
+      fake.name = "beta";
+    });
+    const alpha = await start(bind, "s-alpha", (fake) => {
+      fake.name = "alpha";
+      fake.hasUI = true;
+    });
+    return { alpha, beta };
+  };
+
+  it("registers the /talk command with completion and the alt+t shortcut", async () => {
+    const session = await start(factory(), "s-1");
+    expect(session.uiRegistrations).toEqual(["renderer talk", "command talk", "shortcut alt+t"]);
+    expect(session.commands.get("talk")?.description).toContain("/talk");
+    expect(session.shortcuts.get("alt+t")?.description).not.toBe("");
+  });
+
+  it("sends a message from the list through compose and the code to the exact pair, and shows the result", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const { flow, confirm } = await listToConfirm(alpha, betaId, "hello beta");
+    expect(alpha.views.map((view) => view.options)).toEqual([
+      { overlay: true, fullscreen: true },
+      undefined,
+      { overlay: true, fullscreen: true },
+    ]);
+    expect(nodeProp(alpha.views[0]?.node ?? confirm, "size")).toBe("screen");
+    expect(beta.talkTexts()).toEqual([]);
+    const { instanceId, code } = confirmCode(confirm);
+    expect(instanceId).toBe(betaId);
+    typeCode(confirm, code);
+    await until(() => alpha.notices.length === 1);
+    await flow;
+    await until(() => beta.talkTexts().length === 1);
+    expect(beta.talkTexts()[0]).toContain("hello beta");
+    expect(alpha.notices[0]).toContain("Delivered");
+    expect(alpha.notices[0]).toContain(`Instance: ${betaId}`);
+    expect(alpha.uiCalls).toEqual(["custom", "custom", "custom", "notify"]);
+  });
+
+  it("opens compose for /talk <target> after the target resolves by name, and reports a target that does not resolve", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const flow = alpha.command("  beta  ");
+    await until(() => alpha.views.length === 1);
+    const compose = alpha.top.node;
+    expect(compose.kind).toBe("input");
+    fireNode(compose, "onEdit", { from: 0, to: 0, text: "by name", cursor: 7, len: 0 });
+    pressKey(compose, "enter");
+    await until(() => alpha.views.length === 2);
+    const confirm = alpha.top.node;
+    expect(confirmCode(confirm).instanceId).toBe(betaId);
+    typeCode(confirm, confirmCode(confirm).code);
+    await until(() => alpha.notices.length === 1);
+    await flow;
+    await until(() => beta.talkTexts().length === 1);
+    await alpha.command("nobody");
+    expect(alpha.views).toHaveLength(2);
+    expect(alpha.notices[1]).toContain("not-found");
+  });
+
+  it("reads not-live for a peer that ended while the view was open, and sends nothing to a same-name replacement", async () => {
+    const bind = factory();
+    const beta = await start(bind, "s-beta", (fake) => {
+      fake.name = "beta";
+    });
+    const alpha = await start(bind, "s-alpha", (fake) => {
+      fake.name = "alpha";
+      fake.hasUI = true;
+    });
+    const betaId = network.only("s-beta").instanceId;
+    const flow = alpha.command("");
+    await until(() => alpha.views.length === 1);
+    const list = alpha.top.node;
+    expect(pickerItems(list).some((item) => item.label.startsWith(betaId))).toBe(true);
+    await beta.emit("session_shutdown");
+    const replacement = await start(bind, "s-beta-2", (fake) => {
+      fake.name = "beta";
+    });
+    const item = pickerItems(list).find((candidate) => candidate.label.startsWith(betaId));
+    fireNode(list, "onActivate", item?.id);
+    await until(() => alpha.views.length === 2);
+    const compose = alpha.top.node;
+    fireNode(compose, "onEdit", { from: 0, to: 0, text: "late", cursor: 4, len: 0 });
+    pressKey(compose, "enter");
+    await until(() => alpha.views.length === 3);
+    const confirm = alpha.top.node;
+    typeCode(confirm, confirmCode(confirm).code);
+    await until(() => alpha.notices.length === 1);
+    await flow;
+    expect(alpha.notices[0]).toContain("not-live");
+    expect(alpha.notices[0]).toContain(betaId);
+    await settle();
+    expect(replacement.talkTexts()).toEqual([]);
+    expect(beta.talkTexts()).toEqual([]);
+  });
+
+  it.each([
+    ["a second flow", (session: FakeSession) => session.shortcut()],
+    [
+      "session_before_switch",
+      (session: FakeSession) => session.emit("session_before_switch", { reason: "new" }),
+    ],
+    ["session_before_branch", (session: FakeSession) => session.emit("session_before_branch")],
+    ["session_before_tree", (session: FakeSession) => session.emit("session_before_tree")],
+    ["session_clear", (session: FakeSession) => session.emit("session_clear")],
+    ["session_shutdown", (session: FakeSession) => session.emit("session_shutdown")],
+  ] as const)("closes the open view on %s, and the old flow sends nothing", async (_name, end) => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const { flow, confirm } = await listToConfirm(alpha, betaId, "never");
+    const confirmView = alpha.views.at(-1);
+    const { code } = confirmCode(confirm);
+    await end(alpha);
+    await until(() => confirmView?.closed() === true);
+    await flow;
+    typeCode(confirm, code);
+    await settle();
+    expect(beta.talkTexts()).toEqual([]);
+    expect(alpha.notices).toEqual([]);
+  });
+
+  it("closes the open view when the repair timer sees another session id", async () => {
+    const { alpha } = await pair();
+    const flow = alpha.command("");
+    await until(() => alpha.views.length === 1);
+    alpha.reset("s-alpha-2");
+    await vi.advanceTimersByTimeAsync(REPAIR_INTERVAL_MS);
+    await until(() => alpha.views[0]?.closed() === true);
+    await flow;
+  });
+
+  it("starts the list from the shortcut handler and returns before the flow ends", async () => {
+    const { alpha } = await pair();
+    expect(alpha.shortcut()).toBeUndefined();
+    await until(() => alpha.views.length === 1);
+    const list = alpha.top;
+    expect(list.node.kind).toBe("picker");
+    expect(list.options).toEqual({ overlay: true, fullscreen: true });
+    expect(pressKey(list.node, "alt+t")).toBe(true);
+    expect(list.closed()).toBe(true);
+  });
+
+  it.each(["rpc", "print", "json"] as const)(
+    "shows one notice for /talk and alt+t in %s mode and opens no view",
+    async (mode) => {
+      const session = await start(factory(), "s-1", (fake) => {
+        fake.mode = mode;
+        fake.hasUI = true;
+      });
+      await session.command("");
+      session.shortcut();
+      await settle();
+      expect(session.notices).toEqual([VIEWS_NEED_TUI, VIEWS_NEED_TUI]);
+      expect(session.uiCalls).toEqual(["notify", "notify"]);
+    },
+  );
+
+  it("warns once per binding at session_start when another key holds alt+t", async () => {
+    const session = await start(factory(), "s-1", (fake) => {
+      fake.hasUI = true;
+      fake.shortcutConflict = { kind: "keybinding", keybindings: ["app.tree"] };
+    });
+    expect(session.notices).toHaveLength(1);
+    expect(session.notices[0]).toContain("alt+t");
+    expect(session.notices[0]).toContain("keybinding");
+    expect(session.notices[0]).toContain("/talk still works");
+    await session.emit("session_start");
+    expect(session.notices).toHaveLength(1);
+    const free = await start(factory(), "s-2", (fake) => {
+      fake.hasUI = true;
+    });
+    expect(free.notices).toEqual([]);
+  });
+
+  it("completes from the names of the last listing snapshot", async () => {
+    const { alpha } = await pair();
+    const complete = (prefix: string): unknown =>
+      alpha.commands.get("talk")?.getArgumentCompletions(prefix);
+    expect(complete("")).toEqual([
+      { value: "handover", label: "handover", description: "hand over the work" },
+    ]);
+    const flow = alpha.command("");
+    await until(() => alpha.views.length === 1);
+    pressKey(alpha.top.node, "escape");
+    await flow;
+    expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
+    expect(complete("handover a")).toEqual([
+      { value: "handover alpha", label: "alpha", description: "hand over to this session" },
+    ]);
+  });
+  it("refreshes the snapshot from the list action of the talk tool", async () => {
+    const { alpha } = await pair();
+    const complete = (prefix: string): unknown =>
+      alpha.commands.get("talk")?.getArgumentCompletions(prefix);
+    expect(complete("be")).toBeNull();
+    const listed = await alpha.tool({ action: "list" });
+    expect(listed.ok).toBe(true);
+    expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
+  });
+
+  it("refreshes the snapshot from the listing of a /talk <target> resolution, also when it fails", async () => {
+    const { alpha } = await pair();
+    const complete = (prefix: string): unknown =>
+      alpha.commands.get("talk")?.getArgumentCompletions(prefix);
+    expect(complete("be")).toBeNull();
+    await alpha.command("nobody");
+    expect(alpha.views).toEqual([]);
+    expect(complete("be")).toEqual([{ value: "beta", label: "beta", description: "talk session" }]);
+  });
+
+  it("shows a flow error with exactly one talk: prefix", async () => {
+    const { alpha } = await pair();
+    Reflect.deleteProperty(alpha.manager, "getCwd");
+    await alpha.command("");
+    expect(alpha.notices).toHaveLength(1);
+    expect(alpha.notices[0]).toMatch(/^talk: (?!talk:)/u);
+    expect(alpha.notices[0]).toContain("ctx.sessionManager.getCwd");
   });
 });
