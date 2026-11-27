@@ -100,11 +100,17 @@ export const MATRIX: Array<MutationMatrixCase> = [
     seed: piIntercomState(".pi/agent"),
     piIntercomNotice: piIntercomNotice("<HOME>/.omp/plugins", "unknown version"),
   },
-  // A named omp profile: sync and omp take the profile from OMP_PROFILE.
+  // A named omp profile: sync and omp take the profile from OMP_PROFILE. The
+  // default store lists another version, so a sync whose omp child loses the
+  // profile prints a notice that does not match.
   {
     fixture: "home-fresh",
     cmd: ["sync"],
-    stubs: { omp: ompStubBody([PI_INTERCOM_REGISTRY_ROW]) },
+    stubs: {
+      omp: ompStubBody([{ name: "pi-intercom", version: "0.18.0" }], {
+        work: [PI_INTERCOM_REGISTRY_ROW],
+      }),
+    },
     variant: "pi-intercom-profile",
     env: { OMP_PROFILE: "work" },
     seed: piIntercomState(".omp/profiles/work/agent"),

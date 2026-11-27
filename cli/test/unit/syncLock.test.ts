@@ -1,9 +1,9 @@
 /**
- * Spec for the sync lock (plans #161 and #164). `engineSync` takes
- * `<kitCacheDir(home)>/sync-lock.db` through `kitLock.ts acquireKitLock` before
- * `parseArgs`, unless its arguments hold `--dry-run`, `-h`, or `--help`, or
- * the run is a dry run through the `DRY_RUN` env global (`ctx.dryRun`).
- * `modes.ts modeModel` takes the same lock first, with the same exceptions.
+ * Spec for the sync lock (plans #161 and #164). `engineSync` parses its
+ * arguments first: an unknown argument exits 2, and `-h` or `--help` exits 0,
+ * before any lock. It then takes `<kitCacheDir(home)>/sync-lock.db` through
+ * `kitLock.ts acquireKitLock`, unless the run is a dry run (`--dry-run`, or the
+ * `DRY_RUN` env global, which sets `ctx.dryRun`).
  * When another holder keeps the lock past the wait bound, the run prints
  * `another docks-kit sync holds <path>; run sync again after it ends` and
  * returns exit code 1.
@@ -307,23 +307,23 @@ describe("sync under the sync lock", () => {
     });
   });
 
-  it("releases the lock when the run stops with an ExitError", async () => {
+  it("rejects an unknown argument with exit 2 before it takes the lock", async () => {
     await withHome(async (home) => {
       const failed: Array<string> = [];
 
       expect(await runEngineNative(["sync", "--bogus"], recordingServices(failed))).toBe(2);
 
       expect(failed).toContain(UNKNOWN_ARG_ERROR);
-      expect(await probe(home)).toBe("acquired");
+      expect(existsSync(syncLock(home))).toBe(false);
 
-      // The same run takes the lock before the check that throws the ExitError.
+      // A held lock does not delay the error: the run parses its arguments first.
       await holdingLock(home, async () => {
         const blocked: Array<string> = [];
 
-        expect(await runEngineNative(["sync", "--bogus"], recordingServices(blocked))).toBe(1);
+        expect(await runEngineNative(["sync", "--bogus"], recordingServices(blocked))).toBe(2);
 
-        expect(blocked).toContain(heldLine(home));
-        expect(blocked).not.toContain(UNKNOWN_ARG_ERROR);
+        expect(blocked).toContain(UNKNOWN_ARG_ERROR);
+        expect(blocked).not.toContain(heldLine(home));
       });
     });
   });

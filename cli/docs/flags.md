@@ -63,12 +63,12 @@ runs never write the same files at once.
   omp folder. Otherwise they hold the sync lock and the omp agent folder lock
   while they rewrite `config.yml`. The wait and the held line are those of a
   sync.
-- A run with `--dry-run`, `-h`, or `--help` takes no lock. A dry run through
-  the `DRY_RUN=1` env global of the private `native-raw` engine channel takes
-  no lock either.
+- A sync reads its arguments before it takes a lock. An invalid argument
+  exits 2 and `-h` or `--help` prints the help, without a wait for a held
+  lock. A run with `--dry-run` takes no lock. A dry run through the
+  `DRY_RUN=1` env global of the private `native-raw` engine channel takes no
+  lock either.
 - The lock goes when the run ends, also when the process is killed.
-- A held lock also delays the error of an invalid argument until the wait
-  ends.
 
 ## `omp` session flags
 

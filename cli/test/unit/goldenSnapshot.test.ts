@@ -55,10 +55,31 @@ describe("seededTreeProblems", () => {
       rmSync(join(folder, "notes", "marker"));
 
       expect(seededTreeProblems(root, SEED)).toEqual([
-        "  seeded folder .pi/agent/intercom entries differ: expected [config.json, notes, notes/marker] actual [.docks-kit-sync-lock.db, config.json, notes]",
+        '  seeded folder .pi/agent/intercom entries differ: expected ["config.json","notes","notes/marker"] actual [".docks-kit-sync-lock.db","config.json","notes"]',
+        "  seeded file .pi/agent/intercom/notes/marker is missing",
       ]);
     });
   });
+
+  it.skipIf(process.platform === "win32")(
+    "reports each missing file when one name with a line break joins like two expected names",
+    () => {
+      withSnapshotRoot((root) => {
+        const seed: SeededTree = { root: "seeded", files: { a: "first\n", b: "second\n" } };
+        writeSeededTree(root, seed);
+        const folder = join(root, "seeded");
+        rmSync(join(folder, "a"));
+        rmSync(join(folder, "b"));
+        writeFileSync(join(folder, "a\nb"), "joined\n");
+
+        expect(seededTreeProblems(root, seed)).toEqual([
+          '  seeded folder seeded entries differ: expected ["a","b"] actual ["a\\nb"]',
+          "  seeded file seeded/a is missing",
+          "  seeded file seeded/b is missing",
+        ]);
+      });
+    },
+  );
 
   it("reports a seeded folder that the run removed", () => {
     withSnapshotRoot((root) => {

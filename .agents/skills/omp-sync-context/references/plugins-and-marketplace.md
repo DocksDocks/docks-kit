@@ -41,11 +41,15 @@ plugins already cached and registered", so the uninstalls run first.
 <constraint>
 `ompPlugins.ts syncPlugins` probes omp before any spawn. When omp is missing,
 it emits one `warnMissing` message and returns, so a host that lacks omp
-records no false failure. When git is missing, it emits one `warnMissing`
-message, and a real run reads only the inventory, prints the pi-intercom
-notice, and returns before any plugin change. omp can copy its legacy
-marketplace registry into the active data root during that read, as it does
-on any plugin command.
+records no false failure. Git gates only the omp plugin commands: the
+uninstalls, the marketplace removal, and the kit plugin link. When git is
+missing, it emits one `warnMissing` message, and a real run reads the
+inventory, prints the pi-intercom notice, returns the kit plugin count that
+the inventory lists, and runs no other omp command. `ompSync.ts` still
+deploys the kit plugin files through `syncKitPlugin`, so a kit plugin that omp
+already links loads them after a restart. omp can copy its legacy marketplace
+registry into the active data root during that read, as it does on any
+plugin command.
 Report a real non-zero omp exit through `failures.ts recordFailure` in
 `runPluginCommand`, with the manual command in the message.
 Keep `warn` for the project-scope rows and the unavailable inventory.
@@ -56,15 +60,22 @@ Verify the constraints:
 `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "removes the marketplace when only the legacy registry lists docks and no active registry exists"`,
 `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "removes no marketplace when the active registry exists without docks and the legacy registry lists it"`,
 `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "removes no marketplace after a failed uninstall"`,
-and `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "reads only the inventory and changes no plugin when git is unavailable"`.
+`bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "reads only the inventory and changes no plugin when git is unavailable"`,
+`bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "of the inventory without git, counts no plugin, and changes no plugin"`,
+and `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "counts the kit plugin that the inventory lists when git is unavailable"`.
 
 ## Plugin Inventory Contract
 
 Call `omp plugin list --json` once for inventory before the plugin operations.
 Expect top-level `marketplace` and `npm` arrays.
-When the inventory shape is invalid or the read fails, warn, skip the
-retirement, and give the kit plugin the full refresh path.
-The next sync tries the retirement again.
+When the inventory shape is invalid or the read fails, warn
+`omp plugin inventory unavailable — …` without a ledger row, skip the
+pi-intercom check and the retirement, and return no plugin count, so the
+summary shows `omp plugins: unknown (plugin inventory unavailable)`. With
+git, the pass then runs `omp plugin link` for the kit plugin, because no
+inventory row shows that the link is current; a successful link counts one
+plugin. Without git, the warning says that sync runs no omp plugin change,
+and no link runs. The next sync tries the retirement again.
 
 Read each marketplace row from its composite `id` field.
 The value already has the `<plugin>@<marketplace>` form.

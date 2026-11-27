@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { isObject, parseJson } from "../src/engine-native/jq";
+import { isObject, parseJson, type Json } from "../src/engine-native/jq";
 import { hostOs } from "../src/engine-native/os";
 import { banner, labelSelected, parseArgs } from "./lib/goldenCli";
 import {
@@ -133,7 +133,15 @@ function piIntercomProblems(
   if (removals.length > 0) problems.push(`  output names a removal: ${removals.join(" | ")}`);
 
   const plugin = join(home, ".docks-kit", "omp-plugin");
-  const manifest = parseJson(readFileSync(join(plugin, "package.json"), "utf8"));
+  // A manifest that cannot be read is a problem of this case: the matrix goes on.
+  let manifest: Json | undefined;
+  try {
+    manifest = parseJson(readFileSync(join(plugin, "package.json"), "utf8"));
+  } catch (error) {
+    problems.push(
+      `  the deployed kit plugin manifest cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const omp = manifest !== undefined && isObject(manifest) ? manifest["omp"] : undefined;
   const extensions = omp !== undefined && isObject(omp) ? omp["extensions"] : undefined;
   if (!Array.isArray(extensions) || !extensions.includes("./extensions/talk.js")) {

@@ -280,15 +280,30 @@ async function retireMarketplacePlugins(
 }
 
 /**
- * Run the plugin pass. `paths` are the omp paths that the sync locked.
- *
- * Only the plugin changes need git. Without git, a real run reads the
- * inventory, prints the pi-intercom notice, and changes no plugin. omp itself
- * can copy its legacy marketplace registry into the active data root during
- * that read, as it does on any plugin command. A dry run and a run without
- * omp spawn no omp command and print no notice.
+ * The warning of an unavailable inventory when git is present. The pass then
+ * runs `omp plugin link` for the kit plugin, because no inventory row shows
+ * that the link is current.
  */
-export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
+const INVENTORY_UNAVAILABLE =
+  "omp plugin inventory unavailable — the pi-intercom check and the retirement of the docks marketplace plugins are skipped until the next sync; sync runs omp plugin link for the kit plugin";
+/** The warning of an unavailable inventory when git is missing. The pass then changes no plugin. */
+const INVENTORY_UNAVAILABLE_NO_GIT =
+  "omp plugin inventory unavailable — the pi-intercom check is skipped until the next sync; without git, sync runs no omp plugin change";
+
+/**
+ * Run the plugin pass. `paths` are the omp paths that the sync locked.
+ * Returns the number of installed kit plugins, or undefined when the pass
+ * could not read the inventory and linked no kit plugin.
+ *
+ * Only the omp plugin commands (uninstall, marketplace removal, link) need
+ * git. Without git, a real run reads the inventory, warns when it is
+ * unavailable, prints the pi-intercom notice, counts the kit plugin that the
+ * inventory lists, and runs no plugin command. omp itself can copy its legacy
+ * marketplace registry into the active data root during that read, as it
+ * does on any plugin command. A dry run and a run without omp spawn no omp
+ * command and print no notice.
+ */
+export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number | undefined> {
   const { change, clearProgress, echo, progress, verbose, warn } = ctx.services.logger;
 
   if (!ctx.dryRun) removeUpgradeLog(ctx);
@@ -299,7 +314,7 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
       ctx.services.logger,
       "deployed omp config only — plugin pass skipped; re-run sync after installing",
     );
-    return 0;
+    return undefined;
   }
   const gitMissing = ctx.services.deps.probe("git").state === "missing";
   if (gitMissing) {
@@ -311,7 +326,7 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
   }
 
   if (ctx.dryRun) {
-    if (gitMissing) return 0;
+    if (gitMissing) return undefined;
     // A dry run reads no inventory, so it previews the uninstall of each retired id.
     for (const pluginId of RETIRED_PLUGIN_IDS) {
       echo(`[dry-run] omp plugin uninstall --scope user ${pluginId}`);
@@ -323,29 +338,30 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
       echo(`[dry-run] omp plugin marketplace remove ${RETIRED_MARKETPLACE}`);
     }
     echo(`[dry-run] omp plugin link ${kitPluginDir(ctx.home)}`);
-    return 0;
+    return undefined;
   }
 
   progress("Checking installed omp plugins...");
   const installed = await installedPluginsFromCli(paths);
   clearProgress();
 
-  const piIntercom = installed?.npm.get(PI_INTERCOM);
-  if (piIntercom !== undefined) {
-    echo(piIntercomNotice(p(paths.dataRoot, "plugins"), piIntercom.version));
+  if (installed === undefined) {
+    warn(gitMissing ? INVENTORY_UNAVAILABLE_NO_GIT : INVENTORY_UNAVAILABLE);
+  } else {
+    const piIntercom = installed.npm.get(PI_INTERCOM);
+    if (piIntercom !== undefined) {
+      echo(piIntercomNotice(p(paths.dataRoot, "plugins"), piIntercom.version));
+    }
   }
-  if (gitMissing) return 0;
+  // The kit plugin count that the inventory shows: undefined when the inventory is unavailable.
+  let pluginsInstalled: number | undefined;
+  if (installed !== undefined) pluginsInstalled = installed.npm.has(KIT_PLUGIN_NAME) ? 1 : 0;
+  if (gitMissing) return pluginsInstalled;
 
   const operations: Array<PluginOperation> = [];
-  if (installed === undefined) {
-    warn(
-      "omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; the kit plugin takes the full refresh path",
-    );
-  } else {
+  if (installed !== undefined) {
     operations.push(...(await retireMarketplacePlugins(ctx, paths, installed)));
   }
-
-  let pluginsInstalled = installed?.npm.has(KIT_PLUGIN_NAME) === true ? 1 : 0;
 
   // The kit plugin is linked when omp's entry resolves to the kit directory.
   // A refresh never applies: the link always points at the current files.
@@ -356,7 +372,7 @@ export async function syncPlugins(ctx: Ctx, paths: OmpPaths): Promise<number> {
     verbose(`omp kit plugin ${KIT_PLUGIN_NAME} already linked`);
   } else if (await runPluginCommand(ctx, paths, KIT_PLUGIN_NAME, ["plugin", "link", kitDir])) {
     operations.push({ kind: "link", id: KIT_PLUGIN_NAME });
-    if (installed?.npm.has(KIT_PLUGIN_NAME) !== true) pluginsInstalled++;
+    pluginsInstalled = 1;
   }
 
   if (operations.length === 0) {

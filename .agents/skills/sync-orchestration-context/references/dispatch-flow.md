@@ -53,10 +53,11 @@ runEngineNative(argv, services?, options?)        index.ts
 `-- switch (argv[0])
     |-- toolchain -> modeToolchain(ctx, args)     modes.ts; no lock
     `-- sync/default -> engineSync(ctx, args)     syncDispatch.ts
-        |-- withSyncLock(ctx, args, ...)          ~/.cache/docks-kit/sync-lock.db; none for
-        |                                         --dry-run, -h, --help, or ctx.dryRun; held
+        |-- parseArgs(ctx, args)                  flags only, before any lock; any other
+        |                                         word: Unknown arg, exit 2; -h, --help: exit 0
+        |-- withSyncLock(ctx, ...)                ~/.cache/docks-kit/sync-lock.db; none when
+        |                                         ctx.dryRun (--dry-run or DRY_RUN); held
         |                                         past the wait bound: held line, returns 1
-        |-- parseArgs(ctx, args)                  flags only; any other word: Unknown arg, exit 2
         |-- ompWriteFolders(ctx)                  resolved once, before the locks; ompSync
         |                                         and its omp children use the result
         |-- withFolderLocks(ctx, folders, ...)    <folder>/.docks-kit-sync-lock.db of the

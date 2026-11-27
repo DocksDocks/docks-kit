@@ -32,7 +32,7 @@ metadata:
     - path: cli/src/engine-native/engineCtx.ts
       lines: "1-58"
     - path: cli/src/engine-native/syncDispatch.ts
-      lines: "1-224"
+      lines: "1-215"
     - path: cli/src/engine-native/kitLock.ts
       lines: "1-121"
     - path: cli/src/engine-native/syncConcurrency.ts
@@ -182,10 +182,11 @@ word or flag.
 `DOCKS_KIT_VERBOSE`; see `CtxOptions`) only when
 `options.envGlobals` is true. `runEngineNative` then switches on the first
 word. `toolchain` runs `modeToolchain`, and `sync` or any other word runs
-`syncDispatch.ts engineSync`. `engineSync` runs the steps below inside
-`withSyncLock` (see § Sync Lock):
+`syncDispatch.ts engineSync`. `engineSync` runs `parseArgs` first and the
+remaining steps inside `withSyncLock` (see § Sync Lock):
 
-1. `parseArgs` reads the flags. Dependency checks occur only at the
+1. `parseArgs` reads the flags, before any lock: an unknown argument exits 2
+   and `-h` or `--help` exits 0. Dependency checks occur only at the
    operation that consumes the tool; there is no global dependency preflight.
 2. `runSync` resolves the omp folders once (`ompSync.ts ompWriteFolders`). A
    writing sync takes their folder locks (see § Sync Lock), and
@@ -204,16 +205,18 @@ The omp pipeline reads SoT from the embedded payload.
 
 ### Sync Lock
 
-`syncDispatch.ts withSyncLock(ctx, args, body)` runs `body` under
+`syncDispatch.ts withSyncLock(ctx, body)` runs `body` under
 `~/.cache/docks-kit/sync-lock.db` (`scratch.ts syncLockPath`, a
 `kitLock.ts acquireKitLock` lock; `tidy-context` owns the lock module).
 
-- `engineSync` takes the lock before `parseArgs`. Sync never opens `kit.db`.
+- `engineSync` runs `parseArgs` before the lock. An unknown argument exits 2
+  and `-h` or `--help` exits 0 before any lock or write, also while another
+  sync holds the lock. Sync never opens `kit.db`.
 - `modes.ts modeToolchain` takes no lock.
-- No lock in a dry run: `args` holds `--dry-run`, `-h`, or `--help`
-  (`UNLOCKED_TOKENS`), or `ctx.dryRun` is true. `makeCtx` sets `ctx.dryRun`
-  from the `DRY_RUN=1` env global only when `options.envGlobals` is true, so a
-  public run with a stray `DRY_RUN` writes and takes the lock.
+- No lock in a dry run: `ctx.dryRun` is true, from `--dry-run` (`parseArgs`)
+  or from the `DRY_RUN=1` env global. `makeCtx` reads the env global only
+  when `options.envGlobals` is true, so a public run with a stray `DRY_RUN`
+  writes and takes the lock.
 - The wait bound is `SYNC_LOCK_WAIT_MS` (120 000 ms).
   `DOCKS_KIT_SYNC_LOCK_WAIT_MS` (a non-negative safe integer, in ms) overrides
   it; unset or empty means the default. Any other value prints
@@ -223,10 +226,10 @@ The omp pipeline reads SoT from the embedded payload.
 - Held past the bound: print
   `another docks-kit sync holds <path>; run sync again after it ends` and
   return 1, with no call to `body`.
-- The lock goes in `finally`, also after an `ExitError`. A signal needs no
+- The lock goes in `finally`, also when `body` throws. A signal needs no
   handler: the OS releases the lock when the process ends.
 
-(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 1 with the held line and leaves HOME unchanged"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no lock in a dry run"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "releases the lock when the run stops with an ExitError"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 2 when the lock wait is not a non-negative safe integer"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "DRY_RUN env global"`, and `bunx vitest run cli/test/unit/syncLock.test.ts -t "prints the help with -h and --help while another sync holds the lock"`)
+(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 1 with the held line and leaves HOME unchanged"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no lock in a dry run"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "rejects an unknown argument with exit 2 before it takes the lock"`, `bunx vitest run cli/test/unit/engine-di.test.ts -t "refuses the removed --skip-plugin-refresh"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "exits 2 when the lock wait is not a non-negative safe integer"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "DRY_RUN env global"`, and `bunx vitest run cli/test/unit/syncLock.test.ts -t "prints the help with -h and --help while another sync holds the lock"`)
 
 Folder locks: two homes can share an omp folder (`PI_CODING_AGENT_DIR`,
 `PI_CONFIG_DIR`, `XDG_DATA_HOME`, or a symlink). Their home locks differ, so

@@ -50,8 +50,15 @@ tries again. Otherwise:
 - A failed uninstall or removal goes to the failure ledger with the manual
   command, for example
   `omp plugin operation failed for docks@docks: <detail>; run manually: omp plugin uninstall --scope user docks@docks`.
-- When the inventory cannot be read, the sync warns
-  `omp plugin inventory unavailable — retirement of the docks marketplace plugins skipped until the next sync; the kit plugin takes the full refresh path`.
+- When the inventory cannot be read (omp exits non-zero or prints no valid
+  inventory), the sync warns
+  `omp plugin inventory unavailable — the pi-intercom check and the retirement of the docks marketplace plugins are skipped until the next sync; sync runs omp plugin link for the kit plugin`.
+  No inventory row shows that the kit plugin link is current, so the sync
+  runs `omp plugin link` for it. Without Git, the warning is
+  `omp plugin inventory unavailable — the pi-intercom check is skipped until the next sync; without git, sync runs no omp plugin change`,
+  and the sync runs no link. In both cases the summary shows
+  `omp plugins: unknown (plugin inventory unavailable)`, unless the link
+  succeeded.
 - The sync removes the folder `~/.cache/docks-kit/omp-plugin-upgrades/` of the
   retired plugin upgrade log when it exists.
 
@@ -67,10 +74,14 @@ command. Sync does not change the pi-intercom package, its old
 `intercom/config.json`, or its state folder. A dry run and a run without omp
 print no notice.
 
-Only the plugin changes need Git. Without Git, a real sync runs only
-`omp plugin list --json`, prints the notice when it applies, and changes no
-plugin. omp can copy its legacy marketplace registry into the active data root
-during that command, as it does on any plugin command.
+Only the omp plugin commands need Git: the uninstalls, the marketplace
+removal, and the kit plugin link. Without Git, a real sync still deploys the
+kit plugin files (`syncKitPlugin`), so a kit plugin that omp already links
+loads the new files after a restart. It runs `omp plugin list --json`, prints
+the notice when it applies, counts the kit plugin that the inventory lists in
+the summary, and runs no other omp plugin command. omp can copy its legacy
+marketplace registry into the active data root during that command, as it
+does on any plugin command.
 
 After a plugin operation, the sync prints one line that names each operation,
 for example

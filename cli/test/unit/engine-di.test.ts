@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runBounded, runEngineNative } from "../../src/engine-native";
+import { syncLockPath } from "../../src/engine-native/scratch";
 import { makeEngineServices } from "../../src/engine-native/services";
 
 describe("sync pipeline coordinator", () => {
@@ -141,7 +142,7 @@ describe("native CLI argument and output behavior", () => {
     });
   });
 
-  it("refuses the removed --skip-plugin-refresh with exit 2 before it writes an omp file", async () => {
+  it("refuses the removed --skip-plugin-refresh with exit 2 before it takes a lock or writes an omp file", async () => {
     await withIsolatedHome(async (home) => {
       const stderr: Array<string> = [];
       const services = makeEngineServices({
@@ -154,6 +155,7 @@ describe("native CLI argument and output behavior", () => {
       for (const folder of [".omp", ".pi", ".docks-kit"]) {
         expect(existsSync(join(home, folder)), folder).toBe(false);
       }
+      expect(existsSync(syncLockPath(home)), "sync lock").toBe(false);
     });
   });
 });

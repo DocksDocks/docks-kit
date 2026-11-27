@@ -109,9 +109,15 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
 - A mutation case of `goldenMutationCatalog.ts` can set `env` (extra
   environment of the run, such as `OMP_PROFILE`) and `seed` (files that it
   writes below HOME before the run). The driver then compares the sorted entry
-  list and the raw bytes of the seeded folder (`goldenSnapshot.ts
-  seededTreeProblems`) without the line-ending normalization of the snapshot,
-  so a rewrite or a new lock file in that folder fails the case.
+  list, name by name, and the raw bytes of each seeded file (`goldenSnapshot.ts
+  seededTreeProblems`) without the line-ending normalization of the snapshot.
+  A changed byte, a missing seeded file, or a new entry, such as a lock file,
+  fails the case. The check proves that the final names and bytes stayed the
+  same, not that no write happened: a rewrite with the same bytes passes.
+- `goldenResources.ts ompStubBody(npm, profiles)` answers `plugin list --json`
+  with the store that the environment of the omp child selects (`OMP_PROFILE`,
+  else `PI_PROFILE`), so a profile case gives the default store and the named
+  profile distinct rows, and a sync that drops the profile fails the case.
 
 ## JSON Helpers
 

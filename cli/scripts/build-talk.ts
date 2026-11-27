@@ -590,6 +590,28 @@ export async function checkTalk({
 
 const USAGE = `usage: ${BUILD_COMMAND} [--out <dir>] [--entry <file>] [--check]`;
 
+/** A POSIX shell argument that needs no quotes. */
+const POSIX_PLAIN = /^[\w./:@%+=,-]+$/;
+/** A PowerShell argument that needs no quotes. */
+const POWERSHELL_PLAIN = /^[\w./\\:+=-]+$/;
+/** The characters that PowerShell reads as a single quote; each one doubles inside a quoted string. */
+const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g;
+
+/**
+ * `argument` as one argument for the shell of `platform`: as it is when it
+ * holds only plain characters, else in single quotes. A POSIX shell ends the
+ * quotes around each `'`; PowerShell (the shell that the Windows rebuild
+ * command is for) doubles each single-quote character.
+ */
+export function quoteShellArgument(argument: string, platform: NodeJS.Platform): string {
+  if (platform === "win32") {
+    if (POWERSHELL_PLAIN.test(argument)) return argument;
+    return `'${argument.replace(POWERSHELL_QUOTES, "$&$&")}'`;
+  }
+  if (POSIX_PLAIN.test(argument)) return argument;
+  return `'${argument.replaceAll("'", String.raw`'\''`)}'`;
+}
+
 async function main(): Promise<void> {
   try {
     const { values } = parseArgs({
@@ -616,11 +638,14 @@ async function main(): Promise<void> {
     }
     const rebuild = [
       BUILD_COMMAND,
-      ...(values.entry === undefined ? [] : ["--entry", entry]),
-      ...(values.out === undefined ? [] : ["--out", outDir]),
+      ...(values.entry === undefined
+        ? []
+        : ["--entry", quoteShellArgument(entry, process.platform)]),
+      ...(values.out === undefined ? [] : ["--out", quoteShellArgument(outDir, process.platform)]),
     ].join(" ");
     const reason = state === "missing" ? "is missing" : "differs from a fresh build";
-    console.error(`[build-talk] stale: ${path} ${reason}; rebuild with: ${rebuild}`);
+    const shell = process.platform === "win32" ? " (PowerShell)" : "";
+    console.error(`[build-talk] stale: ${path} ${reason}; rebuild with${shell}: ${rebuild}`);
     process.exit(1);
   } catch (error) {
     const usage =

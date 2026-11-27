@@ -19,6 +19,7 @@ import {
   lexCode,
   loaderCallProblems,
   packageOfInput,
+  quoteShellArgument,
 } from "../../../scripts/build-talk";
 import { BUN_RUNTIME } from "../../lib/cliEntry";
 import { REPO_DIR } from "../../lib/goldenResources";
@@ -333,7 +334,12 @@ describe("talk build freshness check", () => {
     return { result, tmp };
   }
 
-  function expectStale(result: SpawnSyncReturns<string>, outDir: string, reason: string): void {
+  function expectStale(
+    result: SpawnSyncReturns<string>,
+    outDir: string,
+    reason: string,
+    printedOut: string = resolve(outDir),
+  ): void {
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
     const lines = result.stderr.trimEnd().split("\n");
@@ -341,7 +347,7 @@ describe("talk build freshness check", () => {
     expect(lines[0]).toContain(join(outDir, "talk.js"));
     expect(lines[0]).toContain(reason);
     expect(lines[0]).toContain(
-      `rebuild with: ${REBUILD} --entry ${FIXTURE_ENTRY} --out ${resolve(outDir)}`,
+      `rebuild with: ${REBUILD} --entry ${FIXTURE_ENTRY} --out ${printedOut}`,
     );
   }
 
@@ -375,6 +381,54 @@ describe("talk build freshness check", () => {
     expectStale(result, outDir, "is missing");
     expect(readdirSync(outDir)).toEqual([]);
     expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "quotes an output path with a space, so that a POSIX shell reads the rebuild command as the same arguments",
+    () => {
+      const outDir = tempDir("check with space");
+      const { result } = runCheck(outDir);
+      expectStale(result, outDir, "is missing", `'${resolve(outDir)}'`);
+      const rebuild = result.stderr.trimEnd().split("rebuild with: ")[1] ?? "";
+      // The shell prints each argument of the printed command on its own line.
+      const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
+        encoding: "utf8",
+      });
+      expect(parsed.status).toBe(0);
+      expect(parsed.stdout.trimEnd().split("\n")).toEqual([
+        "bun",
+        "cli/scripts/build-talk.ts",
+        "--entry",
+        FIXTURE_ENTRY,
+        "--out",
+        resolve(outDir),
+      ]);
+    },
+  );
+});
+
+describe("talk build shell quoting of the rebuild command", () => {
+  it.each([
+    ["a POSIX path of safe characters", "/tmp/talk-out_1/a.b+c=d:e@f%g,h", "linux", null],
+    ["a POSIX path with a space", "/tmp/build output", "linux", "'/tmp/build output'"],
+    ["a POSIX path with a single quote", "/tmp/it's", "darwin", String.raw`'/tmp/it'\''s'`],
+    ["a POSIX path with a backslash", String.raw`/tmp/a\b`, "linux", String.raw`'/tmp/a\b'`],
+    ["a Windows path of safe characters", String.raw`C:\talk\out-1\a.b`, "win32", null],
+    [
+      "a Windows path with a space",
+      String.raw`C:\build output`,
+      "win32",
+      String.raw`'C:\build output'`,
+    ],
+    [
+      "a Windows path with straight and typographic single quotes",
+      "C:\\it's \u2018a\u2019",
+      "win32",
+      "'C:\\it''s \u2018\u2018a\u2019\u2019'",
+    ],
+    ["a Windows path with a comma", String.raw`C:\a,b`, "win32", String.raw`'C:\a,b'`],
+  ] as const)("quotes %s for the shell of the host", (_name, argument, platform, quoted) => {
+    expect(quoteShellArgument(argument, platform)).toBe(quoted ?? argument);
   });
 });
 

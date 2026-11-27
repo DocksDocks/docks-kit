@@ -26,7 +26,8 @@ import { syncPlugins } from "./ompPlugins";
 import { syncOmpModelRemovals, syncOmpRemovals } from "./ompRemovals";
 
 export interface OmpState {
-  readonly pluginsInstalled: number;
+  /** The installed kit plugins, or undefined when the plugin pass could not read the inventory. */
+  readonly pluginsInstalled: number | undefined;
   /** The omp agent folder that the sync wrote. */
   readonly agentDir: string;
 }
@@ -80,7 +81,8 @@ export async function ompSync(ctx: Ctx, folders: OmpWriteFolders): Promise<OmpSt
   const modelsBackedUp = syncMergedYaml(ctx, "SoT/.omp/models.yml", modelsFile, mergeOmpModels);
   syncOmpModelRemovals(ctx, modelsFile, modelsBackedUp);
 
-  // The plugin pass links this directory, so the files must exist first.
+  // The plugin pass links this directory, so the files must exist first. The
+  // files deploy also without git: git gates only the omp plugin commands.
   syncKitPlugin(ctx);
 
   const pluginsInstalled = await syncPlugins(ctx, paths);
@@ -109,7 +111,12 @@ export async function ompSync(ctx: Ctx, folders: OmpWriteFolders): Promise<OmpSt
 export function ompSummary(ctx: Ctx, state: OmpState): void {
   const { echo } = ctx.services.logger;
   echo(`omp:      ${state.agentDir}`);
-  if (!ctx.dryRun) echo(`omp plugins: ${state.pluginsInstalled} installed`);
+  if (ctx.dryRun) return;
+  echo(
+    state.pluginsInstalled === undefined
+      ? "omp plugins: unknown (plugin inventory unavailable)"
+      : `omp plugins: ${state.pluginsInstalled} installed`,
+  );
 }
 
 /** The omp next steps. */

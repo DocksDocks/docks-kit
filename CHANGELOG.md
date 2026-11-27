@@ -15,9 +15,14 @@ later.
   `ask` sends an ask and waits for the reply, at most 10 minutes. `reply`
   answers an ask, `pending` lists the asks that wait for this session,
   `status` shows the registration, the live peers, the queued messages, and
-  the pending asks, and `cancel` withdraws a queued message. A message to a
-  session that is in a turn waits in a queue. An attachment holds the text
-  that the sender put in it: `talk` reads no file at either end.
+  the pending asks, and `cancel` withdraws a queued message. A message to an
+  interactive or RPC session that is in a turn waits in a queue, which holds
+  at most 64 messages and 4 MiB of text; a full queue refuses the message with
+  `busy`. A print or JSON session that is in a turn refuses the message with
+  `busy`. An attachment holds the text that the sender put in it: `talk`
+  reads no file at either end.
+- `talk` is a top-level tool. omp offers it to the model directly and does not
+  mount it as a Bash command, so an `ask` waits for its reply in the tool call.
 - `/talk` and `alt+t` (DocksDocks/docks-kit#251). In an interactive session
   they open the list of live sessions; Enter composes a message, and the
   user confirms each send with a two-letter code. `/talk <target>` composes a
@@ -62,16 +67,27 @@ later.
   A row without a version that is safe to print, such as a linked package,
   shows `unknown version`. The notice gives no removal command. A dry run and
   a run without omp print no notice.
-- Only the plugin changes need Git. Without Git, sync runs only
-  `omp plugin list --json`, prints the notice when it applies, and changes no
-  plugin. omp can copy its legacy marketplace registry into its active data
-  root during that command, as it does on any plugin command.
+- Only the omp plugin commands need Git: the uninstall of a former
+  marketplace plugin, the removal of the `docks` marketplace, and the link of
+  the kit plugin. Without Git, sync still deploys the kit plugin files,
+  `talk.js` among them, and runs `omp plugin list --json` to print the notice
+  when it applies, but it runs no other omp plugin command. A kit plugin that
+  omp already links loads the new files after a restart. omp can copy its
+  legacy marketplace registry into its active data root during that command,
+  as it does on any plugin command.
+- When sync cannot read the plugin inventory, it warns
+  `omp plugin inventory unavailable — …` and the summary shows
+  `omp plugins: unknown (plugin inventory unavailable)`. With Git, it skips
+  the pi-intercom check and the retirement of the former marketplace plugins
+  and runs `omp plugin link` for the kit plugin. Without Git, it runs no other
+  omp plugin command.
 
 ### Notes for an upgrade
 
 - Restart each omp session after the sync: omp loads `talk` only at startup.
-- Sync does not remove pi-intercom. It does not load on omp 19.2 or later, so
-  remove it with omp when you no longer need its files.
+- Sync leaves every pi-intercom install as it is. pi-intercom 0.19.0 from npm
+  does not load on omp 19.2 or later; when the notice shows that version,
+  remove the package with omp once you no longer need its files.
 
 ## 2026-11-26 - docks-kit 0.29.7: the omp pins move to 19.2.1
 

@@ -179,9 +179,10 @@ export function writeSeededTree(home: string, seed: SeededTree): void {
 
 /**
  * The differences between the seeded folder below `home` and `seed`: first
- * the sorted entry list (files and folders), then the raw bytes of each
- * seeded file. Unlike `snapshotTree`, it normalizes no line ending and no
- * path, so a rewrite from CRLF to LF and a new lock file both show.
+ * the sorted entry list (files and folders), compared name by name, then the
+ * raw bytes of each seeded file, and each seeded file that is missing. Unlike
+ * `snapshotTree`, it normalizes no line ending and no path, so a rewrite from
+ * CRLF to LF and a new lock file both show.
  */
 export function seededTreeProblems(home: string, seed: SeededTree): Array<string> {
   const folder = join(home, ...seed.root.split("/"));
@@ -201,17 +202,20 @@ export function seededTreeProblems(home: string, seed: SeededTree): Array<string
     .map((entry) => entry.replaceAll("\\", "/"))
     .sort();
   const problems: Array<string> = [];
-  if (expected.join("\n") !== actual.join("\n")) {
+  if (expected.length !== actual.length || expected.some((name, index) => name !== actual[index])) {
     problems.push(
-      `  seeded folder ${seed.root} entries differ: expected [${expected.join(", ")}] actual [${actual.join(", ")}]`,
+      `  seeded folder ${seed.root} entries differ: expected ${JSON.stringify(expected)} actual ${JSON.stringify(actual)}`,
     );
   }
   for (const name of names) {
     const path = join(folder, ...name.split("/"));
     const stat = lstatSync(path, { throwIfNoEntry: false });
-    // The entry list above already names a missing file.
-    if (stat === undefined) continue;
-    if (!stat.isFile() || !readFileSync(path).equals(Buffer.from(seed.files[name]!, "utf8"))) {
+    if (stat === undefined) {
+      problems.push(`  seeded file ${seed.root}/${name} is missing`);
+    } else if (
+      !stat.isFile() ||
+      !readFileSync(path).equals(Buffer.from(seed.files[name]!, "utf8"))
+    ) {
       problems.push(`  seeded file ${seed.root}/${name} changed its bytes`);
     }
   }

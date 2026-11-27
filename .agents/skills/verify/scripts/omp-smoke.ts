@@ -11,8 +11,8 @@
  * default talk registry folder of the user. The script only reads the default folder.
  *
  * Commands:
- *   (default)  Read what omp loads: the linked package, the skills, the task-tool agents, the extension entries,
- *              the `talk` tool, and the warnings.
+ *   (default)  Read what omp loads with its default settings: the linked package, the skills, the task-tool
+ *              agents, the extension entries, the `talk` tool, and the warnings.
  *   hooks      Drive the verify-gate, context-tree-nudge, and hygiene extensions in `omp -p` sessions in a
  *              scratch git repository. The fake model plays scripted tool calls. Prints `ok <name>` or
  *              `FAIL <name>: <reason>` for each check.
@@ -48,14 +48,27 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { Result } from "effect";
+import { Effect, Option, Result } from "effect";
 import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
+import { endpointKindFor } from "../../../../cli/talk/transport/endpoint.ts";
 import {
   DARWIN_GETCONF,
   registryFolderFor,
   TALK_DIR_OVERRIDE,
 } from "../../../../cli/talk/transport/folder.ts";
-import { ENTRY_NAME } from "../../../../cli/talk/transport/registry.ts";
+import {
+  decodeEntry,
+  describeFailure,
+  ENTRY_NAME,
+} from "../../../../cli/talk/transport/registry.ts";
+import {
+  checkRegistryFolder,
+  fileCall,
+  liveView,
+  readSecretFile,
+  TalkPosixSystem,
+  TalkTrustError,
+} from "../../../../cli/talk/transport/trustPosix.ts";
 
 /** The `name` of the kit plugin package, and of its npm row in `omp plugin list --json`. */
 const PACKAGE_NAME = "docks-kit-omp";
@@ -63,6 +76,11 @@ const PACKAGE_NAME = "docks-kit-omp";
 const PLUGIN_DIR = "SoT/.omp/plugin";
 /** The shipped `talk` skill: the load mode expects it among the skills that omp loads. */
 const TALK_SKILL = "talk";
+/**
+ * The number of skills that the kit plugin ships. A change that adds or removes a skill folder under
+ * `SoT/.omp/plugin/skills/` must update this number, so a deleted skill fails the load mode.
+ */
+const EXPECTED_SKILL_COUNT = 34;
 const REQUIRED_AGENTS = ["code-reviewer", "plan-reviewer"];
 const COMMAND_TIMEOUT_MS = 120_000;
 const MODEL_PROVIDER = "omp-smoke";
@@ -569,15 +587,6 @@ function defaultTalkFolder(): string {
   throw new Error(`the default talk registry folder is unknown: ${choice.failure.reason}`);
 }
 
-/** Whether a file system error tells that the path does not exist. */
-function isMissing(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error.code === "ENOENT" || error.code === "ENOTDIR")
-  );
-}
-
 /** The real path of `path`, or `path` when it does not resolve. */
 function realOrSame(path: string): string {
   try {
@@ -588,74 +597,181 @@ function realOrSame(path: string): string {
 }
 
 /**
- * The entry files of a talk registry folder whose JSON has `processId` and, after `realpath`, `cwd`. A missing
- * folder has none. The function only reads the folder.
+ * What identifies the registration of one omp session: the process id and the work folder of the omp child.
+ * After a session change, also the session id and the instance id of the new registration.
  */
-function attributedEntries(folder: string, processId: number, realCwd: string): string[] {
-  let names: string[];
-  try {
-    names = readdirSync(folder);
-  } catch (error) {
-    if (isMissing(error)) return [];
-    throw error;
+interface Registration {
+  readonly processId: number;
+  readonly cwd: string;
+  readonly sessionId?: string | undefined;
+  readonly instanceId?: string | undefined;
+}
+
+/** The registration in the words of a problem. */
+function describeRegistration(registration: Registration): string {
+  const ids = [
+    registration.sessionId === undefined ? "" : ` and the session ${registration.sessionId}`,
+    registration.instanceId === undefined ? "" : ` and the instance ${registration.instanceId}`,
+  ].join("");
+  return `process ${registration.processId} with the folder ${registration.cwd}${ids}`;
+}
+
+/** One entry file of a talk registry folder and its text. */
+interface RegistryFile {
+  readonly fileName: string;
+  readonly text: string;
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * The entry files of a talk registry folder, read by the trust rules of talk (`cli/talk/transport/trustPosix.ts`).
+ * The folder and its ancestors must pass `checkRegistryFolder`: the folder is a real folder of the user with
+ * mode 0700. `readSecretFile` reads each entry with `O_NOFOLLOW` and `O_NONBLOCK`, up to a size limit, and only
+ * when it is a regular file of the user with mode 0600. A missing folder has no entry files. An entry name that
+ * holds no regular file, for example a named pipe, is a failure, because talk never makes one. The function only
+ * reads the folder.
+ */
+const registryFiles = Effect.fn("registryFiles")(function* (folder: string) {
+  const present = yield* checkRegistryFolder(folder).pipe(
+    Effect.as(true),
+    Effect.catchTag("TalkFolderMissingError", () => Effect.succeed(false)),
+  );
+  if (!present) return [];
+  const names = yield* fileCall(folder, "readdir", () =>
+    readdirSync(folder)
+      .filter((name) => ENTRY_NAME.test(name))
+      .sort(),
+  );
+  const files: RegistryFile[] = [];
+  for (const fileName of names) {
+    const path = join(folder, fileName);
+    const named = liveView.lstat(path);
+    if (named._tag === "Found" && named.stat.kind !== "file")
+      return yield* new TalkTrustError({
+        path,
+        reason: `the entry name holds a ${named.stat.kind}, not a regular file`,
+      });
+    const bytes = yield* readSecretFile(path);
+    // talk withdrew the entry after the folder read.
+    if (Option.isNone(bytes)) continue;
+    const decoded = yield* Effect.try({
+      try: () => strictUtf8.decode(bytes.value),
+      catch: () => new TalkTrustError({ path, reason: "the entry is not UTF-8" }),
+    });
+    files.push({ fileName, text: decoded });
   }
-  return names.filter((name) => {
-    if (!ENTRY_NAME.test(name)) return false;
-    let source: string;
-    try {
-      source = readFileSync(join(folder, name), "utf8");
-    } catch (error) {
-      // talk withdrew the entry after the folder read.
-      if (isMissing(error)) return false;
-      throw error;
-    }
-    const entry = parseJsonText(source);
-    if (!isObject(entry) || entry["processId"] !== processId) return false;
-    const cwd = entry["cwd"];
-    return typeof cwd === "string" && realOrSame(cwd) === realCwd;
-  });
+  return files;
+});
+
+/** The entry files of a talk registry folder. An unsafe or unreadable folder throws an error that names it. */
+async function readRegistry(folder: string): Promise<RegistryFile[]> {
+  const result = await Effect.runPromise(
+    Effect.result(registryFiles(folder).pipe(Effect.provide(TalkPosixSystem.layer))),
+  );
+  if (Result.isSuccess(result)) return result.success;
+  throw new Error(
+    `the talk registry folder ${folder} is unsafe or unreadable: ${describeFailure(result.failure)}`,
+  );
 }
 
 /**
- * The registry attribution of one live omp session (H7): waits until the private folder holds an entry with the
- * process id and the work folder of the session, and then requires that the default folder holds no such entry.
- * Entries of other sessions do not count, because each check matches the process id and the folder together.
- * Gives the problem, or an empty text.
+ * Whether the private folder holds a valid entry of the registration. Each entry must pass `decodeEntry`: the
+ * schema, and the rules for the file name, the endpoint, and the socket path that talk peers apply. Then the
+ * entry must have the process id, the work folder after `realpath`, and the session and instance ids that the
+ * registration names. An entry that talk peers reject throws, also beside a valid entry of the registration:
+ * only the omp children of the run write to this folder.
+ */
+async function privateRegistered(
+  folder: string,
+  registration: Registration,
+  realCwd: string,
+): Promise<boolean> {
+  const kind = endpointKindFor(process.platform);
+  const entries = (await readRegistry(folder)).map((file) => {
+    const decoded = Effect.runSync(
+      Effect.result(decodeEntry(file.text, file.fileName, folder, kind)),
+    );
+    if (Result.isFailure(decoded))
+      throw new Error(
+        `the private registry folder ${folder} holds the entry ${file.fileName}, which talk peers reject: ${decoded.failure.reason.replace(/\s*\n\s*/g, " ")}`,
+      );
+    return decoded.success;
+  });
+  return entries.some(
+    (entry) =>
+      entry.processId === registration.processId &&
+      realOrSame(entry.cwd) === realCwd &&
+      (registration.sessionId === undefined || entry.sessionId === registration.sessionId) &&
+      (registration.instanceId === undefined || entry.instanceId === registration.instanceId),
+  );
+}
+
+/**
+ * The entry files of the default folder whose JSON has the process id and, after `realpath`, the work folder of
+ * the session. Any entry of the omp child counts, also an entry that is not valid or that has other ids.
+ */
+async function leakedEntries(folder: string, processId: number, realCwd: string): Promise<string[]> {
+  return (await readRegistry(folder))
+    .filter((file) => {
+      const entry = parseJsonText(file.text);
+      if (!isObject(entry) || entry["processId"] !== processId) return false;
+      const cwd = entry["cwd"];
+      return typeof cwd === "string" && realOrSame(cwd) === realCwd;
+    })
+    .map((file) => file.fileName);
+}
+
+/**
+ * The registry attribution of one live omp session (H7). Each poll reads the private folder and then the
+ * default folder. A default folder that holds an entry of the omp child fails at once: a session that lost
+ * `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the private folder holds a valid entry of
+ * the registration, and it fails when none comes within the timeout. Entries of other sessions do not count,
+ * because each check matches the process id and the folder together. An unsafe or unreadable folder, or a
+ * private entry that talk peers reject, fails at once. Gives the problem, or an empty text.
  */
 async function registryAttribution(
   privateFolder: string,
   defaultFolder: string,
-  processId: number,
-  cwd: string,
+  registration: Registration,
 ): Promise<string> {
-  const realCwd = realOrSame(cwd);
+  const realCwd = realOrSame(registration.cwd);
   const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
   try {
-    while (attributedEntries(privateFolder, processId, realCwd).length === 0) {
+    for (;;) {
+      const registered = await privateRegistered(privateFolder, registration, realCwd);
+      const leaked = await leakedEntries(defaultFolder, registration.processId, realCwd);
+      if (leaked.length > 0)
+        return `the default talk registry folder ${defaultFolder} holds the entry ${leaked.join(", ")} of process ${registration.processId} with the folder ${registration.cwd}`;
+      if (registered) return "";
       if (Date.now() > deadline)
-        return `no entry of process ${processId} with the folder ${cwd} in the private registry folder ${privateFolder} within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+        return `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
       await sleep(POLL_MS);
     }
-    const leaked = attributedEntries(defaultFolder, processId, realCwd);
-    return leaked.length === 0
-      ? ""
-      : `the default talk registry folder ${defaultFolder} holds the entry ${leaked.join(", ")} of process ${processId} with the folder ${cwd}`;
   } catch (error) {
-    return `a talk registry folder could not be read: ${error instanceof Error ? error.message : String(error)}`;
+    return error instanceof Error ? error.message : String(error);
   }
 }
 
-/** The registry attribution of the omp session `label` of a run; the problem names the session. */
+/**
+ * The registry attribution of the omp session `label` of a run; the problem names the session. `ids` names the
+ * session id and the instance id of a registration that a session change made.
+ */
 async function sessionAttribution(
   run: Run,
   label: string,
   processId: number | undefined,
   cwd: string,
+  ids: { readonly sessionId: string; readonly instanceId: string } | undefined = undefined,
 ): Promise<string> {
   const problem =
     processId === undefined
       ? "the omp process did not start"
-      : await registryAttribution(run.isolation.registry, run.defaultRegistry, processId, cwd);
+      : await registryAttribution(run.isolation.registry, run.defaultRegistry, {
+          processId,
+          cwd,
+          ...ids,
+        });
   return problem && `${label}: ${problem}`;
 }
 
@@ -805,7 +921,10 @@ interface Run {
 const TALK_BUNDLE = "talk.js";
 const TALK_EXTENSION_ENTRY = `./extensions/${TALK_BUNDLE}`;
 const TALK_TOOL = "talk";
-/** omp offers each enabled tool to the provider and mounts none as a Bash command, so `talk` is a provider tool. */
+/**
+ * The `talk` and `talk-ui` modes: omp offers each enabled tool to the provider and mounts none as a Bash
+ * command. The load mode keeps the default settings of omp.
+ */
 const TALK_CONFIG_YAML = "tools:\n  commands: false\n";
 
 /** What a mode changes in the isolated state before omp links the plugin. */
@@ -818,14 +937,12 @@ interface InstallSetup {
   readonly pluginFolder: (scratchDir: string, failures: string[]) => string;
 }
 
-/** The `hooks` mode: the plugin folder of this checkout and no `config.yml`. */
+/** The load mode and the `hooks` mode: the plugin folder of this checkout and no `config.yml`. */
 const DEFAULT_SETUP: InstallSetup = {
   modelIds: [MODEL_ID],
   configYaml: null,
   pluginFolder: () => pluginDir,
 };
-/** The load mode: as `DEFAULT_SETUP`, and the `talk` tool reaches the first model request as a provider tool. */
-const LOAD_SETUP: InstallSetup = { ...DEFAULT_SETUP, configYaml: TALK_CONFIG_YAML };
 
 /**
  * Creates the scratch folder with isolated omp state and the private talk registry folder, starts the fake
@@ -960,7 +1077,7 @@ async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
   const failures: string[] = [];
   const name = manifestName(failures);
   const realBefore = realStateSnapshot();
-  const run = await install(failures, LOAD_SETUP);
+  const run = await install(failures);
   const skillList = parseJson(
     (await run.omp(["skill", "list", "--json"])).stdout,
     "omp skill list --json",
@@ -1006,11 +1123,15 @@ async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
     .map((skill) => text(skill["name"]) ?? "(no name)")
     .sort();
   lines.push(`skills: ${skills.length}`, `skill names: ${skills.join(",")}`);
-  // The expected skills are the skill folders of the plugin, so a new skill folder needs no change here.
+  // The loaded skills are the skill folders of the plugin, and their number is the fixed count.
   const shipped = pluginSkillNames(pluginDir);
   if (skills.join(",") !== shipped.join(","))
     failures.push(
       `skills: ${skills.length}, expected the ${shipped.length} skill folders of ${pluginDir}: ${shipped.join(",")}`,
+    );
+  if (skills.length !== EXPECTED_SKILL_COUNT)
+    failures.push(
+      `skills: ${skills.length}, expected ${EXPECTED_SKILL_COUNT}; update EXPECTED_SKILL_COUNT only when a skill was added or removed on purpose`,
     );
   if (!skills.includes(TALK_SKILL)) failures.push(`the loaded skills do not include ${TALK_SKILL}`);
 
@@ -2142,7 +2263,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       failStep("the first provider request of the sender does not offer the talk tool");
     pass();
     // Both omp processes are live: the peer waits for RPC commands, and the sender waits in its first turn.
-    results.set(REGISTRY_CHECK, await attributionProblem([peerRegistry, senderRegistry]));
+    const registryProblems = [await attributionProblem([peerRegistry, senderRegistry])];
+    const reportRegistry = (): void => {
+      results.set(REGISTRY_CHECK, registryProblems.filter(Boolean).join("; "));
+    };
+    reportRegistry();
 
     step = "talk-list";
     const firstSession = await peerSessionId();
@@ -2231,6 +2356,14 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         failStep(`RPC ${String(rpcCommand["type"])} kept the session id ${sessionId}`);
       const instance = await listUntil(sessionId, [before.instance]);
       pass();
+      // The session change made a new registration of the peer, so its attribution runs again while the peer is live.
+      registryProblems.push(
+        await sessionAttribution(run, `peer after ${prefix}`, rpc.pid, run.workDir, {
+          sessionId,
+          instanceId: instance,
+        }),
+      );
+      reportRegistry();
 
       step = `${prefix}-send`;
       const delivered = await expectDelivered(

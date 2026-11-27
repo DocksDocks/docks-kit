@@ -189,17 +189,28 @@ process.on("exit", cleanupTemporaryDirs);
 process.on("SIGINT", handleSigint);
 process.on("SIGTERM", handleSigterm);
 
+/** The npm rows of one omp plugin store in a stub inventory. */
+type StubNpmRows = ReadonlyArray<Readonly<Record<string, string>>>;
+
 /**
  * The stub omp body: it prints the omp version and answers each
- * `plugin list --json` with `npm` as the npm rows and no marketplace row.
- * Every other omp command succeeds without output.
+ * `plugin list --json` with no marketplace row and the npm rows of the store
+ * that its environment selects, as omp does: `OMP_PROFILE`, else
+ * `PI_PROFILE`. `npm` holds the rows of the default store, `profiles` the rows
+ * of each named profile; a profile without an entry answers no npm row. Every
+ * other omp command succeeds without output.
  */
-export function ompStubBody(npm: ReadonlyArray<Readonly<Record<string, string>>> = []): string {
-  const inventory = JSON.stringify({ npm, marketplace: [] });
+export function ompStubBody(
+  npm: StubNpmRows = [],
+  profiles: Readonly<Record<string, StubNpmRows>> = {},
+): string {
+  const stores = { "": npm, ...profiles };
   return `if (args[0] === "--version") {
   console.log("omp/19.2.1")
 } else if (args[0] === "plugin" && args[1] === "list") {
-  console.log(${JSON.stringify(inventory)})
+  const stores = ${JSON.stringify(stores)}
+  const profile = process.env["OMP_PROFILE"] ?? process.env["PI_PROFILE"] ?? ""
+  console.log(JSON.stringify({ npm: Object.hasOwn(stores, profile) ? stores[profile] : [], marketplace: [] }))
 }`;
 }
 

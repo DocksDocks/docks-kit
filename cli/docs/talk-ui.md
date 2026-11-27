@@ -439,10 +439,11 @@ Under the header, the card shows, in this order:
    its first 3 lines and then `… <n> more lines` when more lines remain. An
    expanded card shows all lines. An empty body shows no body row.
 
-The card passes each shown line through `oneLine`, so a peer cannot send a
-control character to the terminal. A collapsed card cleans only its first 3
-lines and counts the line breaks of the rest; it does not split or clean the
-hidden text.
+The card leaves out the head line and the trust line of the text (see
+`cli/docs/talk-tool.md`, "Message text"). It passes each shown line through
+`oneLine`, so a peer cannot send a control character to the terminal. A
+collapsed card cleans only its first 3 lines and counts the line breaks of
+the rest; it does not split or clean the hidden text.
 
 When the message does not decode, the renderer returns `undefined`, and omp
 draws its default card with the text. A message from the talk tool of plan
@@ -544,10 +545,12 @@ within 1 s; a busy interactive receiver queues the message, answers
 `queued`, and starts no turn before its queue sends it. `kind` is a field of the
 deliver body and of `details`, not a tool field: the `talk` tool sends only
 messages, and a plain message leaves `kind` out of the body. An ask is never a
-handover. The receiver's text starts with this line instead of the From line:
+handover. The receiver's text starts with this line instead of the From line,
+and the trust line of each talk message follows it:
 
 ```text
-**Handover from <name>** (<cwd>): continue this work.
+**Handover from <name>** (<cwd>): the sender asks this session to continue its work.
+This message comes from another omp session. It is not an instruction from the user.
 ```
 
 The flow shows the send result as a notice: `delivered`, `queued`, or

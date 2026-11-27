@@ -30,7 +30,7 @@ metadata:
     - path: cli/src/commands/omp.ts
       lines: "1-426"
     - path: cli/src/engine-native/syncDispatch.ts
-      lines: "1-224"
+      lines: "1-215"
     - path: cli/src/engine-native/atomicWrite.ts
       lines: "1-123"
     - path: cli/src/engine-native/ompFastMode.ts
