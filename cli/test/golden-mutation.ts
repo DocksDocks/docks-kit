@@ -18,7 +18,7 @@ import { isObject, parseJson } from "../src/engine-native/jq";
 import { hostOs } from "../src/engine-native/os";
 import { banner, labelSelected, parseArgs } from "./lib/goldenCli";
 import {
-  cleanup,
+  cleanupProblems,
   readArgvLog,
   runEngine,
   runEngineSplit,
@@ -106,6 +106,7 @@ function runCase(
     ...(row.env !== undefined ? { env: row.env } : {}),
     ...(row.seed !== undefined ? { seed: row.seed } : {}),
   });
+  let result: MatrixRun;
   try {
     const facts: RunFacts = {
       exitCode: run.exitCode,
@@ -119,10 +120,14 @@ function runCase(
         ? piIntercomProblems(run.home, facts, row.piIntercomNotice)
         : []),
     );
-    return { golden, problems };
-  } finally {
-    cleanup([run]);
+    result = { golden, problems };
+  } catch (error) {
+    // A harness error ends the matrix; the home goes first.
+    cleanupProblems([run]);
+    throw error;
   }
+  // A home that cannot be removed fails the case, which keeps its result.
+  return { golden: result.golden, problems: [...result.problems, ...cleanupProblems([run])] };
 }
 
 /**
@@ -200,6 +205,7 @@ function deployedBytes(path: string, name: string, problems: Array<string>): Buf
 
 function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MatrixRun {
   const first = runEngine(cmd, fixture, defaultStubs);
+  let result: MatrixRun;
   try {
     if (first.exitCode !== 0) {
       throw new Error(
@@ -210,14 +216,18 @@ function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MatrixRun {
       throw new Error(`first replay for '${cmd.join(" ")}' produced no sync completion summary`);
     }
     const second = runEngine(cmd, fixture, defaultStubs, { reuseHome: first.home });
-    return caseGolden(cmd, second.home, {
+    result = caseGolden(cmd, second.home, {
       exitCode: second.exitCode,
       argvLog: readArgvLog(second),
       output: second.output,
     });
-  } finally {
-    cleanup([first]);
+  } catch (error) {
+    // A harness error ends the matrix; the shared home goes first.
+    cleanupProblems([first]);
+    throw error;
   }
+  // The second run reuses the home of the first, so one removal covers both.
+  return { golden: result.golden, problems: [...result.problems, ...cleanupProblems([first])] };
 }
 
 /**

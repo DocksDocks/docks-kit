@@ -17,7 +17,7 @@ vi.mock("../../src/engine-native/os", () => ({
 }));
 
 vi.mock("../lib/goldenExecution", () => ({
-  cleanup: vi.fn(),
+  cleanupProblems: vi.fn(() => []),
   readArgvLog: vi.fn(() => "argv"),
   runEngine: vi.fn(() => {
     harness.runCount++;
@@ -51,7 +51,8 @@ vi.mock("../lib/goldenResources", () => ({
 vi.mock("../lib/goldenSnapshot", () => ({
   diffText: vi.fn(() => []),
   diffTrees: vi.fn(() => []),
-  snapshotTree: vi.fn(() => ({})),
+  seededTreeProblems: vi.fn(() => []),
+  snapshotTreeResult: vi.fn(() => ({ kind: "snapshot", tree: {} })),
   stableStringify: vi.fn((value: unknown) => `${JSON.stringify(value, null, 2)}\n`),
 }));
 

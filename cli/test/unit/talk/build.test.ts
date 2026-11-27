@@ -335,19 +335,20 @@ describe("talk build freshness check", () => {
     return { result, tmp };
   }
 
-  /** Asserts the one stale line, with the rebuild command for the shell of this host. */
-  function expectStale(result: SpawnSyncReturns<string>, outDir: string, reason: string): void {
-    expect(result.status).toBe(1);
-    expect(result.stdout).toBe("");
-    const lines = result.stderr.trimEnd().split("\n");
-    expect(lines).toHaveLength(1);
+  /** The one stale line, with the rebuild command for the shell of this host. */
+  function staleLine(outDir: string, reason: string): string {
     const rebuildWith =
       process.platform === "win32" ? "rebuild with (PowerShell):" : "rebuild with:";
     const entry = quoteShellArgument(FIXTURE_ENTRY, process.platform);
     const out = quoteShellArgument(resolve(outDir), process.platform);
-    expect(lines[0]).toBe(
-      `[build-talk] stale: ${join(resolve(outDir), "talk.js")} ${reason}; ${rebuildWith} ${REBUILD} --entry ${entry} --out ${out}`,
-    );
+    return `[build-talk] stale: ${join(resolve(outDir), "talk.js")} ${reason}; ${rebuildWith} ${REBUILD} --entry ${entry} --out ${out}`;
+  }
+
+  /** Asserts the complete stale diagnostic: a path can hold a line break, so no split. */
+  function expectStale(result: SpawnSyncReturns<string>, outDir: string, reason: string): void {
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(`${staleLine(outDir, reason)}\n`);
   }
 
   it("exits 0 when the file has the bytes of a fresh build, and removes its build folder", () => {
@@ -391,25 +392,25 @@ describe("talk build freshness check", () => {
     const quotedName =
       process.platform === "win32" ? "with space and it''s-" : String.raw`with space and it'\''s-`;
     expect(result.stderr).toContain(quotedName);
-    // Where a POSIX shell is present, it prints each argument of the printed command on its own line.
+    // Where a POSIX shell is present, it prints each argument of the printed
+    // command with a NUL after it; a path can hold a line break, but no NUL.
     if (process.platform === "win32" || !existsSync("/bin/sh")) return;
     // The command starts after the exact prefix up to the known stale path; a
     // `rebuild with: ` inside that path is not a delimiter.
     const prefix = `[build-talk] stale: ${join(resolve(outDir), "talk.js")} is missing; rebuild with: `;
-    const line = result.stderr.trimEnd();
-    expect(line.startsWith(prefix)).toBe(true);
-    const rebuild = line.slice(prefix.length);
-    const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
+    const rebuild = result.stderr.slice(prefix.length, -"\n".length);
+    const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\0' ${rebuild}`], {
       encoding: "utf8",
     });
     expect(parsed.status).toBe(0);
-    expect(parsed.stdout.trimEnd().split("\n")).toEqual([
+    expect(parsed.stdout.split("\0")).toEqual([
       "bun",
       "cli/scripts/build-talk.ts",
       "--entry",
       FIXTURE_ENTRY,
       "--out",
       resolve(outDir),
+      "",
     ]);
   });
 });
