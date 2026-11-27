@@ -2175,10 +2175,11 @@ const TERMINAL_TYPE = "xterm-256color";
 const TERMINAL_COLUMNS = 240;
 const TERMINAL_ROWS = 50;
 /**
- * The narrow pane of the resize check: fewer than 4 columns, where the resize view shows a symbol cue in place
- * of a word (`RESIZE_TEXTS` in `cli/talk/ui/views.ts`), and a few rows.
+ * The narrow pane of the resize check: one column and a few rows. The resize view shows its symbol cue in place
+ * of a word below 4 columns (`RESIZE_TEXTS` in `cli/talk/ui/views.ts`); at one column the cue shows only when
+ * omp measures it as one cell, so this pane also checks the width of the cue in the real omp.
  */
-const NARROW_COLUMNS = 3;
+const NARROW_COLUMNS = 1;
 const NARROW_ROWS = 6;
 /** The resize cue of omp's default `unicode` symbol preset (`RESIZE_SYMBOLS` in `cli/talk/ui/views.ts`). */
 const RESIZE_CUE = "⤢";
@@ -2741,14 +2742,15 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     await screen.waitFor(peerInstance, listed, `peer row with the instance id ${peerInstance}`);
     pass();
 
-    // The list is open. Below the size of one item row it ends, and the resize view paints the symbol cue as
-    // its one row; at the full size again the view lists once more and shows the list.
+    // The list is open. The resize goes from the full size straight to one column: no item row fits, the list
+    // ends, and the resize view paints the symbol cue as its one row. At the full size again the view lists once
+    // more and shows the list.
     step = "ui-resize";
     const narrowed = screen.mark();
     screen.resize(NARROW_COLUMNS, NARROW_ROWS);
     await screen.waitForFrame(
       (frame) => frame.split("\n").some((row) => row.trim() === RESIZE_CUE),
-      `row ${RESIZE_CUE} at ${NARROW_COLUMNS} columns`,
+      `row ${RESIZE_CUE} in a pane of ${NARROW_COLUMNS} column`,
       narrowed,
     );
     const widened = screen.mark();
