@@ -9,7 +9,13 @@
     "builtin": true,
     "node": true
   },
-  "ignorePatterns": ["node_modules/**", "cli/dist/**", "cli/dist-test/**", "cli/src/generated/**"],
+  "ignorePatterns": [
+    "node_modules/**",
+    "cli/dist/**",
+    "cli/dist-test/**",
+    "cli/src/generated/**",
+    "SoT/.omp/plugin/extensions/talk.js"
+  ],
   "rules": {
     "eqeqeq": "error",
     "no-var": "error",
