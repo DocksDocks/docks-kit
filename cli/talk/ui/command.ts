@@ -37,6 +37,7 @@ import type { HostUi } from "./host";
 import {
   type ConfirmChoice,
   type Destination,
+  LIST_TOO_SMALL,
   type ListChoice,
   type ListMode,
   type ListRow,
@@ -435,6 +436,10 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     );
     switch (choice._tag) {
       case "Close":
+        return;
+      case "TooSmall":
+        // The view draws no request for a larger pane; the notice asks for it (G3).
+        if (live(flow)) flowUi.notify(LIST_TOO_SMALL, "warning");
         return;
       case "Handover":
         await handover(flow, flowUi, choice.row);

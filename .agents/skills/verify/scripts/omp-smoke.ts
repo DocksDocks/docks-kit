@@ -2208,11 +2208,26 @@ const HANDOVER_PROMPT_TEXT = "Write a handover of the work in this session";
 const HANDOVER_DRAFT = "talk-ui smoke draft: run the next check.\nRisks: none.";
 const HANDOVER_EDIT = "edited ";
 const HANDOVER_KIND = "handover";
-/** The end of the capability notice (`capabilityNotice` in `cli/talk/extension.ts`). */
-const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the talk tool is off.`;
+/** The start and the end of the capability notice (`capabilityNotice` in `cli/talk/extension.ts`). */
 const CAPABILITY_NOTICE_START = "talk: this omp has no ";
+const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the talk tool is off.`;
 /** A talk notice on the screen: `talk:` and the rest of its row. */
 const TALK_NOTICE = /talk: [^\n]*/g;
+
+/** The talk notices of one frame, each one the rest of its row from `talk:`, trimmed. */
+function talkNotices(frame: string): string[] {
+  return [...frame.matchAll(TALK_NOTICE)].map((match) => match[0].trim());
+}
+
+/**
+ * Whether one extracted notice is the whole capability notice: its start and its end on the same row. The
+ * readiness wait and the final check of `old-notice` both use it, so two rows that each hold one part never
+ * count as the notice.
+ */
+function isCapabilityNotice(notice: string): boolean {
+  return notice.startsWith(CAPABILITY_NOTICE_START) && notice.endsWith(CAPABILITY_NOTICE_END);
+}
+
 /** The quiet time after which the smoke takes the output of the TUI omp as drained (no open frame either). */
 const DRAIN_QUIET_MS = 1_000;
 /** A built-in tool of omp: a request that offers it has a tool list that `offersTool` can read. */
@@ -2372,10 +2387,10 @@ class TerminalOmp {
       });
   }
 
-  /** Waits until a complete frame shows `shown`; fails when none does in time. */
-  async waitForFrame(shown: string, what: string): Promise<void> {
+  /** Waits until a complete frame satisfies `matches`; fails when none does in time. */
+  async waitForFrame(matches: (frame: string) => boolean, what: string): Promise<void> {
     const deadline = Date.now() + STEP_TIMEOUT_MS;
-    while (!this.frames().some((frame) => frame.includes(shown))) {
+    while (!this.frames().some(matches)) {
       const left = deadline - Date.now();
       if (left <= 0) {
         const tail = this.text().replace(/\s+/g, " ").trim().slice(-300);
@@ -2569,7 +2584,10 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     pass();
 
     step = "old-notice";
-    await screen.waitForFrame(CAPABILITY_NOTICE_END, "talk notice that names omp 19.2.0");
+    await screen.waitForFrame(
+      (frame) => talkNotices(frame).some(isCapabilityNotice),
+      "talk notice that names omp 19.2.0",
+    );
     results.set("old-notice", "not checked, because old-no-command failed before the output drained");
 
     // omp gives a line that names no command to the model as a prompt.
@@ -2601,13 +2619,12 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     // The PTY can split a frame between two reads, so only complete frames count, after the output drains.
     step = "old-notice";
     await screen.drain(DRAIN_QUIET_MS);
-    const perFrame = screen
-      .frames()
-      .map((frame) => [...frame.matchAll(TALK_NOTICE)].map((match) => match[0].trim()));
-    const others = new Set(
-      perFrame.flat().filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START)),
-    );
-    if (others.size > 0) failStep(`the screen shows other talk notices: ${[...others].join(" | ")}`);
+    const perFrame = screen.frames().map(talkNotices);
+    const others = new Set(perFrame.flat().filter((notice) => !isCapabilityNotice(notice)));
+    if (others.size > 0)
+      failStep(
+        `the screen shows talk notices that are not the whole capability notice: ${[...others].join(" | ")}`,
+      );
     // omp draws the notice again in later frames, so the count of one frame is the count of notices.
     const most = Math.max(0, ...perFrame.map((frame) => frame.length));
     if (most !== 1)

@@ -15,7 +15,6 @@ import {
   itemsOf,
   key,
   linesOf,
-  loadUi,
   press,
   prop,
   row,
@@ -28,12 +27,9 @@ import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
   LIST_TOO_SMALL,
-  PICKER_EMPTY_FRAME_ROWS,
-  PICKER_TITLE_CHROME,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
-  tooSmallTitle,
   drawCode,
   listLayout,
 } from "../../../talk/ui/views";
@@ -227,8 +223,29 @@ describe("list view (G3)", () => {
       "the instance id does not fit",
       { columns: INSTANCE_ID_LENGTH + PICKER_LABEL_CHROME - 1, rows: 30 },
     ],
+    ["the pane has one row", { columns: 12, rows: 1 }],
+  ])("mounts no list and shows the too-small notice when %s at open", async (_name, size) => {
+    const h = await harness();
+    h.tui.size = size;
+    const flow = h.run();
+    await flush();
+    // The view ended inside its factory, so omp mounts nothing.
+    expect(h.tui.views).toHaveLength(1);
+    expect(h.tui.views[0]?.closed).toBe(true);
+    await flow;
+    expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
+    expect(h.tui.notices).toEqual([{ text: LIST_TOO_SMALL, level: "warning" }]);
+    expect(h.services.sends).toEqual([]);
+  });
+
+  it.each([
+    ["no item row fits", { columns: 100, rows: PICKER_FIXED_ROWS }],
+    [
+      "the instance id does not fit",
+      { columns: INSTANCE_ID_LENGTH + PICKER_LABEL_CHROME - 1, rows: 30 },
+    ],
   ])(
-    "shows only the request for a larger pane and takes no activate and no h when %s",
+    "closes the open list with the too-small notice on a resize where %s, and Enter and h never act",
     async (_name, size) => {
       const h = await harness();
       const flow = h.run();
@@ -236,85 +253,35 @@ describe("list view (G3)", () => {
       const list = h.tui.top.node;
       const [, beta] = itemsOf(list);
       h.tui.size = size;
-      expect(itemsOf(list)).toEqual([]);
-      expect(prop(list, "selected")).toBeNull();
-      expect(prop(list, "empty")).toBe(LIST_TOO_SMALL);
-      expect(termOf(list)["hint"]).toBeNull();
-      // Enter stops at the view, so the picker widget reports no activate.
+      // Enter stops at the view, so the picker widget reports no activate; h does nothing.
       expect(press(list, "enter")).toBe(true);
       fire(list, "onActivate", beta?.id);
       expect(press(list, "h")).toBe(true);
+      // The next draw reads the new size and ends the view.
+      expect(itemsOf(list)).toEqual([]);
       await flush();
-      expect(h.tui.top.node).toBe(list);
-      // A larger pane gives the rows back, and Enter reaches the widget again.
-      h.tui.size = { columns: 100, rows: 30 };
-      expect(itemsOf(list)).toHaveLength(2);
-      expect(press(list, "enter")).toBe(false);
-      press(list, "escape");
+      expect(h.tui.views[0]?.closed).toBe(true);
       await flow;
-      expect(h.tui.notices).toEqual([]);
+      expect(h.tui.views).toHaveLength(1);
+      expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
+      expect(h.tui.notices).toEqual([{ text: LIST_TOO_SMALL, level: "warning" }]);
+      expect(h.services.sends).toEqual([]);
+      expect(h.services.turns).toEqual([]);
     },
   );
 
-  /**
-   * The first row that the picker painter of omp 19.2.1 draws (`boxTop` of
-   * `picker.ts`): `╭─`, the title with a space on each side cut to the width
-   * less 4, and the rest of the line up to `╮`. The test cannot import the
-   * pinned painter, so it applies the same title budget.
-   */
-  const topBorder = (title: unknown, columns: number): string => {
-    if (typeof title !== "string" || title === "") return `╭${"─".repeat(columns - 2)}╮`;
-    const label = [...` ${title} `].slice(0, columns - 4).join("");
-    return `╭─${label}${"─".repeat(Math.max(0, columns - 3 - [...label].length))}╮`;
-  };
-
-  it.each([
-    [100, LIST_TOO_SMALL],
-    [25, "talk: enlarge pane"],
-    [18, "enlarge pane"],
-    [12, "Resize"],
-    [9, "Res"],
-    [7, "R"],
-  ])(
-    "draws the one request for a larger pane in the top border of a 1-row pane %i columns wide (S10, R12, L8)",
-    async (columns, request) => {
-      const h = await harness();
-      const flow = h.run();
-      await flush();
-      const list = h.tui.top.node;
-      h.tui.size = { columns, rows: 1 };
-      const title = termOf(list)["title"];
-      expect(title).toBe(request);
-      // omp keeps only the first row of the frame; the whole request is in it.
-      const first = topBorder(title, columns);
-      expect([...first]).toHaveLength(columns);
-      expect(first).toContain(` ${request} `);
-      expect([...request].length + PICKER_TITLE_CHROME).toBeLessThanOrEqual(columns);
-      // The body row, which omp clips, holds no second request.
-      expect(prop(list, "empty")).toBe("");
-      press(list, "escape");
-      await flow;
-    },
-  );
-
-  it("draws the request only in the body of a pane with room for the empty frame (L8)", async () => {
+  it("keeps the list open at the smallest size that fits", async () => {
     const h = await harness();
+    h.tui.size = { columns: INSTANCE_ID_LENGTH + PICKER_LABEL_CHROME, rows: PICKER_FIXED_ROWS + 1 };
     const flow = h.run();
     await flush();
     const list = h.tui.top.node;
-    h.tui.size = { columns: 100, rows: PICKER_EMPTY_FRAME_ROWS };
-    const rows = [topBorder(termOf(list)["title"], 100), String(prop(list, "empty"))];
-    expect(rows.filter((text) => text.includes(LIST_TOO_SMALL))).toHaveLength(1);
-    expect(rows[1]).toBe(LIST_TOO_SMALL);
+    expect(itemsOf(list)).toHaveLength(2);
+    await flush();
+    expect(h.tui.top.node).toBe(list);
     press(list, "escape");
     await flow;
-  });
-
-  it("gives no request title when the border has no cell for a title", async () => {
-    const ui = await loadUi();
-    expect(tooSmallTitle(ui, PICKER_TITLE_CHROME)).toBeUndefined();
-    expect(tooSmallTitle(ui, PICKER_TITLE_CHROME + 1)).toBe("R");
-    expect(tooSmallTitle(ui, undefined)).toBeUndefined();
+    expect(h.tui.notices).toEqual([]);
   });
 
   it("flattens each line break of an edit to a space, so the one-line field shows the whole draft (R3)", async () => {

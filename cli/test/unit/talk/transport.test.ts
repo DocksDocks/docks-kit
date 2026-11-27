@@ -994,7 +994,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
 
   it("writes no body and closes the connection when the guard refuses after the handshake, and sends when it allows (R1, R11)", async () => {
     fresh();
-    const servers: Array<Server> = [];
+    const listeners: Array<FakeListener> = [];
     const secret = randomBytes(32);
     const target = { instanceId: hex(8), sessionId: "guarded" };
     try {
@@ -1009,7 +1009,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
         pair: target,
         gate: gate.promise,
       });
-      servers.push(listener.server);
+      listeners.push(listener);
       writePosixEntry(folder, {
         version: PROTOCOL_VERSION,
         ...target,
@@ -1059,7 +1059,11 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       expect(listener.requests()).toBe(1);
       expect(listener.accepted()).toBe(2);
     } finally {
-      for (const server of servers) server.close();
+      // Destroy each accepted socket first, so a leaked connection cannot keep the worker alive.
+      for (const fake of listeners) {
+        fake.release();
+        fake.server.close();
+      }
       cleanUp();
     }
   });

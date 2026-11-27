@@ -205,17 +205,22 @@ gets the width less 9 cells (the frame, the scrollbar, the pointer, and the
 two cells that the painter keeps when it cuts a label). So the list needs at
 least 4 rows and 25 columns.
 
-When the space is smaller, the picker shows only one request for a larger
-pane, and Enter and `h` do nothing. The view checks again after each resize.
-In a pane with at least 3 rows, the request is the empty text of the frame:
-`talk: make the pane larger to show the sessions.` omp keeps only the first
-rows of a frame that does not fit, so in a pane with fewer rows the request
-is the title in the top border, the first row, and the body is empty. The
-painter gives a title the width less 6 cells, so the view uses the longest
-request that fits whole: `talk: make the pane larger to show the sessions.`,
-`talk: enlarge pane`, `enlarge pane`, or `Resize`, and else the longest
-start of `Resize` that fits (`R` at 7 columns). A pane narrower than 7
-columns has no room for a title.
+When the space is smaller, the list draws no request inside the picker: in a
+small pane, omp clips the frame, and no row of it can hold a request that the
+operator reads whole. Instead:
+
+- At open, the view ends inside its factory, so omp mounts nothing.
+  `ctx.ui.custom` is still called, because only its factory gets
+  `ui.size()`.
+- While the list is open, the next draw after a resize below that size ends
+  the view.
+- In both cases, the flow shows one warning with `ctx.ui.notify` and ends:
+
+```text
+talk: the pane is too small for the session list. Enlarge it, then run /talk or press alt+t again.
+```
+
+Enter and `h` never act on a list that does not fit.
 
 ## Compose view
 

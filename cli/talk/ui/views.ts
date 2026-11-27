@@ -115,12 +115,6 @@ export const PICKER_FIXED_ROWS = 3;
  * painter keeps when it cuts a label (2).
  */
 export const PICKER_LABEL_CHROME = 9;
-/**
- * The cells of the top border that a title cannot use (`boxTop` of `picker.ts`
- * v19.2.1): the corner and the line before the title (2), a space on each
- * side of the title (2), and the line and the corner after it (2).
- */
-export const PICKER_TITLE_CHROME = 6;
 
 /** What the list view can show in its space. */
 export interface ListLayout {
@@ -140,37 +134,13 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
   };
 };
 
-export const LIST_TOO_SMALL = "talk: make the pane larger to show the sessions.";
-/** The shorter forms of the request, for a narrow pane; then the longest prefix of the last one. */
-const LIST_TOO_SMALL_SHORT = ["talk: enlarge pane", "enlarge pane", "Resize"] as const;
-const SHORTEST_REQUEST = "Resize";
-/** The rows of the empty picker frame without a hint: the top border, the empty text, and the bottom border. */
-export const PICKER_EMPTY_FRAME_ROWS = 3;
-
 /**
- * The request for a larger pane in the top border (S10, R12, L8): the
- * longest form whose whole text fits the title budget of the border in
- * `columns` cells, else the longest prefix of `Resize` that fits. So each
- * width with room for a title draws a request; a border with no room for one
- * cell of title gets undefined.
+ * The notice of a list that cannot show one item row with its full instance
+ * id (G3). The flow shows it in place of the list: no row of a picker that
+ * omp clips can hold a request that the operator reads whole.
  */
-export const tooSmallTitle = (ui: HostUi, columns: number | undefined): string | undefined => {
-  const budget = (columns ?? 0) - PICKER_TITLE_CHROME;
-  if (budget < 1) return undefined;
-  return (
-    [LIST_TOO_SMALL, ...LIST_TOO_SMALL_SHORT].find((text) => ui.visibleWidth(text) <= budget) ??
-    SHORTEST_REQUEST.slice(0, budget)
-  );
-};
-
-/**
- * Where the list draws its one request for a larger pane (L8). omp clips a
- * frame that does not fit to its first rows, so in a pane with fewer rows
- * than the empty frame the top border holds the request and the body holds
- * nothing; else only the body holds it.
- */
-const inTitle = (size: ViewSize | undefined): boolean =>
-  size !== undefined && size.rows < PICKER_EMPTY_FRAME_ROWS;
+export const LIST_TOO_SMALL =
+  "talk: the pane is too small for the session list. Enlarge it, then run /talk or press alt+t again.";
 const LIST_EMPTY = "No live talk sessions.";
 
 /** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
@@ -185,11 +155,12 @@ const LIST_HINT: Record<ListMode, string> = {
   handover: "⏎ hand over · ⎋ close",
 };
 
-/** How the list view ends. */
+/** How the list view ends; `TooSmall` when its space cannot show one item row. */
 export type ListChoice =
   | { readonly _tag: "Compose"; readonly row: ListRow }
   | { readonly _tag: "Handover"; readonly row: ListRow }
-  | { readonly _tag: "Close" };
+  | { readonly _tag: "Close" }
+  | { readonly _tag: "TooSmall" };
 
 /** The picker item id of a row: its exact pair. */
 const itemId = (row: Target): string => `${row.instanceId}/${row.sessionId}`;
@@ -209,9 +180,11 @@ const rowDetail = (row: ListRow): string =>
 /**
  * The list view: a `picker` root with `size: "screen"`, one item per row
  * (G3). Enter (`activate`) chooses compose, or handover in the handover
- * mode; `h` chooses handover; `escape` and `alt+t` close. While no item row
- * fits or the label cannot hold the instance id, the picker shows only the
- * request for a larger pane, and neither `activate` nor `h` does anything.
+ * mode; `h` chooses handover; `escape` and `alt+t` close. The view draws no
+ * request for a larger pane: when no item row with the full instance id fits
+ * at open, it ends with `TooSmall` before omp mounts it, and a resize below
+ * that size ends it with `TooSmall` at the next draw. Neither `activate` nor
+ * `h` acts while it does not fit.
  */
 export const listView = (
   ui: HostUi,
@@ -232,23 +205,23 @@ export const listView = (
   /** The selected row while the view fits; undefined otherwise. */
   const chosen = (item: string | null): ListRow | undefined =>
     item === null || !layout().fits ? undefined : byId.get(item);
+  // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1).
+  if (!layout().fits) done({ _tag: "TooSmall" });
   return ui.jsx("picker", {
     title: LIST_TITLE[mode],
     noun: "sessions",
     size: "screen",
-    items: () => (layout().fits ? items : []),
+    items: () => {
+      if (layout().fits) return items;
+      // A resize below the size: the view ends after this draw; `done` runs once only.
+      queueMicrotask(() => {
+        done({ _tag: "TooSmall" });
+      });
+      return [];
+    },
     selected: () => (layout().fits ? selected() : null),
-    empty: () => {
-      if (layout().fits) return LIST_EMPTY;
-      return inTitle(size()) ? "" : LIST_TOO_SMALL;
-    },
-    term: () => {
-      const { maxRows, fits } = layout();
-      if (fits) return { maxRows, hint: LIST_HINT[mode] };
-      const current = size();
-      const title = inTitle(current) ? tooSmallTitle(ui, current?.columns) : undefined;
-      return { maxRows, hint: null, title: title ?? null };
-    },
+    empty: LIST_EMPTY,
+    term: () => ({ maxRows: layout().maxRows, hint: LIST_HINT[mode] }),
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
     },
