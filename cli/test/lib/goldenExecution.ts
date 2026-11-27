@@ -291,9 +291,9 @@ export function readArgvLog(run: EngineRun): string {
 
 /**
  * Remove the home of each run with `goldenResources.ts removeTree`, which
- * repairs folder permissions after a permission error. Returns one problem
- * line for each home that stays, so a case keeps its result and reports the
- * problem; it never throws.
+ * repairs folder permissions after a removal error that a missing folder
+ * permission can cause. Returns one problem line for each home that stays, so
+ * a case keeps its result and reports the problem; it never throws.
  */
 export function cleanupProblems(runs: ReadonlyArray<Pick<EngineRun, "home">>): Array<string> {
   const problems: Array<string> = [];
