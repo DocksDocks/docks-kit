@@ -203,10 +203,15 @@ export const DOCKED = { overlay: true, fullscreen: false };
  * when it opens, after its factory ran, and remembers the node that was
  * focused then; when the overlay closes, through `done` or through its host
  * handle, the focus goes back to that node, or to the composer of omp when
- * that node is gone (`cli/docs/talk-ui.md`, "Flows").
+ * that node is gone (`cli/docs/talk-ui.md`, "Flows"). As in
+ * `showHookCustom` of omp v19.2.1, a view whose `done` ran in its factory
+ * never mounts and gets no handle; a mounted view gets its handle after it
+ * took the focus.
  */
 export class FakeTui {
   size = { columns: 100, rows: 30 };
+  /** The theme that each factory gets; omp gives `extensionTheme(currentTheme())`. */
+  theme: unknown = { symbols: { preset: "unicode" } };
   readonly views: Array<View> = [];
   readonly calls: Array<string> = [];
   readonly notices: Array<{ readonly text: string; readonly level: string }> = [];
@@ -214,6 +219,8 @@ export class FakeTui {
   focused: View | undefined;
   /** Each key id and each paste (`paste:<text>`) that reached the composer of omp. */
   readonly composerInput: Array<string> = [];
+  /** Each paste that reached the paste path of an `input` or `editor` widget. */
+  readonly widgetPastes: Array<string> = [];
   /** The node that was focused when each view opened. */
   readonly #restore = new Map<View, View | undefined>();
 
@@ -232,7 +239,7 @@ export class FakeTui {
       const state = { closed: false, hostClosed: false, result: undefined as unknown };
       // The view exists once the factory returned; a `done` inside the factory moves no focus.
       const mounted: { view?: View } = {};
-      const node = factory({ size: () => this.size }, {}, {}, (value) => {
+      const node = factory({ size: () => this.size }, this.theme, {}, (value) => {
         if (state.closed) throw new Error("done called twice");
         state.closed = true;
         state.result = value;
@@ -244,13 +251,6 @@ export class FakeTui {
         state.hostClosed = true;
         if (mounted.view !== undefined) this.#blur(mounted.view);
       };
-      // omp gives the overlay handle once the overlay is open (`ExtensionCustomOptions` v19.2.1).
-      options.onHandle({
-        get closed() {
-          return state.closed || state.hostClosed;
-        },
-        close: hostClose,
-      });
       const view: View = {
         node,
         options,
@@ -267,11 +267,17 @@ export class FakeTui {
       };
       mounted.view = view;
       this.views.push(view);
-      // omp mounts no view whose `done` ran in its factory; an open overlay takes the focus.
-      if (view.shown) {
-        this.#restore.set(view, this.focused);
-        this.focused = view;
-      }
+      // omp mounts no view whose `done` ran in its factory, and gives it no handle.
+      if (!view.shown) return promise;
+      // The open overlay takes the focus; then omp gives its handle (`ExtensionCustomOptions` v19.2.1).
+      this.#restore.set(view, this.focused);
+      this.focused = view;
+      options.onHandle({
+        get closed() {
+          return state.closed || state.hostClosed;
+        },
+        close: hostClose,
+      });
       return promise;
     },
     notify: (text, level) => {
@@ -313,6 +319,7 @@ export class FakeTui {
       return;
     // The `input` and `editor` widgets of pi-tui insert a paste that no handler took (`term/widgets/input.ts`, `editor.ts`).
     if (node.kind !== "input" && node.kind !== "editor") return;
+    this.widgetPastes.push(text);
     const before = String(prop(node, "text"));
     const at = Number(prop(node, "cursor"));
     fire(node, "onEdit", { from: at, to: at, text, cursor: at + text.length, len: before.length });

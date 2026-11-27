@@ -33,10 +33,12 @@ import {
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
+  RESIZE_CUES,
   drawCode,
   listLayout,
   LISTING_TEXT,
   resizeText,
+  symbolPreset,
 } from "../../../talk/ui/views";
 
 // The `/talk` flows of plan #251 G2 and G3 against the fake TUI host of
@@ -308,15 +310,6 @@ describe("list view (G3)", () => {
     },
   );
 
-  const CUES = [
-    "talk: enlarge the pane to see the session list",
-    "talk: enlarge the pane",
-    "enlarge the pane",
-    "enlarge",
-    "grow",
-    "\u2922",
-  ];
-
   it.each([
     [100, "talk: enlarge the pane to see the session list"],
     [30, "talk: enlarge the pane"],
@@ -327,10 +320,23 @@ describe("list view (G3)", () => {
     [4, "grow"],
   ])("fits a whole resize cue to %i columns, never a cut word", async (columns, text) => {
     const ui = await loadUi();
-    const shown = resizeText(ui, columns);
-    expect(shown).toBe(text);
-    expect(CUES).toContain(shown);
-    expect([...shown].length).toBeLessThanOrEqual(columns);
+    for (const preset of ["unicode", "ascii"] as const) {
+      const shown = resizeText(ui, columns, preset);
+      expect(shown).toBe(text);
+      expect(RESIZE_CUES[preset]).toContain(shown);
+      expect([...shown].length).toBeLessThanOrEqual(columns);
+    }
+  });
+
+  it.each([
+    ["a unicode theme", { symbols: { preset: "unicode" } }, "unicode"],
+    ["a nerd theme", { symbols: { preset: "nerd" } }, "nerd"],
+    ["an ascii theme", { symbols: { preset: "ascii" } }, "ascii"],
+    ["a theme without symbols", {}, "unicode"],
+    ["an unknown preset", { symbols: { preset: "emoji" } }, "unicode"],
+    ["no theme", undefined, "unicode"],
+  ])("reads the symbol preset of %s", (_name, theme, preset) => {
+    expect(symbolPreset(theme)).toBe(preset);
   });
 
   /**
@@ -355,15 +361,23 @@ describe("list view (G3)", () => {
       return cells + (width === "A" && ambiguousWide ? 2 : 1);
     }, 0);
 
-  it.each([3, 1])(
-    "shows omp's expand symbol in a pane %i columns wide, narrower than the shortest word cue, in one cell also where ambiguous characters are wide",
-    async (columns) => {
+  it.each([
+    [3, "unicode", "\u2922"],
+    [1, "unicode", "\u2922"],
+    [3, "nerd", "\u2922"],
+    [1, "nerd", "\u2922"],
+    [3, "ascii", "<->"],
+    [2, "ascii", "+"],
+    [1, "ascii", "+"],
+  ] as const)(
+    "shows a symbol cue in a pane %i columns wide with the %s preset, also where ambiguous characters are wide",
+    async (columns, preset, cue) => {
       const ui = await loadUi();
-      const shown = resizeText(ui, columns);
-      // `cmd.expand` of pi-tui `src/theme/data/symbols.json` v19.2.1.
-      expect(shown).toBe("\u2922");
-      expect(paintedWidth(shown, false)).toBe(1);
-      expect(paintedWidth(shown, true)).toBe(1);
+      const shown = resizeText(ui, columns, preset);
+      // `⤢` is `cmd.expand` of pi-tui `src/theme/data/symbols.json` v19.2.1; the ascii preset shows only ASCII.
+      expect(shown).toBe(cue);
+      if (preset === "ascii") expect(shown).toMatch(/^[\x20-\x7e]+$/u);
+      expect(paintedWidth(shown, false)).toBeLessThanOrEqual(columns);
       expect(paintedWidth(shown, true)).toBeLessThanOrEqual(columns);
       // The width rules tell the ambiguous arrow apart: it takes two cells there.
       expect(paintedWidth("\u2194", true)).toBe(2);
@@ -372,9 +386,32 @@ describe("list view (G3)", () => {
 
   it("shows no cue in a pane without a column", async () => {
     const ui = await loadUi();
-    expect(resizeText(ui, 0)).toBe("");
-    expect(resizeText(ui, undefined)).toBe("");
+    for (const preset of ["unicode", "nerd", "ascii"] as const) {
+      expect(resizeText(ui, 0, preset)).toBe("");
+      expect(resizeText(ui, undefined, preset)).toBe("");
+    }
   });
+
+  it.each([
+    ["unicode", { symbols: { preset: "unicode" } }, "\u2922", "\u2922"],
+    ["ascii", { symbols: { preset: "ascii" } }, "+", "<->"],
+  ])(
+    "shows the narrow cues of the %s preset that omp gives the factory",
+    async (_name, theme, oneColumn, threeColumns) => {
+      const h = await harness();
+      h.tui.theme = theme;
+      h.tui.size = { columns: 1, rows: 1 };
+      const flow = h.run();
+      await flush();
+      const resize = h.tui.top.node;
+      expect(resize.kind).toBe("text");
+      expect(prop(resize, "text")).toBe(oneColumn);
+      h.tui.size = { columns: 3, rows: 1 };
+      expect(prop(resize, "text")).toBe(threeColumns);
+      h.tui.key("escape");
+      await flow;
+    },
+  );
 
   /** Shrinks the pane below the open list; the list ends and the resize view mounts. */
   const shrink = async (h: Harness): Promise<FakeNode> => {
@@ -1092,12 +1129,16 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
     const flow = h.run();
     await flush();
     const compose = await composeTo(h, ID_B, "hello");
-    // The open field takes a paste.
+    // The open field takes a paste through its widget.
     h.tui.paste(" there");
+    expect(h.tui.widgetPastes).toEqual([" there"]);
     expect(prop(compose, "text")).toBe("hello there");
     h.tui.key("enter");
-    // omp routes a paste of the same input read to the held view, and Tern can report an edit to it.
+    // omp routes a paste of the same input read to the held view: the view takes it before the widget.
     h.tui.paste(" pasted");
+    expect(h.tui.widgetPastes).toEqual([" there"]);
+    expect(prop(compose, "text")).toBe("hello there");
+    // Tern can report an edit to the held view directly: the view ignores it.
     appendText(compose, " typed");
     expect(prop(compose, "text")).toBe("hello there");
     expect(h.tui.composerInput).toEqual([]);

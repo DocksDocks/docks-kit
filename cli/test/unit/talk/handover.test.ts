@@ -194,12 +194,16 @@ describe("/talk handover <target> (G2, G6)", () => {
     const { flow } = await handoverToGamma(h);
     const review = reviewOf(h);
     replaceText(review, "reviewed");
-    // The open field takes a paste at the caret.
+    // The open field takes a paste at the caret through its widget.
     h.tui.paste(" text");
+    expect(h.tui.widgetPastes).toEqual([" text"]);
     expect(prop(review, "text")).toBe("reviewed text");
     h.tui.key("ctrl+s");
-    // omp routes a paste of the same input read to the held review, and Tern can report an edit to it.
+    // omp routes a paste of the same input read to the held review: the view takes it before the widget.
     h.tui.paste(" pasted");
+    expect(h.tui.widgetPastes).toEqual([" text"]);
+    expect(prop(review, "text")).toBe("reviewed text");
+    // Tern can report an edit to the held review directly: the view ignores it.
     appendText(review, " typed");
     expect(prop(review, "text")).toBe("reviewed text");
     expect(h.tui.composerInput).toEqual([]);

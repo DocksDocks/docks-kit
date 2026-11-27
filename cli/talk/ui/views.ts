@@ -75,6 +75,21 @@ export const sizeReader =
       : undefined;
   };
 
+/** The glyph sets of omp (`SymbolSet.preset`, pi-tui `src/theme/contract.ts` v19.2.1). */
+export type SymbolPreset = "unicode" | "nerd" | "ascii";
+
+/**
+ * The symbol preset of the factory theme (`theme.symbols.preset`). omp gives
+ * each factory `extensionTheme(currentTheme())`, whose `symbols` is the
+ * active glyph set. A theme without a known preset reads as `unicode`, the
+ * default of omp (pi-tui `src/theme/theme.ts` v19.2.1:194).
+ */
+export const symbolPreset = (theme: unknown): SymbolPreset => {
+  const symbols = Predicate.hasProperty(theme, "symbols") ? theme.symbols : undefined;
+  const preset = Predicate.hasProperty(symbols, "preset") ? symbols.preset : undefined;
+  return preset === "ascii" || preset === "nerd" ? preset : "unicode";
+};
+
 /** The keys that close a view: `escape`, and the shortcut that opens the list (F2). */
 export const CLOSE_KEY = "escape";
 export const TALK_SHORTCUT = "alt+t";
@@ -135,13 +150,10 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 };
 
 /**
- * The texts of the resize view, longest first (G3): the view shows the
+ * The word texts of the resize view, longest first (G3): the view shows the
  * longest one that fits the width, so one screen row holds a whole cue and
- * no word is cut. A pane narrower than 4 cells shows `⤢` (U+2922), the
- * expand symbol of omp (`cmd.expand` in pi-tui `src/theme/data/symbols.json`
- * v19.2.1). Its East Asian Width is neutral (`2900..297F ; N` in
- * `EastAsianWidth.txt` 17.0.0), so it takes one cell also where a terminal
- * draws ambiguous characters wide.
+ * no word is cut. A pane narrower than 4 cells shows a symbol cue of the
+ * active symbol preset instead (`RESIZE_SYMBOLS`).
  */
 export const RESIZE_TEXTS = [
   "talk: enlarge the pane to see the session list",
@@ -149,8 +161,32 @@ export const RESIZE_TEXTS = [
   "enlarge the pane",
   "enlarge",
   "grow",
-  "⤢",
 ] as const;
+
+/**
+ * The symbol cues of the resize view per preset, longest first. The
+ * `unicode` and `nerd` presets show `⤢` (U+2922), the expand symbol of omp
+ * (`cmd.expand` in pi-tui `src/theme/data/symbols.json` v19.2.1). Its East
+ * Asian Width is neutral (`2900..297F ; N` in `EastAsianWidth.txt` 17.0.0),
+ * so it takes one cell also where a terminal draws ambiguous characters
+ * wide; the nerd glyph of `cmd.expand` is a private-use character, whose
+ * width is ambiguous. The `ascii` preset has no `cmd.expand` glyph, and its
+ * font can lack `⤢`: it shows `<->`, an arrow with two heads that asks for
+ * a wider pane, and in one or two cells `+`, the ASCII `nav.expand` glyph
+ * of omp.
+ */
+const RESIZE_SYMBOLS: Readonly<Record<SymbolPreset, ReadonlyArray<string>>> = {
+  unicode: ["⤢"],
+  nerd: ["⤢"],
+  ascii: ["<->", "+"],
+};
+
+/** Every resize cue per preset, longest first: the word texts, then the symbol cues. */
+export const RESIZE_CUES: Readonly<Record<SymbolPreset, ReadonlyArray<string>>> = {
+  unicode: [...RESIZE_TEXTS, ...RESIZE_SYMBOLS.unicode],
+  nerd: [...RESIZE_TEXTS, ...RESIZE_SYMBOLS.nerd],
+  ascii: [...RESIZE_TEXTS, ...RESIZE_SYMBOLS.ascii],
+};
 const LIST_EMPTY = "No live talk sessions.";
 
 /** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
@@ -345,10 +381,14 @@ export const pendingView = <R>(
 /** The text of the resize view while it lists the registry again. */
 export const LISTING_TEXT = "talk: listing sessions";
 
-/** The resize text for `columns` cells: the longest whole cue that fits; none without a cell. */
-export const resizeText = (ui: HostUi, columns: number | undefined): string => {
+/** The resize text for `columns` cells: the longest whole cue of `preset` that fits; none without a cell. */
+export const resizeText = (
+  ui: HostUi,
+  columns: number | undefined,
+  preset: SymbolPreset,
+): string => {
   const width = Math.max(0, columns ?? 0);
-  return RESIZE_TEXTS.find((text) => ui.visibleWidth(text) <= width) ?? "";
+  return RESIZE_CUES[preset].find((text) => ui.visibleWidth(text) <= width) ?? "";
 };
 
 /**
@@ -359,11 +399,13 @@ export const resizeText = (ui: HostUi, columns: number | undefined): string => {
  * shows `talk: listing sessions`, and runs `relist` once; it ends with the
  * fresh listing, so a talk view holds the focus until the list mounts.
  * Enter, `h`, and every other key do nothing; `escape` and `alt+t` end the
- * flow, whose abort signal stops the listing.
+ * flow, whose abort signal stops the listing. `preset` picks the symbol cue
+ * of a narrow pane.
  */
 export const resizeView = <R>(
   ui: HostUi,
   size: SizeReader,
+  preset: SymbolPreset,
   relist: () => Promise<R>,
   done: (choice: Waited<R>) => void,
 ): JSXNode => {
@@ -378,7 +420,7 @@ export const resizeView = <R>(
     text: () => {
       // The current size decides first: the progress text shows only while the list fits.
       const current = size();
-      if (!listLayout(current).fits) return resizeText(ui, current?.columns);
+      if (!listLayout(current).fits) return resizeText(ui, current?.columns, preset);
       if (listing()) return LISTING_TEXT;
       // A draw at a size that fits starts the listing after the draw.
       queueMicrotask(start);

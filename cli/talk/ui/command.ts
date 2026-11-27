@@ -44,6 +44,7 @@ import {
   type ListMode,
   type ListRow,
   type SizeReader,
+  type SymbolPreset,
   type TextChoice,
   type ViewKey,
   composeView,
@@ -53,6 +54,7 @@ import {
   pendingView,
   resizeView,
   sizeReader,
+  symbolPreset,
 } from "./views";
 
 export const TALK_COMMAND = "talk";
@@ -284,6 +286,13 @@ const settledInput = (ui: HostUi, isOpen: () => boolean, end: () => void): HostU
     const onKey = props["onKey"];
     const onEdit = props["onEdit"];
     const onPaste = props["onPaste"];
+    // A node without input handlers keeps its props object, so a reactive redraw copies nothing.
+    if (
+      !Predicate.isFunction(onKey) &&
+      !Predicate.isFunction(onEdit) &&
+      !Predicate.isFunction(onPaste)
+    )
+      return ui.jsx(kind, props, key);
     const guarded: Record<string, unknown> = { ...props };
     if (Predicate.isFunction(onKey))
       guarded["onKey"] = (event: ViewKey): boolean => {
@@ -372,7 +381,12 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   const mount = <T>(
     flow: Flow,
     flowUi: FlowUi,
-    build: (viewUi: HostUi, size: SizeReader, done: (choice: T) => void) => JSXNode,
+    build: (
+      viewUi: HostUi,
+      size: SizeReader,
+      done: (choice: T) => void,
+      preset: SymbolPreset,
+    ) => JSXNode,
     ended: T,
     fullscreen: boolean,
   ): Promise<T> => {
@@ -384,7 +398,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     flow.view = view;
     flowUi
       .custom(
-        (host, _theme, _keybindings, done) => {
+        (host, theme, _keybindings, done) => {
           // The outgoing view closes now, before omp opens this overlay.
           release(flow);
           let open = true;
@@ -423,6 +437,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
             ),
             sizeReader(host),
             finish,
+            symbolPreset(theme),
           );
           building = false;
           return node;
@@ -609,8 +624,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           const resized = await mount<Waited<ListingAnswer>>(
             flow,
             flowUi,
-            (viewUi, size, done) =>
-              resizeView(viewUi, size, () => flow.services.list(flow.life), done),
+            (viewUi, size, done, preset) =>
+              resizeView(viewUi, size, preset, () => flow.services.list(flow.life), done),
             { _tag: "Close" },
             FULL_SCREEN,
           );

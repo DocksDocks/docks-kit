@@ -242,13 +242,8 @@ view in place of the list:
   v19.2.1:24-27), so the request is the middle row of the screen, and the
   only row of a one-row pane. On each draw, it shows the longest of these
   cues that fits the width from `ui.size()`. Each cue is whole: no word is
-  cut. A pane narrower than 4 columns shows `⤢` (U+2922), the expand symbol
-  of omp (`cmd.expand` in pi-tui `src/theme/data/symbols.json` v19.2.1). Its
-  East Asian Width is neutral (`2900..297F ; N` in `EastAsianWidth.txt`
-  17.0.0), so it takes one cell also in a terminal that draws ambiguous
-  characters wide. A pane without a column shows no cue. The cue follows
-  the current size first: the progress text below shows only while the list
-  fits.
+  cut. A pane without a column shows no cue. The cue follows the current
+  size first: the progress text below shows only while the list fits.
 
 ```text
 talk: enlarge the pane to see the session list
@@ -256,9 +251,24 @@ talk: enlarge the pane
 enlarge the pane
 enlarge
 grow
-⤢
 ```
 
+- A pane narrower than 4 columns shows a symbol cue that asks for a wider
+  pane. The cue follows the symbol preset that omp gives the factory of the
+  view (`theme.symbols.preset`; a theme without a known preset counts as
+  `unicode`, the default of omp):
+  - The `unicode` and `nerd` presets show `⤢` (U+2922), the expand symbol
+    of omp (`cmd.expand` in pi-tui `src/theme/data/symbols.json` v19.2.1).
+    Its East Asian Width is neutral (`2900..297F ; N` in
+    `EastAsianWidth.txt` 17.0.0), so it takes one cell also in a terminal
+    that draws ambiguous characters wide. The nerd glyph of `cmd.expand` is
+    a private-use character, whose width is ambiguous, so the view does not
+    use it.
+  - The `ascii` preset is for terminals and fonts that show only ASCII, and
+    omp gives it no `cmd.expand` glyph. In 3 columns the view shows `<->`,
+    an arrow with two heads: make the pane wider. In 1 or 2 columns it
+    shows `+`, the ASCII `nav.expand` glyph of omp: expand the pane. No
+    clearer ASCII cue fits one column.
 - When the list fits again, the resize view stays open and focused, shows
   `talk: listing sessions`, and lists the registry again with the abort
   signal and the session checks of the flow. It ends only when the rows are
