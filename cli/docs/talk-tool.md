@@ -548,13 +548,16 @@ Each refusal fails the call before the side turn and sends nothing. Its text
 says what the user or the agent can do. Its `details` hold the outcome
 `failed`, or a more specific one such as the probe outcome or `not-live`.
 They hold the instance id whenever the action knows the one instance: the
-exact `instance`, or the single session that `to` matched. That covers the
-session checks of an `instance` call (mode, UI, subagent, open view, no
-side turn), the same checks right before the side turn once the target
-resolved, an own target, a `to` whose one match ended or did not answer,
-and an `instance` that did not answer. An argument error, a session check
-of a `to` call before the lookup, and a `to` refusal that knows no unique
-instance (no match, several sessions) carry no id.
+exact `instance`, or for `to`, the one registration that remains after the
+probes, which is the one registration that the probes did not prove ended.
+That covers the session checks of an `instance` call (mode, UI, subagent,
+open view, no side turn), the same checks right before the side turn once
+the target resolved, an own target, an `instance` that did not answer, a
+`to` whose one remaining registration did not answer, and a `to` that
+matched only one registration, which ended. An argument error, a session
+check of a `to` call before the lookup, and a `to` refusal that knows no
+unique instance carry no id: no match, a prefix of several session ids,
+several registrations that ended, or two or more registrations that remain.
 
 | Case                                                                                                           | Text starts with                                                                         |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -577,21 +580,23 @@ A `to` that names no one target gets recovery text of its own, only for
 `handover` (the other actions and `/talk` keep the resolver error of
 [Targets](#targets)):
 
-- One session that is not proven ended, and its probe did not answer:
-  ``talk: `<to>` did not answer a probe (<outcome>). Nothing was sent. Check
-  that session, then run the action list again:`` and the candidate rows.
-  `details` hold its instance id and the probe outcome.
-- Several sessions, and fewer than two answered: ``talk: `<to>` names
-  sessions that did not answer a probe. Nothing was sent. Check the listed
-  sessions, then run the action list again:`` and the candidate rows, with
-  the outcome `failed` and no ids.
+- One registration remains, which means that the probes did not prove it
+  ended, and its probe did not answer: ``talk: `<to>` did not answer a probe
+  (<outcome>). Nothing was sent. Check that session, then run the action
+  list again:`` and the candidate rows. `details` hold the instance id and
+  the probe outcome of that registration, also when `to` matched other
+  registrations that the probes proved ended.
+- Two or more registrations remain, and fewer than two of them answered:
+  ``talk: `<to>` names sessions that did not answer a probe. Nothing was
+  sent. Check the listed sessions, then run the action list again:`` and
+  the candidate rows, with the outcome `failed` and no ids.
 - A choice between sessions (a prefix of several session ids, or two or more
-  sessions that answered): the resolver error, then `Name one session with
-  instance, using its full instance id from list, or ask the user which
-  session takes the handover.`
+  registrations that answered): the resolver error, then `Name one session
+  with instance, using its full instance id from list, or ask the user which
+  session takes the handover.` No ids.
 - Every match ended (`not-live`): the resolver error, then `Run the action
-  list and name a live session.` `details` hold the instance id when `to`
-  matched one session.
+  list and name a live session.` `details` hold the instance id only when
+  `to` matched one registration.
 
 When the listing or the instance lookup fails, or a probe fails in this
 process because the lookup of the target's registry entry failed (a trust
@@ -604,9 +609,10 @@ handover, but talk could not check its target, so nothing was sent. Error:
 <host error>`, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`,
 "Errors"). `details` keep the instance id when the action knows the one
 instance: the exact `instance`, also when its listing, lookup, or probe call
-was rejected, or the single session that `to` matched. A peer that does not
-answer a probe, for example with `timeout`, gives the probe refusals above,
-not this text.
+was rejected; for `to`, the one registration that remains when a probe
+lookup failed, or the one matched registration when the probe call was
+rejected. A peer that does not answer a probe, for example with `timeout`,
+gives the probe refusals above, not this text.
 
 ### Outcomes
 
