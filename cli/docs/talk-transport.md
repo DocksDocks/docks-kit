@@ -291,8 +291,10 @@ POSIX it also binds a new socket, and it binds one when its socket path is
 missing or holds another file. After it publishes, the pass checks the
 socket once more. When the socket went away during the pass, for example
 because another process removed the folder and created it again, the pass
-binds a new socket and publishes the entries again at once. So the entries
-do not name the removed socket until the next pass. On POSIX, every 6 hours it
+tries once to bind a new socket and publish the entries again. When that
+second round succeeds, the entries name the new socket in the same pass.
+When the second bind or publication fails, the pass logs the failure, and an
+entry can name the removed socket until a later pass repairs it. On POSIX, every 6 hours it
 refreshes the times of its entry files through the descriptors that it
 kept, and logs each failure with the path and the reason.
 

@@ -90,6 +90,7 @@ interface FakeSession {
  * A fake omp session: an append lands two microtask turns after the send, in
  * the session that was current at the send; a transition replaces the session
  * in place, so `getEntries()` and `getSessionId()` read the new one at once.
+ * `getEntries()` gives the live list, as omp's `getEntriesView()` does.
  */
 const makeFakeHost = (): { readonly fake: FakeSession; readonly host: TalkHost } => {
   const fake: FakeSession = {
@@ -122,6 +123,7 @@ const makeFakeHost = (): { readonly fake: FakeSession; readonly host: TalkHost }
     sessionId: () => fake.state.id,
     sessionFile: () => fake.state.file,
     entries: () => fake.state.entries,
+    liveEntries: () => true,
     isIdle: () => fake.idle,
     hasPendingMessages: () => fake.pendingMessages,
     mode: () => fake.mode,
@@ -415,6 +417,35 @@ describe("confirmation and wake (E4)", () => {
     fake.state = stateFor(SESSION_A);
     await collectGarbage();
     expect(watched.deref()).toBeUndefined();
+  });
+
+  it("reads no copy of getEntries() before a send, because the first check would discard it (R7)", async () => {
+    const { fake, host } = makeFakeHost();
+    let reads = 0;
+    const readsAtSend: Array<number> = [];
+    const delivery = makeDelivery({
+      host: {
+        ...host,
+        // The getEntries() fallback: a new copy on each read.
+        liveEntries: () => false,
+        entries: () => {
+          reads += 1;
+          return [...fake.state.entries];
+        },
+        sendMessage: (message, options) => {
+          readsAtSend.push(reads);
+          host.sendMessage(message, options);
+        },
+      },
+      clock,
+      retain: async () => true,
+    });
+    delivery.attach(REG_A);
+    fake.state.entries.push({ type: "message" }, { type: "message" });
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    const afterFirst = reads;
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    expect(readsAtSend).toEqual([0, afterFirst]);
   });
 
   it("keeps no entry list after a send that omp refused with a throw (C6)", async () => {

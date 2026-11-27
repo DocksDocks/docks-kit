@@ -166,11 +166,16 @@ export interface PeerTransport {
     targets: ReadonlyArray<Target>,
     signal?: AbortSignal,
   ) => Promise<ReadonlyArray<ProbeResult>>;
+  /**
+   * `beforeBody` runs right before the body goes out, after the mutual proof;
+   * false keeps the body back, and the call rejects as an interrupted call.
+   */
   readonly request: (
     target: Target,
     kind: string,
     body: Schema.Json,
     signal?: AbortSignal,
+    beforeBody?: () => boolean,
   ) => Promise<RequestAnswer>;
   /** The pair of an entry that this process kept, by its full instance id. */
   readonly known: (instanceId: string, signal?: AbortSignal) => Promise<Target | undefined>;

@@ -75,21 +75,26 @@ const csiEnd = (text: string, body: number): number => {
   return within(text.charCodeAt(final), 0x40, 0x7e) ? final + 1 : body;
 };
 
-/** The end of a string command whose text starts at `body`: up to BEL, ST, or ESC `\`. */
+/**
+ * The end of a string command whose text starts at `body`: after BEL, ST, or
+ * ESC `\`. An ESC that starts no ST ends the command before it, so that ESC
+ * starts the next sequence. A command without an end takes the rest of the
+ * text. So each code unit is read once, also in malformed input (R2).
+ */
 const stringEnd = (text: string, body: number): number => {
   for (let index = body; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
     if (code === BEL || code === ST_C1) return index + 1;
-    if (code === ESC) return text.charCodeAt(index + 1) === BACKSLASH ? index + 2 : body;
+    if (code === ESC) return text.charCodeAt(index + 1) === BACKSLASH ? index + 2 : index;
   }
-  return body;
+  return text.length;
 };
 
 /**
  * The end of the terminal escape sequence at `start`, in its 7-bit or its C1
  * form: a CSI sequence, a string command with its end, or a two-character
- * escape. A sequence that does not complete loses only its introducer, so
- * the text after it stays.
+ * escape. A CSI or a two-character escape that does not complete loses only
+ * its introducer, so the text after it stays.
  */
 const sequenceEnd = (text: string, start: number): number => {
   const first = text.charCodeAt(start);

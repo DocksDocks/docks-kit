@@ -369,10 +369,13 @@ live list, a watch that runs for minutes does not copy or scan the whole
 transcript each 10 ms. The `getEntries()` fallback gives a new array on each
 read, so there each read copies and scans the whole transcript. The binding
 keeps its read position only while a watch runs, so it holds no list after
-the last watch ends. A watch that starts while no other watch runs sets its
-read position to the end of the list before the send, because no watch
-waits for an older entry. So an isolated send to an idle session reads only
-the entries after it. The watch ends:
+the last watch ends. On the live list, a watch that starts while no other
+watch runs sets its read position to the end of the list before the send,
+because no watch waits for an older entry. So on a host with the live list,
+an isolated send to an idle session reads only the entries after it. On the
+`getEntries()` fallback, the binding reads nothing before the send, because
+the first check gets a new array and reads it from its start anyway. The
+watch ends:
 
 - `delivered` when the entry appears while `getSessionId()` still equals the
   target session id.

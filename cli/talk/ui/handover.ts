@@ -104,18 +104,16 @@ export const requestDraft = async (
 ): Promise<DraftAnswer> => {
   try {
     const reply = await sideTurn({ promptText: HANDOVER_PROMPT, signal });
-    // T1: the reply is model text; no escape sequence of it reaches the terminal.
-    const text =
+    const raw =
       Predicate.hasProperty(reply, "replyText") && Predicate.isString(reply.replyText)
-        ? safeMultiline(reply.replyText).trim()
+        ? reply.replyText.trimEnd()
         : "";
-    if (text === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
-    return {
-      _tag: "Draft",
-      text: text.endsWith(OMP_CUT_MARK)
-        ? `${text.slice(0, -OMP_CUT_MARK.length)}\n${HANDOVER_CUT_LINE}`
-        : text,
-    };
+    // R5: omp's mark is found in the raw reply, before cleaning and trimming can change it.
+    const cut = raw.endsWith(OMP_CUT_MARK);
+    // T1: the reply is model text; no escape sequence of it reaches the terminal.
+    const body = safeMultiline(cut ? raw.slice(0, -OMP_CUT_MARK.length) : raw).trim();
+    if (body === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
+    return { _tag: "Draft", text: cut ? `${body}\n${HANDOVER_CUT_LINE}` : body };
   } catch (cause) {
     const hostError = Predicate.isError(cause) ? cause.message : String(cause);
     return {

@@ -113,6 +113,13 @@ export interface TalkHost {
    * only the entries after its last read of the same list (E4).
    */
   readonly entries: () => ReadonlyArray<unknown>;
+  /**
+   * True when `entries` gives omp's live `getEntriesView()`, which is the
+   * same array on each read; false for the copy of `getEntries()`. The
+   * confirmation reads the list before a send only when it is live, because
+   * a copy read then would be thrown away at the first check (E4).
+   */
+  readonly liveEntries: () => boolean;
   /** `ctx.isIdle()`. */
   readonly isIdle: () => boolean;
   /** `ctx.hasPendingMessages()`. */

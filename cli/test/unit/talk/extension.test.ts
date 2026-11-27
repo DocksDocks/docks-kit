@@ -177,6 +177,8 @@ class FakeNetwork {
   listGate: Promise<void> | undefined;
   /** Set: the next `known` waits for it; a later call does not. */
   knownGate: Promise<void> | undefined;
+  /** Set: the next `request` waits for it, as a peer handshake does, before its body goes out. */
+  handshakeGate: Promise<void> | undefined;
 
   live(sessionId?: string): Array<NetEntry> {
     return [...this.entries.values()].filter(
@@ -304,8 +306,14 @@ class FakeNetwork {
           }),
         );
       },
-      request: (target, kind, body, signal) => {
+      request: async (target, kind, body, signal, beforeBody) => {
         this.signals.push(signal);
+        const gate = this.handshakeGate;
+        this.handshakeGate = undefined;
+        if (gate !== undefined) await gate;
+        // The client asks the guard after the handshake, right before the body goes out.
+        if (beforeBody !== undefined && !beforeBody())
+          throw new Error("interrupted before the body");
         return this.dispatch(target, kind, body);
       },
     };
@@ -2628,6 +2636,25 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     await flow;
     await settle();
     expect(network.signals).toHaveLength(before + 2);
+    expect(beta.talkTexts()).toEqual([]);
+    expect(alpha.notices).toEqual([]);
+  });
+
+  it("sends no body when the session id changes with no event while the peer handshake runs (R1, R11)", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const { flow, confirm } = await listToConfirm(alpha, betaId, "moved");
+    const gate = Promise.withResolvers<void>();
+    network.handshakeGate = gate.promise;
+    const before = network.signals.length;
+    typeCode(confirm, confirmCode(confirm).code);
+    // The send lists, looks up the pair, and waits in the handshake of its request.
+    await until(() => network.signals.length === before + 3);
+    // omp moves the transcript to a new session id without a transition hook.
+    alpha.reset("s-alpha-moved");
+    gate.resolve();
+    await flow;
+    await settle();
     expect(beta.talkTexts()).toEqual([]);
     expect(alpha.notices).toEqual([]);
   });

@@ -210,10 +210,10 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
    * The confirmation reads only the entries appended since its last read:
    * `scanned` is the entry list that it read last, `scannedTo` its length
    * then. Another list, or a shorter one, is a reset and is read again from
-   * the start. A new watch batch starts the cursor at the end of the list
-   * before its first send, because no watch waits for an older entry. The
-   * cursor exists only while a watch runs, so it keeps no list that omp
-   * replaced after the last watch.
+   * the start. On a live list, a new watch batch starts the cursor at the
+   * end of the list before its first send, because no watch waits for an
+   * older entry. The cursor exists only while a watch runs, so it keeps no
+   * list that omp replaced after the last watch.
    */
   let scanned: ReadonlyArray<unknown> | undefined;
   let scannedTo = 0;
@@ -315,13 +315,16 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   };
 
   /**
-   * Starts the cursor of a new watch batch at the end of the entry list, so
-   * the first check of an isolated send does not read the whole transcript.
-   * A failed read leaves no cursor: the first check reads from the start.
+   * Starts the cursor of a new watch batch at the end of a live entry list,
+   * so the first check of an isolated send does not read the whole
+   * transcript. A copy of `getEntries()` is a new array at each read, so the
+   * first check would reset a cursor on it: the batch reads none. A failed
+   * read leaves no cursor: the first check reads from the start.
    */
   const startBatch = (): void => {
     if (watches.size > 0) return;
     try {
+      if (!host.liveEntries()) return;
       const entries = host.entries();
       scanned = entries;
       scannedTo = entries.length;

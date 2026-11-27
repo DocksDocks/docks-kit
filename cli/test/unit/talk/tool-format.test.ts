@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ATTACHMENT_KINDS,
@@ -62,12 +62,28 @@ describe("safeMultiline (#251 T1)", () => {
     ["a DCS string", "a\u001bPq#0;2;0;0;0\u001b\\b", "ab"],
     ["the C1 CSI and OSC forms", "a\u009b31mb\u009d0;title\u009cc", "abc"],
     ["a two-character escape", "a\u001bcb\u001b7c", "abc"],
-    ["an OSC without its terminator: only the introducer goes", "a\u001b]52;c;text", "a52;c;text"],
+    ["an OSC without its end: the rest of the text goes", "a\u001b]52;c;text", "a"],
+    [
+      "an OSC that an ESC ends before ST: the ESC starts the next escape",
+      "a\u001b]0;t\u001b[1mb",
+      "ab",
+    ],
     ["other control characters", "a\u0000\u0007\u0008\u007fb\u0085c", "abc"],
     ["line breaks, as line feeds", "a\r\nb\rc\u2028d\u2029e", "a\nb\nc\nd\ne"],
     ["line feeds and tabs, as they are", "a\n\tb\n", "a\n\tb\n"],
   ])("cleans %s", (_name, text, expected) => {
     expect(safeMultiline(text)).toBe(expected);
+  });
+
+  it("reads each code unit a bounded number of times, also with many unterminated string introducers (R2)", () => {
+    const text = `ok${"\u009dx\u0090y".repeat(2_000)}`;
+    const reads = vi.spyOn(String.prototype, "charCodeAt");
+    try {
+      expect(safeMultiline(text)).toBe("ok");
+      expect(reads.mock.calls.length).toBeLessThanOrEqual(4 * text.length);
+    } finally {
+      reads.mockRestore();
+    }
   });
 });
 

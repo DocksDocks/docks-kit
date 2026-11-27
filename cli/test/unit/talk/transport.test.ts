@@ -18,7 +18,7 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Effect, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
+import { Effect, Exit, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -986,6 +986,68 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       expect(later[0]).toBe("second");
       // One request body per call, whatever the count of routes.
       expect(first.requests() + second.requests()).toBe(2);
+    } finally {
+      for (const server of servers) server.close();
+      cleanUp();
+    }
+  });
+
+  it("writes no body and closes the connection when the guard refuses after the handshake, and sends when it allows (R1, R11)", async () => {
+    fresh();
+    const servers: Array<Server> = [];
+    const secret = randomBytes(32);
+    const target = { instanceId: hex(8), sessionId: "guarded" };
+    try {
+      mkdirSync(folder, { mode: 0o700 });
+      chmodSync(folder, 0o700);
+      const path = join(folder, socketName(process.pid));
+      const gate = Promise.withResolvers<void>();
+      const listener = await startFakeListener(path, {
+        mode: "answer",
+        label: "guarded",
+        secret,
+        pair: target,
+        gate: gate.promise,
+      });
+      servers.push(listener.server);
+      writePosixEntry(folder, {
+        version: PROTOCOL_VERSION,
+        ...target,
+        name: "guarded",
+        cwd: base,
+        processId: process.pid,
+        endpoint: { kind: "unix", path },
+        startTime: 1_700_000_000_000,
+        secret: secret.toString("hex"),
+      });
+      // The source session of the caller; it changes with no event while the handshake waits.
+      let session = "s-1";
+      const guard = (): boolean => session === "s-1";
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const client = yield* makeClient({ requestTimeoutMs: 5_000, probeTimeoutMs: 500 });
+          const call = yield* Effect.forkChild(
+            client.request(target, "echo", null, undefined, guard),
+          );
+          yield* promised(() => waitFor(() => listener.hellos() === 1, SETTLE_MS, "the hello"));
+          session = "s-2";
+          gate.resolve();
+          const refused = yield* Fiber.await(call);
+          // The same client sends once the guard allows it.
+          session = "s-1";
+          const sent = yield* client.request(target, "echo", null, undefined, guard);
+          return { refused, sent };
+        }).pipe(
+          Effect.provide(
+            TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer)),
+          ),
+        ),
+      );
+      expect(Exit.hasInterrupts(outcome.refused)).toBe(true);
+      expect(outcome.sent).toBe("guarded");
+      // Only the allowed call wrote a body; the refused connection closed.
+      expect(listener.requests()).toBe(1);
+      await waitFor(() => listener.closed() >= 1, SETTLE_MS, "the close of the refused connection");
     } finally {
       for (const server of servers) server.close();
       cleanUp();

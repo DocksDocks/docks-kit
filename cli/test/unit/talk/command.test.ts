@@ -15,6 +15,7 @@ import {
   itemsOf,
   key,
   linesOf,
+  loadUi,
   press,
   prop,
   row,
@@ -27,11 +28,11 @@ import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
   LIST_TOO_SMALL,
-  PICKER_EMPTY_FRAME_ROWS,
+  PICKER_TITLE_CHROME,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
-  composePlaceholder,
+  tooSmallTitle,
   drawCode,
   listLayout,
 } from "../../../talk/ui/views";
@@ -98,22 +99,17 @@ describe("list layout (G3)", () => {
     expect(listLayout({ columns: 80, rows: 40 })).toEqual({
       maxRows: PICKER_ROW_LIMIT,
       fits: true,
-      framed: true,
     });
     expect(listLayout({ columns: 80, rows: 8 })).toEqual({
       maxRows: 8 - PICKER_FIXED_ROWS,
       fits: true,
-      framed: true,
     });
     expect(listLayout({ columns: 80, rows: PICKER_FIXED_ROWS + 1 })).toEqual({
       maxRows: 1,
       fits: true,
-      framed: true,
     });
     expect(listLayout({ columns: 80, rows: PICKER_FIXED_ROWS }).fits).toBe(false);
-    expect(listLayout({ columns: 80, rows: PICKER_EMPTY_FRAME_ROWS }).framed).toBe(true);
-    expect(listLayout({ columns: 80, rows: PICKER_EMPTY_FRAME_ROWS - 1 }).framed).toBe(false);
-    expect(listLayout(undefined).framed).toBe(false);
+    expect(listLayout(undefined).fits).toBe(false);
   });
 
   it("fits only when the label budget holds the full instance id", () => {
@@ -190,8 +186,9 @@ describe("list view (G3)", () => {
     expect(compose.options).toMatchObject(DOCKED);
     // C3: no prompt shifts the caret; the placeholder names the destination.
     expect(prop(compose.node, "prompt")).toBeUndefined();
-    expect(prop(compose.node, "placeholder")).toBe(composePlaceholder(row(ID_C, "gamma")));
-    expect(prop(compose.node, "placeholder")).toContain(literal("gamma"));
+    expect(prop(compose.node, "placeholder")).toBe(
+      `To ${literal("gamma")}: the message; ⏎ confirms the destination, ⎋ cancels`,
+    );
     press(compose.node, "escape");
     await flow;
     expect(h.services.sends).toEqual([]);
@@ -258,20 +255,83 @@ describe("list view (G3)", () => {
     },
   );
 
-  it.each([1, PICKER_EMPTY_FRAME_ROWS - 1])(
-    "puts the request for a larger pane in the top border of a %i-row pane, the first row that omp keeps (S10)",
-    async (rows) => {
+  /**
+   * The first row that the picker painter of omp 19.2.1 draws (`boxTop` of
+   * `picker.ts`): `╭─`, the title with a space on each side cut to the width
+   * less 4, and the rest of the line up to `╮`. The test cannot import the
+   * pinned painter, so it applies the same title budget.
+   */
+  const topBorder = (title: unknown, columns: number): string => {
+    if (typeof title !== "string" || title === "") return `╭${"─".repeat(columns - 2)}╮`;
+    const label = [...` ${title} `].slice(0, columns - 4).join("");
+    return `╭─${label}${"─".repeat(Math.max(0, columns - 3 - [...label].length))}╮`;
+  };
+
+  it.each([
+    [100, LIST_TOO_SMALL],
+    [25, "talk: enlarge pane"],
+    [18, "enlarge pane"],
+    [13, "enlarge"],
+  ])(
+    "puts a whole request for a larger pane in the top border of a 1-row pane %i columns wide (S10, R12)",
+    async (columns, request) => {
       const h = await harness();
       const flow = h.run();
       await flush();
       const list = h.tui.top.node;
-      h.tui.size = { columns: 100, rows };
-      expect(termOf(list)["title"]).toBe(LIST_TOO_SMALL);
-      // A pane with room for the empty frame shows the request as the empty text.
-      h.tui.size = { columns: 100, rows: PICKER_EMPTY_FRAME_ROWS };
-      expect(termOf(list)["title"]).toBeNull();
-      expect(prop(list, "empty")).toBe(LIST_TOO_SMALL);
+      h.tui.size = { columns, rows: 1 };
+      const title = termOf(list)["title"];
+      expect(title).toBe(request);
+      // omp keeps only the first row of the frame; the whole request is in it.
+      const first = topBorder(title, columns);
+      expect([...first]).toHaveLength(columns);
+      expect(first).toContain(` ${request} `);
+      expect([...request].length + PICKER_TITLE_CHROME).toBeLessThanOrEqual(columns);
       press(list, "escape");
+      await flow;
+    },
+  );
+
+  it("gives no request title when even the shortest request does not fit", async () => {
+    const ui = await loadUi();
+    expect(tooSmallTitle(ui, 12)).toBeUndefined();
+    expect(tooSmallTitle(ui, undefined)).toBeUndefined();
+  });
+
+  it("flattens each line break of an edit to a space, so the one-line field shows the whole draft (R3)", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const compose = await composeTo(h, ID_B, "a");
+    fire(compose, "onEdit", { from: 1, to: 1, text: "\u2028b\r\nc\u2029d\ne", cursor: 9, len: 1 });
+    expect(prop(compose, "text")).toBe("a b c d e");
+    expect(prop(compose, "cursor")).toBe(9);
+    press(compose, "escape");
+    await flow;
+  });
+
+  it.each([
+    [100, `To ${literal("gamma")}: the message; ⏎ confirms the destination, ⎋ cancels`],
+    [40, `To ${literal("gamma")} · ⏎ confirm · ⎋ cancel`],
+    [20, `To ${literal("gamma")}`],
+    [8, "To `gam"],
+  ])(
+    "fits the compose placeholder to %i columns, destination first (R6)",
+    async (columns, placeholder) => {
+      const h = await harness();
+      h.services.target = {
+        _tag: "Resolved",
+        destination: { instanceId: ID_C, sessionId: "session-gamma", name: "gamma", cwd: "/g" },
+      };
+      const flow = h.run({ _tag: "Compose", target: "gamma" });
+      await flush();
+      const compose = h.tui.top.node;
+      h.tui.size = { columns, rows: 30 };
+      const shown = prop(compose, "placeholder");
+      expect(shown).toBe(placeholder);
+      // The painter draws a placeholder only when it leaves one cell free.
+      expect([...String(shown)].length).toBeLessThanOrEqual(columns - 1);
+      press(compose, "escape");
       await flow;
     },
   );

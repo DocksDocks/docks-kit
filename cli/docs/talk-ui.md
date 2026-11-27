@@ -123,8 +123,13 @@ resolver and of the send, and the request) runs with the `AbortSignal` of
 the flow, so the end of the flow interrupts the call. Right before each
 transport call, the flow checks that it did not end and that its session id
 did not change. So a send whose lookup was pending when the flow ended makes
-no request. A request whose body already went out can reach the peer; the
-flow shows no notice for it and does not say that it was withdrawn.
+no request. The client of the transport runs the same check once more after
+the handshake with the peer, right before it writes the request body: omp
+can move the transcript to a new session id without a transition event,
+also while the handshake runs. When the check fails, the client writes no
+body, closes the connection, and the request ends as interrupted; the flow
+reports no send. A request whose body already went out can reach the peer;
+the flow shows no notice for it and does not say that it was withdrawn.
 
 Each view is an overlay, so no other dialog of omp replaces it in the editor
 slot. omp gives the handle of each overlay through `onHandle`. When omp
@@ -202,10 +207,12 @@ least 4 rows and 25 columns.
 
 When the space is smaller, the picker shows only
 `talk: make the pane larger to show the sessions.`, and Enter and `h` do
-nothing. The view checks again after each resize. When the pane has fewer
-than 3 rows, it cannot hold the empty frame, and omp keeps only the first
-rows of the frame. The request then shows as the title in the top border,
-the first row.
+nothing. The view checks again after each resize. omp keeps only the first
+rows of a frame that does not fit, so the request also shows as the title in
+the top border, the first row. The painter gives a title the width less 6
+cells, so the view uses the longest request that fits whole:
+`talk: make the pane larger to show the sessions.`, `talk: enlarge pane`,
+`enlarge pane`, or `enlarge`. A pane narrower than 13 columns gets no title.
 
 ## Compose view
 
@@ -213,14 +220,20 @@ The compose view is an `input` node, so the field has the focus. It is an
 overlay at the bottom of the screen (`{ overlay: true, fullscreen: false }`).
 The field holds one line and has no prompt: omp 19.2.1 scrolls an `input`
 without the width of its prompt, so a prompt can hide the caret of a long
-text. The placeholder names the destination while the field is empty:
+text. The placeholder names the destination while the field is empty. The
+editor painter of omp 19.2.1 draws a placeholder only when it leaves one
+cell free, so the view uses the longest of these forms that fits the width
+from `ui.size()`, and cuts the destination as the last resort:
 
 ```text
 To <name>: the message; ⏎ confirms the destination, ⎋ cancels
+To <name> · ⏎ confirm · ⎋ cancel
+To <name>
 ```
 
 The confirm view names the destination again. Each edit passes
-`safeMultiline` (see [Review](#review)).
+`safeMultiline` (see [Review](#review)), and then each line feed becomes a
+space, so the one-line field shows the whole text that the view sends.
 
 Enter with text that is not blank opens the [confirm view](#confirm-view).
 Enter with a blank text does nothing. `escape` and `alt+t` end the flow and
@@ -416,12 +429,17 @@ around the caret. While no editable row fits the screen, `ctrl+s` does
 nothing. The keys are in [Keys](#keys): `ctrl+s` opens the confirm view,
 and Enter adds no line.
 
-The reply of the side turn is model text, so the review cleans it with
-`safeMultiline` (`cli/talk/tool/attachments.ts`) before it trims it: each
-line break becomes a line feed, and each terminal escape sequence and each
-other control character except the tab goes. Each edit passes the same
-cleaner, so the send carries exactly the text of the review. When omp cut
-the reply, the review shows this line in place of omp's `[…truncated]`:
+The reply of the side turn is model text. The review first looks for the
+`[…truncated]` line that omp adds to a reply that it cut, then cleans the
+rest with `safeMultiline` (`cli/talk/tool/attachments.ts`) and trims it:
+each line break becomes a line feed, and each terminal escape sequence and
+each other control character except the tab goes. A string command (OSC,
+DCS, SOS, PM, APC) without its end takes the rest of the text with it, so
+the cleaner reads each character once also in a malformed text. Each edit
+passes the same cleaner, so the send carries exactly the text of the
+review. A reply that is empty after the cleaner, cut or not, opens no
+review and shows the empty-reply error. When omp cut a reply that is not
+empty, the review shows this line in place of omp's `[…truncated]`:
 
 ```text
 [talk: omp cut this handover at 4096 bytes, so its end is missing. Complete or shorten it before you send it.]
@@ -434,8 +452,9 @@ The review starts with the caret at the start of the draft.
 After the confirm code, the flow sends the reviewed text to the exact pair as
 a `deliver` request with `kind: "handover"`, no attachments, and a request
 for a turn (`noWake: false`). The wake is a request, not a promise: an idle
-receiver appends the message with `triggerTurn: true` and answers
-`delivered`; a busy interactive receiver queues the message, answers
+receiver hands the message to omp with `triggerTurn: true` and answers
+`delivered` only when its watch sees the append within 1 s, else
+`submitted`; a busy interactive receiver queues the message, answers
 `queued`, and starts no turn before its queue sends it. `kind` is a field of the
 deliver body and of `details`, not a tool field: the `talk` tool sends only
 messages, and a plain message leaves `kind` out of the body. An ask is never a

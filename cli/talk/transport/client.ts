@@ -86,7 +86,9 @@ type Exchange =
   | { readonly _tag: "Absent"; readonly reason: string }
   | { readonly _tag: "Unreachable"; readonly reason: string }
   /** The #249 path could not read the fresh entry. */
-  | { readonly _tag: "LookupFailed"; readonly failure: TalkRequestFailed };
+  | { readonly _tag: "LookupFailed"; readonly failure: TalkRequestFailed }
+  /** The guard of the caller refused the body after the mutual proof; no body went out. */
+  | { readonly _tag: "Cancelled" };
 
 /** What one connection gave: an exchange, or `Lost` when another route completed the proof first. */
 type Attempt = Exchange | { readonly _tag: "Lost" };
@@ -100,6 +102,17 @@ interface RouteEnd {
 const LOST: Attempt = { _tag: "Lost" };
 const AUTH_FAILED: Attempt = { _tag: "AuthFailed" };
 const ENDED: Attempt = { _tag: "Ended" };
+const CANCELLED: Attempt = { _tag: "Cancelled" };
+
+/** What a request sends, and the check that runs right before its body goes out. */
+interface Outgoing {
+  readonly kind: string;
+  readonly body: Schema.Json;
+  /** False keeps the body back: the connection closes and the request ends as interrupted. */
+  readonly beforeBody: () => boolean;
+}
+
+const ALWAYS_SEND = (): boolean => true;
 
 /** POSIX: the paths of the talk sockets in the folder, by the process id that each name carries. */
 type SocketIndex = ReadonlyMap<number, ReadonlyArray<string>>;
@@ -174,11 +187,17 @@ const failed = (outcome: RequestOutcome, reason: string): TalkRequestFailed =>
 
 export interface Client {
   readonly list: Effect.Effect<PeerListing, TalkListError>;
+  /**
+   * `beforeBody` runs after the mutual proof, right before the body goes out.
+   * When it returns false, no body goes out, the connection closes, and the
+   * request ends as interrupted, as an abort of its caller does (#251 G3).
+   */
   readonly request: (
     target: Target,
     kind: string,
     body: Schema.Json,
     timeoutMs?: number,
+    beforeBody?: () => boolean,
   ) => Effect.Effect<Schema.Json, TalkRequestFailed>;
   /**
    * A `ping` to each target with the probe timeout, all at the same time; the
@@ -261,8 +280,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     connection: Connection,
     entry: RegistryEntry,
     endpoint: Endpoint,
-    kind: string,
-    body: Schema.Json,
+    outgoing: Outgoing,
     take: Effect.Effect<boolean>,
   ) {
     const clientNonce = yield* makeNonce;
@@ -293,9 +311,11 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     // The mutual proof is complete; only the first route to get here sends the body.
     if (!(yield* take)) return LOST;
     if (end.type === "ended") return ENDED;
+    // The last check of the caller: a body that goes out can reach the peer.
+    if (!outgoing.beforeBody()) return CANCELLED;
     const id = nextRequestId;
     nextRequestId += 1;
-    yield* connection.write({ type: "request", id, kind, body });
+    yield* connection.write({ type: "request", id, kind: outgoing.kind, body: outgoing.body });
     for (;;) {
       const response = yield* Effect.flatMap(connection.read, decodeResponse);
       if (response.id !== id) continue;
@@ -311,8 +331,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
   const attempt = (
     entry: RegistryEntry,
     endpoint: Endpoint,
-    kind: string,
-    body: Schema.Json,
+    outgoing: Outgoing,
     take: Effect.Effect<boolean>,
     dialed: Effect.Effect<void> = Effect.void,
   ): Effect.Effect<Attempt> =>
@@ -330,7 +349,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         }
         return yield* Effect.acquireUseRelease(
           makeConnection(socket.success),
-          (connection) => converse(connection, entry, endpoint, kind, body, take),
+          (connection) => converse(connection, entry, endpoint, outgoing, take),
           (connection) => connection.close,
         ).pipe(
           Effect.catch((error) =>
@@ -376,8 +395,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
    */
   const deliver = Effect.fnUntraced(function* (
     target: Target,
-    kind: string,
-    body: Schema.Json,
+    outgoing: Outgoing,
     sockets: Effect.Effect<SocketIndex>,
   ) {
     const key = targetKey(target);
@@ -415,7 +433,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     const path249 = (dialed: Effect.Effect<void>) =>
       route((take) =>
         Effect.gen(function* () {
-          const outcome = yield* attempt(first, first.endpoint, kind, body, take, dialed);
+          const outcome = yield* attempt(first, first.endpoint, outgoing, take, dialed);
           if (outcome._tag !== "Absent") return outcome;
           // The listener may have bound a new endpoint: read the entry once more and dial there.
           const reread = yield* Effect.result(readEntry(fileName));
@@ -427,7 +445,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
           if (fresh === undefined || sameEndpoint(fresh.endpoint, first.endpoint)) return outcome;
           last = fresh;
           keep(fresh);
-          return yield* attempt(fresh, fresh.endpoint, kind, body, take);
+          return yield* attempt(fresh, fresh.endpoint, outgoing, take);
         }),
       );
 
@@ -462,7 +480,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
                 (endpoint) =>
                   Effect.forkScoped(
                     Effect.flatMap(
-                      route((take) => attempt(first, endpoint, kind, body, take)),
+                      route((take) => attempt(first, endpoint, outgoing, take)),
                       (end) => settle(end, false),
                     ),
                   ),
@@ -482,7 +500,10 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         if (result.status === "not-live") {
           return yield* failed("not-live", "the target ended while the listener held the request");
         }
-        return yield* failed("unknown-kind", `the target has no handler for the kind ${kind}`);
+        return yield* failed(
+          "unknown-kind",
+          `the target has no handler for the kind ${outgoing.kind}`,
+        );
       }
       case "Ended":
         return yield* failed("not-live", "the listener reported that the registration ended");
@@ -499,17 +520,18 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         return yield* failed("unreachable", outcome.reason);
       case "LookupFailed":
         return yield* outcome.failure;
+      case "Cancelled":
+        return yield* Effect.interrupt;
     }
   });
 
   const deliverWithin = (
     target: Target,
-    kind: string,
-    body: Schema.Json,
+    outgoing: Outgoing,
     timeoutMs: number,
     sockets: Effect.Effect<SocketIndex>,
   ) =>
-    deliver(target, kind, body, sockets).pipe(
+    deliver(target, outgoing, sockets).pipe(
       Effect.timeoutOrElse({
         duration: timeoutMs,
         orElse: () => Effect.fail(failed("timeout", `no answer within ${timeoutMs} ms`)),
@@ -522,8 +544,9 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     kind: string,
     body: Schema.Json,
     timeoutMs: number = options.requestTimeoutMs,
+    beforeBody: () => boolean = ALWAYS_SEND,
   ) {
-    return yield* deliverWithin(target, kind, body, timeoutMs, readSockets);
+    return yield* deliverWithin(target, { kind, body, beforeBody }, timeoutMs, readSockets);
   });
 
   // A probe batch reads the socket names once, when its first route needs them.
@@ -533,7 +556,14 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
       targets,
       (target) =>
         Effect.result(
-          Effect.asVoid(deliverWithin(target, PING_KIND, null, options.probeTimeoutMs, sockets)),
+          Effect.asVoid(
+            deliverWithin(
+              target,
+              { kind: PING_KIND, body: null, beforeBody: ALWAYS_SEND },
+              options.probeTimeoutMs,
+              sockets,
+            ),
+          ),
         ),
       { concurrency: "unbounded" },
     );

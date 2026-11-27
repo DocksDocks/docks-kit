@@ -243,6 +243,34 @@ describe("/talk handover <target> (G2, G6)", () => {
     await flow;
   });
 
+  it.each([
+    ["blank", "   "],
+    ["only an escape sequence", "\u001b[2J"],
+  ])(
+    "refuses a cut reply whose kept part is %s, and opens no review with omp's raw mark (R5)",
+    async (_name, kept) => {
+      const h = await harness();
+      h.services.reply = () => Promise.resolve({ replyText: `${kept}${OMP_CUT_MARK}` });
+      const { flow } = await handoverToGamma(h);
+      // No review mounts, so the flow ends without a key.
+      expect(h.tui.calls).toEqual(["notify", "notify"]);
+      await flow;
+      expect(h.tui.notices.at(-1)).toEqual({ text: HANDOVER_EMPTY, level: "error" });
+      expect(h.services.sends).toEqual([]);
+    },
+  );
+
+  it("finds omp's mark before the cleaner, also when the kept part ends in an escape sequence and spaces (R5)", async () => {
+    const h = await harness();
+    h.services.reply = () =>
+      Promise.resolve({ replyText: `## Next task\nShip\u001b[0m  \t${OMP_CUT_MARK}` });
+    const { flow } = await handoverToGamma(h);
+    const review = reviewOf(h);
+    expect(prop(review, "text")).toBe(`## Next task\nShip\n${HANDOVER_CUT_LINE}`);
+    press(review, "escape");
+    await flow;
+  });
+
   it.each(["escape", "alt+t"])("cancels the review on %s and sends nothing", async (id) => {
     const h = await harness();
     const { flow } = await handoverToGamma(h);

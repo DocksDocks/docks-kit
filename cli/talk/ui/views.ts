@@ -115,8 +115,12 @@ export const PICKER_FIXED_ROWS = 3;
  * painter keeps when it cuts a label (2).
  */
 export const PICKER_LABEL_CHROME = 9;
-/** The rows of the empty picker frame without a hint: the top border, the empty text, and the bottom border. */
-export const PICKER_EMPTY_FRAME_ROWS = 3;
+/**
+ * The cells of the top border that a title cannot use (`boxTop` of `picker.ts`
+ * v19.2.1): the corner and the line before the title (2), a space on each
+ * side of the title (2), and the line and the corner after it (2).
+ */
+export const PICKER_TITLE_CHROME = 6;
 
 /** What the list view can show in its space. */
 export interface ListLayout {
@@ -124,26 +128,32 @@ export interface ListLayout {
   readonly maxRows: number;
   /** At least one item row fits, and the label budget holds the full instance id. */
   readonly fits: boolean;
-  /**
-   * The empty frame fits, so its empty text can hold the request for a
-   * larger pane. Otherwise the top border holds it: omp clips an overflowing
-   * frame to its first rows (S10).
-   */
-  readonly framed: boolean;
 }
 
 /** G3: the rows after the fixed picker rows, at most 10, and the width guard of the label. */
 export const listLayout = (size: ViewSize | undefined): ListLayout => {
-  if (size === undefined) return { maxRows: 1, fits: false, framed: false };
+  if (size === undefined) return { maxRows: 1, fits: false };
   const rows = Math.min(PICKER_ROW_LIMIT, size.rows - PICKER_FIXED_ROWS);
   return {
     maxRows: Math.max(1, rows),
     fits: rows >= 1 && size.columns - PICKER_LABEL_CHROME >= INSTANCE_ID_LENGTH,
-    framed: size.rows >= PICKER_EMPTY_FRAME_ROWS,
   };
 };
 
 export const LIST_TOO_SMALL = "talk: make the pane larger to show the sessions.";
+/** The shorter forms of the request, for a narrow pane. */
+const LIST_TOO_SMALL_SHORT = ["talk: enlarge pane", "enlarge pane", "enlarge"] as const;
+
+/**
+ * The request for a larger pane in the top border (S10, R12). omp clips a
+ * frame that does not fit from its end, so the top border is the row that
+ * stays. The request is the longest form whose whole text fits the title
+ * budget of the border in `columns` cells.
+ */
+export const tooSmallTitle = (ui: HostUi, columns: number | undefined): string | undefined => {
+  const budget = (columns ?? 0) - PICKER_TITLE_CHROME;
+  return [LIST_TOO_SMALL, ...LIST_TOO_SMALL_SHORT].find((text) => ui.visibleWidth(text) <= budget);
+};
 const LIST_EMPTY = "No live talk sessions.";
 
 /** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
@@ -213,9 +223,9 @@ export const listView = (
     selected: () => (layout().fits ? selected() : null),
     empty: () => (layout().fits ? LIST_EMPTY : LIST_TOO_SMALL),
     term: () => {
-      const { maxRows, fits, framed } = layout();
+      const { maxRows, fits } = layout();
       if (fits) return { maxRows, hint: LIST_HINT[mode] };
-      return { maxRows, hint: null, title: framed ? null : LIST_TOO_SMALL };
+      return { maxRows, hint: null, title: tooSmallTitle(ui, size()?.columns) ?? null };
     },
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
@@ -250,22 +260,51 @@ export type TextChoice =
   | { readonly _tag: "Cancel" };
 
 /**
- * Applies one edit of a text field (T1). The inserted text passes
- * `safeMultiline`, so no escape sequence or other control character reaches
- * the field or the send; the caret of a cleaned insertion goes to its end.
- * A stale edit saw another text, and pi-tui says to ignore it.
+ * Applies one edit of a text field (T1). The inserted text passes `clean`,
+ * `safeMultiline` by default, so no escape sequence or other control
+ * character reaches the field or the send; the caret of a cleaned insertion
+ * goes to its end. A stale edit saw another text, and pi-tui says to ignore
+ * it.
  */
-export const applyEdit = (draft: Signal<string>, cursor: Signal<number>, edit: ViewEdit): void => {
+export const applyEdit = (
+  draft: Signal<string>,
+  cursor: Signal<number>,
+  edit: ViewEdit,
+  clean: (text: string) => string = safeMultiline,
+): void => {
   const before = draft.peek();
   if (edit.len !== before.length) return;
-  const text = safeMultiline(edit.text);
+  const text = clean(edit.text);
   draft.set(before.slice(0, edit.from) + text + before.slice(edit.to));
   cursor.set(text === edit.text ? edit.cursor : edit.from + text.length);
 };
 
-/** The placeholder of the compose field: the destination and the keys. */
-export const composePlaceholder = (destination: Destination): string =>
-  `To ${shownName(destination)}: the message; ⏎ confirms the destination, ⎋ cancels`;
+/**
+ * Text for the one-line compose field (R3): `safeMultiline`, then each line
+ * feed becomes a space, so the field shows the whole draft that it sends.
+ */
+export const safeOneLine = (text: string): string => safeMultiline(text).replaceAll("\n", " ");
+
+/**
+ * The placeholder of the compose field in `columns` cells (R6). The editor
+ * painter of omp 19.2.1 draws a placeholder only when it leaves one cell
+ * free, so the text takes at most `columns - 1` cells: the destination
+ * first, and the key help only while it fits.
+ */
+export const composePlaceholder = (
+  ui: HostUi,
+  destination: Destination,
+  columns: number | undefined,
+): string => {
+  const target = `To ${shownName(destination)}`;
+  const budget = Math.max(0, (columns ?? 0) - 1);
+  const fitting = [
+    `${target}: the message; ⏎ confirms the destination, ⎋ cancels`,
+    `${target} · ⏎ confirm · ⎋ cancel`,
+    target,
+  ].find((text) => ui.visibleWidth(text) <= budget);
+  return fitting ?? ui.truncate(target, budget);
+};
 
 /**
  * The compose view: an `input` root, so the field takes the typing (F5).
@@ -278,6 +317,7 @@ export const composePlaceholder = (destination: Destination): string =>
  */
 export const composeView = (
   ui: HostUi,
+  size: SizeReader,
   destination: Destination,
   text: string,
   done: (choice: TextChoice) => void,
@@ -287,9 +327,9 @@ export const composeView = (
   return ui.jsx("input", {
     text: () => draft(),
     cursor: () => cursor(),
-    placeholder: composePlaceholder(destination),
+    placeholder: () => composePlaceholder(ui, destination, size()?.columns),
     onEdit: (edit: ViewEdit) => {
-      applyEdit(draft, cursor, edit);
+      applyEdit(draft, cursor, edit, safeOneLine);
     },
     onKey: (key: ViewKey): boolean => {
       if (key.kind === "release") return false;

@@ -415,7 +415,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       destination,
       "message",
       "",
-      (_size, text, done) => composeView(ui, destination, text, done),
+      (size, text, done) => composeView(ui, size, destination, text, done),
       DOCKED,
     );
 

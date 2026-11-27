@@ -2356,17 +2356,29 @@ class TerminalOmp {
   }
 
   /**
-   * The screen text of each frame, in output order. A diff repaint writes only the rows that changed, so a
-   * row shows twice in one frame only when omp draws it twice. The last frame can be incomplete.
+   * The screen text of each complete frame, in output order: the frame has both its autowrap off and its
+   * autowrap on. A diff repaint writes only the rows that changed, so a row shows twice in one frame only when
+   * omp draws it twice. A frame whose end has not arrived yet is left out, because its count can still grow.
    */
   frames(): string[] {
     return this.#raw
       .split(AUTOWRAP_OFF)
       .slice(1)
-      .map((part) => {
+      .flatMap((part) => {
         const end = part.indexOf(AUTOWRAP_ON);
-        return screenText(end === -1 ? part : part.slice(0, end));
+        return end === -1 ? [] : [screenText(part.slice(0, end))];
       });
+  }
+
+  /** Waits until a complete frame shows `shown`; fails when none does in time. */
+  async waitForFrame(shown: string, what: string): Promise<void> {
+    const deadline = Date.now() + STEP_TIMEOUT_MS;
+    while (!this.frames().some((frame) => frame.includes(shown))) {
+      const left = deadline - Date.now();
+      if (left <= 0)
+        failStep(`no complete frame of the screen shows the ${what} within ${STEP_TIMEOUT_MS / 1_000} s`);
+      await this.#nextOutput(left);
+    }
   }
 
   write(bytes: string): void {
@@ -2530,6 +2542,8 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
 
     step = "old-notice";
     await screen.waitFor(CAPABILITY_NOTICE_END, 0, "talk notice that names omp 19.2.0");
+    // The PTY can split a frame between two reads, so the count waits for a frame with its end.
+    await screen.waitForFrame(CAPABILITY_NOTICE_END, "capability notice");
     const others = new Set(
       [...screen.text().matchAll(TALK_NOTICE)]
         .map((match) => match[0].trim())

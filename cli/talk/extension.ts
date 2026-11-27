@@ -241,9 +241,11 @@ export const makeTalkTransport = (
         ),
         signal,
       ),
-    request: (target, kind, body, signal) =>
+    request: (target, kind, body, signal, beforeBody) =>
       run(
-        TalkTransport.use((transport) => transport.request(target, kind, body)).pipe(
+        TalkTransport.use((transport) =>
+          transport.request(target, kind, body, undefined, beforeBody),
+        ).pipe(
           Effect.map((answer): RequestAnswer => ({ _tag: "Answered", body: answer })),
           Effect.catch((error) =>
             Effect.succeed<RequestAnswer>({
@@ -603,6 +605,8 @@ interface SessionContext {
   readonly sessionId: () => string;
   readonly sessionFile: () => string | undefined;
   readonly entries: () => ReadonlyArray<unknown>;
+  /** True when `entries` reads omp's live `getEntriesView()`, not the copy of `getEntries()`. */
+  readonly liveEntries: () => boolean;
   readonly cwd: () => string;
   readonly isIdle: () => boolean;
   readonly hasPendingMessages: () => boolean;
@@ -611,7 +615,7 @@ interface SessionContext {
   readonly setInterval: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer: (timer: unknown) => void;
 }
-type ContextMember = keyof SessionContext;
+type ContextMember = Exclude<keyof SessionContext, "liveEntries">;
 
 const MEMBER_NAMES: Record<ContextMember, string> = {
   sessionId: "ctx.sessionManager.getSessionId",
@@ -694,6 +698,7 @@ const readContext = (ctx: unknown, needs: ReadonlyArray<ContextMember>): Session
       if (!Array.isArray(entries)) throw contextError(["entries"]);
       return entries;
     },
+    liveEntries: () => entriesView !== undefined,
     isIdle: () => flag("isIdle"),
     hasPendingMessages: () => flag("hasPendingMessages"),
     mode: () => {
@@ -869,6 +874,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     sessionId: () => requireSession().sessionId(),
     sessionFile: () => requireSession().sessionFile(),
     entries: () => requireSession().entries(),
+    liveEntries: () => requireSession().liveEntries(),
     isIdle: () => requireSession().isIdle(),
     hasPendingMessages: () => requireSession().hasPendingMessages(),
     mode: () => requireSession().mode(),
@@ -1067,7 +1073,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
         }, SWEEP_INTERVAL_MS),
       };
     }
-    // A subagent session is no target (#248 D2): it has no registration and no timer.
+    // A subagent session is no target (#248 D2): it has no registration and no
+    // registration-repair timer; only the beat timer above keeps its ancestry row.
     if (identity.kind !== "main") return;
     session = readContext(ctx, MAIN_NEEDS);
     readMarkerPath();
@@ -1181,8 +1188,10 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     return {
       list: () => whileLive(() => talk.transport.list(life.signal)),
       probeAll: (targets) => whileLive(() => talk.transport.probeAll(targets, life.signal)),
+      // The client asks `live` again after the handshake, right before the body
+      // goes out: a session id that changed with no event stops the body (R1, R11).
       request: (target, kind, body) =>
-        whileLive(() => talk.transport.request(target, kind, body, life.signal)),
+        whileLive(() => talk.transport.request(target, kind, body, life.signal, life.live)),
       known: (instanceId) => whileLive(() => talk.transport.known(instanceId, life.signal)),
     };
   };
