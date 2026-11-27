@@ -290,7 +290,7 @@ failure with the path and the reason.
 
 | File                                | Holds                                                                                                           |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `cli/talk/index.ts`                 | The bundle entry; it exports the transport API                                                                  |
+| `cli/talk/index.ts`                 | The bundle entry; it default-exports the extension factory and keeps the transport API exports                  |
 | `cli/talk/licenses/pi-intercom.txt` | The license of the ported pi-intercom source, first in the banner                                               |
 | `cli/talk/transport/frame.ts`       | The frame codec and the 1 MiB cap                                                                               |
 | `cli/talk/transport/handshake.ts`   | The handshake and request messages, nonces, and HMAC proofs                                                     |
