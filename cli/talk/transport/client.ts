@@ -114,6 +114,9 @@ interface Outgoing {
 
 const ALWAYS_SEND = (): boolean => true;
 
+/** The one immutable request of every probe: the target varies, the ping does not (L7). */
+const PING: Outgoing = Object.freeze({ kind: PING_KIND, body: null, beforeBody: ALWAYS_SEND });
+
 /** POSIX: the paths of the talk sockets in the folder, by the process id that each name carries. */
 type SocketIndex = ReadonlyMap<number, ReadonlyArray<string>>;
 
@@ -555,16 +558,7 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     return yield* Effect.forEach(
       targets,
       (target) =>
-        Effect.result(
-          Effect.asVoid(
-            deliverWithin(
-              target,
-              { kind: PING_KIND, body: null, beforeBody: ALWAYS_SEND },
-              options.probeTimeoutMs,
-              sockets,
-            ),
-          ),
-        ),
+        Effect.result(Effect.asVoid(deliverWithin(target, PING, options.probeTimeoutMs, sockets))),
       { concurrency: "unbounded" },
     );
   });

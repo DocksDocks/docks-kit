@@ -1074,7 +1074,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       };
     }
     // A subagent session is no target (#248 D2): it has no registration and no
-    // registration-repair timer; only the beat timer above keeps its ancestry row.
+    // registration-repair timer. The beat timer above keeps the ancestry row of a
+    // suspended binding; a `talk` call of an active binding refreshes it too.
     if (identity.kind !== "main") return;
     session = readContext(ctx, MAIN_NEEDS);
     readMarkerPath();

@@ -141,19 +141,36 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 };
 
 export const LIST_TOO_SMALL = "talk: make the pane larger to show the sessions.";
-/** The shorter forms of the request, for a narrow pane. */
-const LIST_TOO_SMALL_SHORT = ["talk: enlarge pane", "enlarge pane", "enlarge"] as const;
+/** The shorter forms of the request, for a narrow pane; then the longest prefix of the last one. */
+const LIST_TOO_SMALL_SHORT = ["talk: enlarge pane", "enlarge pane", "Resize"] as const;
+const SHORTEST_REQUEST = "Resize";
+/** The rows of the empty picker frame without a hint: the top border, the empty text, and the bottom border. */
+export const PICKER_EMPTY_FRAME_ROWS = 3;
 
 /**
- * The request for a larger pane in the top border (S10, R12). omp clips a
- * frame that does not fit from its end, so the top border is the row that
- * stays. The request is the longest form whose whole text fits the title
- * budget of the border in `columns` cells.
+ * The request for a larger pane in the top border (S10, R12, L8): the
+ * longest form whose whole text fits the title budget of the border in
+ * `columns` cells, else the longest prefix of `Resize` that fits. So each
+ * width with room for a title draws a request; a border with no room for one
+ * cell of title gets undefined.
  */
 export const tooSmallTitle = (ui: HostUi, columns: number | undefined): string | undefined => {
   const budget = (columns ?? 0) - PICKER_TITLE_CHROME;
-  return [LIST_TOO_SMALL, ...LIST_TOO_SMALL_SHORT].find((text) => ui.visibleWidth(text) <= budget);
+  if (budget < 1) return undefined;
+  return (
+    [LIST_TOO_SMALL, ...LIST_TOO_SMALL_SHORT].find((text) => ui.visibleWidth(text) <= budget) ??
+    SHORTEST_REQUEST.slice(0, budget)
+  );
 };
+
+/**
+ * Where the list draws its one request for a larger pane (L8). omp clips a
+ * frame that does not fit to its first rows, so in a pane with fewer rows
+ * than the empty frame the top border holds the request and the body holds
+ * nothing; else only the body holds it.
+ */
+const inTitle = (size: ViewSize | undefined): boolean =>
+  size !== undefined && size.rows < PICKER_EMPTY_FRAME_ROWS;
 const LIST_EMPTY = "No live talk sessions.";
 
 /** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
@@ -221,11 +238,16 @@ export const listView = (
     size: "screen",
     items: () => (layout().fits ? items : []),
     selected: () => (layout().fits ? selected() : null),
-    empty: () => (layout().fits ? LIST_EMPTY : LIST_TOO_SMALL),
+    empty: () => {
+      if (layout().fits) return LIST_EMPTY;
+      return inTitle(size()) ? "" : LIST_TOO_SMALL;
+    },
     term: () => {
       const { maxRows, fits } = layout();
       if (fits) return { maxRows, hint: LIST_HINT[mode] };
-      return { maxRows, hint: null, title: tooSmallTitle(ui, size()?.columns) ?? null };
+      const current = size();
+      const title = inTitle(current) ? tooSmallTitle(ui, current?.columns) : undefined;
+      return { maxRows, hint: null, title: title ?? null };
     },
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
@@ -285,11 +307,16 @@ export const applyEdit = (
  */
 export const safeOneLine = (text: string): string => safeMultiline(text).replaceAll("\n", " ");
 
+/** The cells of an empty compose row that the placeholder cannot use: the caret bar and the free cell before the placeholder. */
+export const COMPOSE_PLACEHOLDER_CHROME = 2;
+
 /**
- * The placeholder of the compose field in `columns` cells (R6). The editor
- * painter of omp 19.2.1 draws a placeholder only when it leaves one cell
- * free, so the text takes at most `columns - 1` cells: the destination
- * first, and the key help only while it fits.
+ * The placeholder of the compose field in `columns` cells (R6, L2). The
+ * editor painter of omp 19.2.1 draws the caret of an empty field as a bar in
+ * one cell (`editor.ts` v19.2.1:589-591) and then the placeholder only when
+ * at least one cell stays free before it (`editor.ts` v19.2.1:614-615), so
+ * the text takes at most `columns - 2` cells: the destination first, and the
+ * key help only while it fits.
  */
 export const composePlaceholder = (
   ui: HostUi,
@@ -297,7 +324,7 @@ export const composePlaceholder = (
   columns: number | undefined,
 ): string => {
   const target = `To ${shownName(destination)}`;
-  const budget = Math.max(0, (columns ?? 0) - 1);
+  const budget = Math.max(0, (columns ?? 0) - COMPOSE_PLACEHOLDER_CHROME);
   const fitting = [
     `${target}: the message; ⏎ confirms the destination, ⎋ cancels`,
     `${target} · ⏎ confirm · ⎋ cancel`,

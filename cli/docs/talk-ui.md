@@ -205,14 +205,17 @@ gets the width less 9 cells (the frame, the scrollbar, the pointer, and the
 two cells that the painter keeps when it cuts a label). So the list needs at
 least 4 rows and 25 columns.
 
-When the space is smaller, the picker shows only
-`talk: make the pane larger to show the sessions.`, and Enter and `h` do
-nothing. The view checks again after each resize. omp keeps only the first
-rows of a frame that does not fit, so the request also shows as the title in
-the top border, the first row. The painter gives a title the width less 6
-cells, so the view uses the longest request that fits whole:
-`talk: make the pane larger to show the sessions.`, `talk: enlarge pane`,
-`enlarge pane`, or `enlarge`. A pane narrower than 13 columns gets no title.
+When the space is smaller, the picker shows only one request for a larger
+pane, and Enter and `h` do nothing. The view checks again after each resize.
+In a pane with at least 3 rows, the request is the empty text of the frame:
+`talk: make the pane larger to show the sessions.` omp keeps only the first
+rows of a frame that does not fit, so in a pane with fewer rows the request
+is the title in the top border, the first row, and the body is empty. The
+painter gives a title the width less 6 cells, so the view uses the longest
+request that fits whole: `talk: make the pane larger to show the sessions.`,
+`talk: enlarge pane`, `enlarge pane`, or `Resize`, and else the longest
+start of `Resize` that fits (`R` at 7 columns). A pane narrower than 7
+columns has no room for a title.
 
 ## Compose view
 
@@ -221,9 +224,11 @@ overlay at the bottom of the screen (`{ overlay: true, fullscreen: false }`).
 The field holds one line and has no prompt: omp 19.2.1 scrolls an `input`
 without the width of its prompt, so a prompt can hide the caret of a long
 text. The placeholder names the destination while the field is empty. The
-editor painter of omp 19.2.1 draws a placeholder only when it leaves one
-cell free, so the view uses the longest of these forms that fits the width
-from `ui.size()`, and cuts the destination as the last resort:
+editor painter of omp 19.2.1 draws the caret of an empty field as a bar in
+one cell and then draws the placeholder only when one more cell stays free
+before it. So the placeholder gets the width less 2 cells, and the view uses
+the longest of these forms that fits the width from `ui.size()`, and cuts
+the destination as the last resort:
 
 ```text
 To <name>: the message; ⏎ confirms the destination, ⎋ cancels
@@ -435,7 +440,8 @@ rest with `safeMultiline` (`cli/talk/tool/attachments.ts`) and trims it:
 each line break becomes a line feed, and each terminal escape sequence and
 each other control character except the tab goes. A string command (OSC,
 DCS, SOS, PM, APC) without its end takes the rest of the text with it, so
-the cleaner reads each character once also in a malformed text. Each edit
+the cleaner reads each character a small, fixed number of times also in a
+malformed text. Each edit
 passes the same cleaner, so the send carries exactly the text of the
 review. A reply that is empty after the cleaner, cut or not, opens no
 review and shows the empty-reply error. When omp cut a reply that is not
@@ -452,9 +458,10 @@ The review starts with the caret at the start of the draft.
 After the confirm code, the flow sends the reviewed text to the exact pair as
 a `deliver` request with `kind: "handover"`, no attachments, and a request
 for a turn (`noWake: false`). The wake is a request, not a promise: an idle
-receiver hands the message to omp with `triggerTurn: true` and answers
-`delivered` only when its watch sees the append within 1 s, else
-`submitted`; a busy interactive receiver queues the message, answers
+receiver hands the message to omp with `triggerTurn: true`. It answers
+`delivered` when its watch sees the append within 1 s, `not-live` when the
+session changes first, and `submitted` when the watch confirms neither
+within 1 s; a busy interactive receiver queues the message, answers
 `queued`, and starts no turn before its queue sends it. `kind` is a field of the
 deliver body and of `details`, not a tool field: the `talk` tool sends only
 messages, and a plain message leaves `kind` out of the body. An ask is never a

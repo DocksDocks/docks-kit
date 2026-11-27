@@ -28,6 +28,7 @@ import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
   LIST_TOO_SMALL,
+  PICKER_EMPTY_FRAME_ROWS,
   PICKER_TITLE_CHROME,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
@@ -271,9 +272,11 @@ describe("list view (G3)", () => {
     [100, LIST_TOO_SMALL],
     [25, "talk: enlarge pane"],
     [18, "enlarge pane"],
-    [13, "enlarge"],
+    [12, "Resize"],
+    [9, "Res"],
+    [7, "R"],
   ])(
-    "puts a whole request for a larger pane in the top border of a 1-row pane %i columns wide (S10, R12)",
+    "draws the one request for a larger pane in the top border of a 1-row pane %i columns wide (S10, R12, L8)",
     async (columns, request) => {
       const h = await harness();
       const flow = h.run();
@@ -287,14 +290,30 @@ describe("list view (G3)", () => {
       expect([...first]).toHaveLength(columns);
       expect(first).toContain(` ${request} `);
       expect([...request].length + PICKER_TITLE_CHROME).toBeLessThanOrEqual(columns);
+      // The body row, which omp clips, holds no second request.
+      expect(prop(list, "empty")).toBe("");
       press(list, "escape");
       await flow;
     },
   );
 
-  it("gives no request title when even the shortest request does not fit", async () => {
+  it("draws the request only in the body of a pane with room for the empty frame (L8)", async () => {
+    const h = await harness();
+    const flow = h.run();
+    await flush();
+    const list = h.tui.top.node;
+    h.tui.size = { columns: 100, rows: PICKER_EMPTY_FRAME_ROWS };
+    const rows = [topBorder(termOf(list)["title"], 100), String(prop(list, "empty"))];
+    expect(rows.filter((text) => text.includes(LIST_TOO_SMALL))).toHaveLength(1);
+    expect(rows[1]).toBe(LIST_TOO_SMALL);
+    press(list, "escape");
+    await flow;
+  });
+
+  it("gives no request title when the border has no cell for a title", async () => {
     const ui = await loadUi();
-    expect(tooSmallTitle(ui, 12)).toBeUndefined();
+    expect(tooSmallTitle(ui, PICKER_TITLE_CHROME)).toBeUndefined();
+    expect(tooSmallTitle(ui, PICKER_TITLE_CHROME + 1)).toBe("R");
     expect(tooSmallTitle(ui, undefined)).toBeUndefined();
   });
 
@@ -310,27 +329,44 @@ describe("list view (G3)", () => {
     await flow;
   });
 
+  /**
+   * The empty row that the input painter of omp 19.2.1 draws (`editor.ts`
+   * v19.2.1:586-591, 610-618): the caret bar in one cell, then the
+   * placeholder flush right only when at least one cell stays free before it.
+   * The test cannot import the pinned painter, so it applies the same rule.
+   */
+  const emptyComposeRow = (placeholder: string, columns: number): string => {
+    const gap = columns - 1 - [...placeholder].length;
+    return gap >= 1 ? `|${" ".repeat(gap)}${placeholder}` : "|";
+  };
+
+  const LONG = "a-long-destination-session-name-for-the-test";
+
   it.each([
-    [100, `To ${literal("gamma")}: the message; ⏎ confirms the destination, ⎋ cancels`],
-    [40, `To ${literal("gamma")} · ⏎ confirm · ⎋ cancel`],
-    [20, `To ${literal("gamma")}`],
-    [8, "To `gam"],
+    ["gamma", 100, `To ${literal("gamma")}: the message; ⏎ confirms the destination, ⎋ cancels`],
+    ["gamma", 40, `To ${literal("gamma")} · ⏎ confirm · ⎋ cancel`],
+    ["gamma", 20, `To ${literal("gamma")}`],
+    ["gamma", 8, "To `ga"],
+    [LONG, 40, `To \`${LONG}`.slice(0, 38)],
+    [LONG, 8, "To `a-"],
   ])(
-    "fits the compose placeholder to %i columns, destination first (R6)",
-    async (columns, placeholder) => {
+    "draws the compose placeholder of %s in %i columns, destination first (R6, L2)",
+    async (name, columns, placeholder) => {
       const h = await harness();
       h.services.target = {
         _tag: "Resolved",
-        destination: { instanceId: ID_C, sessionId: "session-gamma", name: "gamma", cwd: "/g" },
+        destination: { instanceId: ID_C, sessionId: "session-gamma", name, cwd: "/g" },
       };
-      const flow = h.run({ _tag: "Compose", target: "gamma" });
+      const flow = h.run({ _tag: "Compose", target: name });
       await flush();
       const compose = h.tui.top.node;
       h.tui.size = { columns, rows: 30 };
-      const shown = prop(compose, "placeholder");
+      const shown = String(prop(compose, "placeholder"));
       expect(shown).toBe(placeholder);
-      // The painter draws a placeholder only when it leaves one cell free.
-      expect([...String(shown)].length).toBeLessThanOrEqual(columns - 1);
+      // The painted row holds the whole placeholder, so the operator sees the destination.
+      const painted = emptyComposeRow(shown, columns);
+      expect([...painted]).toHaveLength(columns);
+      expect(painted.endsWith(shown)).toBe(true);
       press(compose, "escape");
       await flow;
     },

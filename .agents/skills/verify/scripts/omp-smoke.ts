@@ -2213,6 +2213,8 @@ const CAPABILITY_NOTICE_END = `talk needs omp ${UI_OMP_NEEDED} or later, so the 
 const CAPABILITY_NOTICE_START = "talk: this omp has no ";
 /** A talk notice on the screen: `talk:` and the rest of its row. */
 const TALK_NOTICE = /talk: [^\n]*/g;
+/** The quiet time after which the smoke takes the output of the TUI omp as drained (no open frame either). */
+const DRAIN_QUIET_MS = 1_000;
 /** A built-in tool of omp: a request that offers it has a tool list that `offersTool` can read. */
 const BUILTIN_TOOL = "read";
 /** A prompt with one of these markers makes the fake model of the RPC peer call `talk` once. */
@@ -2375,9 +2377,31 @@ class TerminalOmp {
     const deadline = Date.now() + STEP_TIMEOUT_MS;
     while (!this.frames().some((frame) => frame.includes(shown))) {
       const left = deadline - Date.now();
-      if (left <= 0)
-        failStep(`no complete frame of the screen shows the ${what} within ${STEP_TIMEOUT_MS / 1_000} s`);
+      if (left <= 0) {
+        const tail = this.text().replace(/\s+/g, " ").trim().slice(-300);
+        failStep(
+          `no complete frame of the screen shows the ${what} within ${STEP_TIMEOUT_MS / 1_000} s; it ends: ${tail}`,
+        );
+      }
       await this.#nextOutput(left);
+    }
+  }
+
+  /**
+   * Waits until the output drains: no output for `quietMs`, and the last frame has its end. Fails when the
+   * output does not drain in time.
+   */
+  async drain(quietMs: number): Promise<void> {
+    const deadline = Date.now() + STEP_TIMEOUT_MS;
+    for (;;) {
+      const before = this.#raw.length;
+      await sleep(quietMs);
+      const open = this.#raw.lastIndexOf(AUTOWRAP_OFF) > this.#raw.lastIndexOf(AUTOWRAP_ON);
+      if (this.#raw.length === before && !open) return;
+      if (Date.now() > deadline)
+        failStep(
+          `the output of omp did not drain within ${STEP_TIMEOUT_MS / 1_000} s${open ? "; a frame stays open" : ""}`,
+        );
     }
   }
 
@@ -2535,37 +2559,18 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
   let terminalResult: OmpResult | null = null;
   let peer: RpcPeer | null = null;
 
-  /** omp before 19.2.0: one capability notice, no load error, no `/talk` command, and no `talk` tool. */
+  /**
+   * omp before 19.2.0: one capability notice, no load error, no `/talk` command, and no `talk` tool. The first
+   * complete frame with the notice only shows that talk is ready; the notices are checked once at the end,
+   * after the output drains, because a later frame can still draw the notice again.
+   */
   const oldOmpFlow = async (screen: TerminalOmp): Promise<void> => {
     // `old-omp`: `omp --version` names a version before 19.2.0, and the TUI omp started.
     pass();
 
     step = "old-notice";
-    await screen.waitFor(CAPABILITY_NOTICE_END, 0, "talk notice that names omp 19.2.0");
-    // The PTY can split a frame between two reads, so the count waits for a frame with its end.
-    await screen.waitForFrame(CAPABILITY_NOTICE_END, "capability notice");
-    const others = new Set(
-      [...screen.text().matchAll(TALK_NOTICE)]
-        .map((match) => match[0].trim())
-        .filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START)),
-    );
-    if (others.size > 0) failStep(`the screen shows other talk notices: ${[...others].join(" | ")}`);
-    // omp draws the notice again in later frames, so the count of one frame is the count of notices.
-    const perFrame = screen.frames().map((frame) =>
-      [...frame.matchAll(TALK_NOTICE)]
-        .map((match) => match[0].trim())
-        .filter((notice) => notice.includes(CAPABILITY_NOTICE_END)),
-    );
-    const most = Math.max(0, ...perFrame.map((frame) => frame.length));
-    if (most !== 1)
-      failStep(
-        most === 0
-          ? "no frame of the screen shows the capability notice"
-          : `one frame of the screen shows ${most} capability notices`,
-      );
-    const texts = new Set(perFrame.flat());
-    if (texts.size !== 1) failStep(`the screen shows ${texts.size} different capability notices`);
-    pass();
+    await screen.waitForFrame(CAPABILITY_NOTICE_END, "talk notice that names omp 19.2.0");
+    results.set("old-notice", "not checked, because old-no-command failed before the output drained");
 
     // omp gives a line that names no command to the model as a prompt.
     step = "old-no-command";
@@ -2591,6 +2596,28 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       failStep(`the request of the /talk prompt offers no ${BUILTIN_TOOL} tool`);
     if (offersTool(request, TALK_TOOL))
       failStep(`the request of the /talk prompt offers the ${TALK_TOOL} tool`);
+    pass();
+
+    // The PTY can split a frame between two reads, so only complete frames count, after the output drains.
+    step = "old-notice";
+    await screen.drain(DRAIN_QUIET_MS);
+    const perFrame = screen
+      .frames()
+      .map((frame) => [...frame.matchAll(TALK_NOTICE)].map((match) => match[0].trim()));
+    const others = new Set(
+      perFrame.flat().filter((notice) => !notice.startsWith(CAPABILITY_NOTICE_START)),
+    );
+    if (others.size > 0) failStep(`the screen shows other talk notices: ${[...others].join(" | ")}`);
+    // omp draws the notice again in later frames, so the count of one frame is the count of notices.
+    const most = Math.max(0, ...perFrame.map((frame) => frame.length));
+    if (most !== 1)
+      failStep(
+        most === 0
+          ? "no complete frame of the screen shows the capability notice"
+          : `one frame of the screen shows ${most} capability notices`,
+      );
+    const texts = new Set(perFrame.flat());
+    if (texts.size !== 1) failStep(`the screen shows ${texts.size} different capability notices`);
     pass();
   };
 

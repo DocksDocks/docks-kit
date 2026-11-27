@@ -79,7 +79,9 @@ const csiEnd = (text: string, body: number): number => {
  * The end of a string command whose text starts at `body`: after BEL, ST, or
  * ESC `\`. An ESC that starts no ST ends the command before it, so that ESC
  * starts the next sequence. A command without an end takes the rest of the
- * text. So each code unit is read once, also in malformed input (R2).
+ * text. So the cleaner reads each code unit a small, fixed number of times,
+ * also in malformed input: an ESC that ends a command is read again as the
+ * start of the next sequence (R2).
  */
 const stringEnd = (text: string, body: number): number => {
   for (let index = body; index < text.length; index += 1) {

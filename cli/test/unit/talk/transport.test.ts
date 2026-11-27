@@ -1033,10 +1033,19 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
           session = "s-2";
           gate.resolve();
           const refused = yield* Fiber.await(call);
+          // The refused connection, the only one so far, closes before the next call opens one (L4).
+          yield* promised(() =>
+            waitFor(
+              () => listener.closed() === 1,
+              SETTLE_MS,
+              "the close of the refused connection",
+            ),
+          );
+          const refusedRequests = listener.requests();
           // The same client sends once the guard allows it.
           session = "s-1";
           const sent = yield* client.request(target, "echo", null, undefined, guard);
-          return { refused, sent };
+          return { refused, refusedRequests, sent };
         }).pipe(
           Effect.provide(
             TalkRegistry.layerPosix(folder).pipe(Layer.provide(TalkPosixSystem.layer)),
@@ -1045,9 +1054,10 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       );
       expect(Exit.hasInterrupts(outcome.refused)).toBe(true);
       expect(outcome.sent).toBe("guarded");
-      // Only the allowed call wrote a body; the refused connection closed.
+      expect(outcome.refusedRequests).toBe(0);
+      // Only the allowed call wrote a body.
       expect(listener.requests()).toBe(1);
-      await waitFor(() => listener.closed() >= 1, SETTLE_MS, "the close of the refused connection");
+      expect(listener.accepted()).toBe(2);
     } finally {
       for (const server of servers) server.close();
       cleanUp();
