@@ -185,6 +185,12 @@ class FakeNetwork {
   registerGate: Promise<void> | undefined;
   /** Set: each `register` creates and publishes its entry, then waits for it before it answers. */
   registeredGate: Promise<void> | undefined;
+  /**
+   * Set: each `register` publishes its entry under this instance id, not
+   * the one that the binding chose, so only the attach makes the pair the
+   * binding's own: a target that becomes the binding's registration late.
+   */
+  publishAs: string | undefined;
   /** The hooks of the process singleton, from its transport. */
   hooks: TransportHooks | undefined;
   /** The signal of each `list`, `probeAll`, `known`, and `request` call, in call order. */
@@ -199,6 +205,8 @@ class FakeNetwork {
   probeGate: Promise<void> | undefined;
   /** Set: each `probeAll` rejects with it, as a defect of the transport runtime. */
   probeError: Error | undefined;
+  /** Set: each probe fails in this process with this reason, as a registry lookup that fails its trust check. */
+  probeHostError: string | undefined;
   /** Set: the next `request` waits for it, as a peer handshake does, before its body goes out. */
   handshakeGate: Promise<void> | undefined;
   /** True fails each traced body write, as a socket write that the peer's close rejects (#260 H5). */
@@ -320,7 +328,7 @@ class FakeNetwork {
         this.log.push(`registering ${input.instanceId ?? "-"} ${input.sessionId}`);
         if (this.registerGate !== undefined) await this.registerGate;
         const entry: NetEntry = {
-          instanceId: input.instanceId ?? this.nextId(),
+          instanceId: this.publishAs ?? input.instanceId ?? this.nextId(),
           sessionId: input.sessionId,
           name: input.name,
           cwd: input.cwd,
@@ -374,7 +382,7 @@ class FakeNetwork {
         if (gate !== undefined) await gate;
         return { _tag: "Listed", peers };
       },
-      probeAll: async (targets, signal) => {
+      probeAll: async (targets, signal, hostError) => {
         this.signals.push(signal);
         const gate = this.probeGate;
         this.probeGate = undefined;
@@ -382,6 +390,11 @@ class FakeNetwork {
         if (this.probeError !== undefined) throw this.probeError;
         return Promise.all(
           targets.map(async (target) => {
+            const reason = this.probeHostError;
+            if (reason !== undefined) {
+              hostError?.(target, reason);
+              return "unreachable";
+            }
             const answer = await this.dispatch(target, PING_KIND, null);
             return answer._tag === "Answered" ? "ok" : answer.outcome;
           }),
@@ -668,6 +681,9 @@ class FakeSession {
           });
           if (!isFakeNode(node)) throw new Error("the factory gave no node");
           this.views.push({ node, options, closed: () => closed });
+          // omp draws a frame of the mounted overlay: it reads an accessor text once.
+          const text = node.props["text"];
+          if (!closed && Predicate.isFunction(text)) text();
           return promise;
         },
       },
@@ -2364,6 +2380,44 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "reports a registry lookup that fails in a probe as unreachable and gives its reason to hostError (#260 H4)",
+    async () => {
+      const folder = join(base, "reg-lookup");
+      const owner = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
+      const prober = makeTalkTransport({ admit: () => true, handlers: [] }, { folder });
+      try {
+        const registered = await owner.facade.register({
+          sessionId: "s-lookup",
+          name: "lookup",
+          cwd: base,
+        });
+        if (registered._tag !== "Registered") throw new Error(registered.reason);
+        const { registration } = registered;
+        // A probe of a pair that no entry names starts the client before the folder fails its trust check.
+        const absent = { instanceId: "00000000000000fe", sessionId: "none" };
+        expect(await prober.facade.probeAll([absent])).toEqual(["not-found"]);
+        chmodSync(folder, 0o755);
+        const reasons: Array<string> = [];
+        const results = await prober.facade.probeAll(
+          [registration],
+          undefined,
+          (target, reason) => {
+            expect(target).toEqual(registration);
+            reasons.push(reason);
+          },
+        );
+        expect(results).toEqual(["unreachable"]);
+        expect(reasons).toHaveLength(1);
+        expect(reasons[0]).toMatch(/entry lookup failed.*0755/u);
+      } finally {
+        chmodSync(folder, 0o700);
+        await prober.dispose();
+        await owner.dispose();
+      }
+    },
+  );
+
   it("interrupts each call whose signal aborted, so an aborted request runs no handler (C1, T2)", async () => {
     let handled = 0;
     const runtime = makeTalkTransport(
@@ -2647,6 +2701,9 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
       await session.command("");
       session.shortcut();
       await settle();
+      expect(VIEWS_NEED_TUI).toBe(
+        "talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode, except its handover action, which needs such a session too.",
+      );
       expect(session.notices).toEqual([VIEWS_NEED_TUI, VIEWS_NEED_TUI]);
       expect(session.uiCalls).toEqual(["notify", "notify"]);
     },
@@ -3329,12 +3386,15 @@ describe("handover action of the talk tool (#260)", () => {
   });
 
   describe("refusals before the side turn (H3)", () => {
-    /** The call refuses with `text` and `details`; no side turn ran, no view opened, and beta got nothing. */
+    /**
+     * The call refuses with `text` and `details` (default: the outcome
+     * `failed` and no ids); no side turn ran, no view opened, and beta got nothing.
+     */
     const refuses = async (
       { alpha, beta, turns }: Sessions,
       params: object,
       text: string,
-      details: object = {},
+      details: object = { outcome: "failed" },
     ): Promise<void> => {
       const views = alpha.views.length;
       // A refusal text that is not defined would match nothing useful.
@@ -3371,7 +3431,7 @@ describe("handover action of the talk tool (#260)", () => {
       };
       const { call, settled } = startHandover(alpha, { to: "beta" });
       await until(settled);
-      expect(await call).toEqual(failed(HANDOVER_NEEDS_TUI));
+      expect(await call).toEqual(failed(HANDOVER_NEEDS_TUI, { outcome: "failed" }));
       expect(factories).toEqual([]);
       expect(turns).toEqual([]);
       await settle();
@@ -3405,7 +3465,7 @@ describe("handover action of the talk tool (#260)", () => {
       const flow = alpha.command("");
       await until(() => openKind(alpha) === "picker");
       gate.resolve();
-      expect(await call).toEqual(failed(HANDOVER_FLOW_OPEN));
+      expect(await call).toEqual(failed(HANDOVER_FLOW_OPEN, { outcome: "failed" }));
       expect(turns).toEqual([]);
       expect(openKind(alpha)).toBe("picker");
       pressKey(alpha.top.node, "escape");
@@ -3426,6 +3486,7 @@ describe("handover action of the talk tool (#260)", () => {
         const own = network.only("s-alpha").instanceId;
         await refuses(handover, { [field]: field === "to" ? "alpha" : own }, HANDOVER_OWN_TARGET, {
           instanceId: own,
+          outcome: "failed",
         });
       },
     );
@@ -3442,9 +3503,12 @@ describe("handover action of the talk tool (#260)", () => {
       await vi.advanceTimersByTimeAsync(REPAIR_INTERVAL_MS);
       await vi.advanceTimersByTimeAsync(1);
       expect(old.live).toBe(false);
-      expect(network.only("s-alpha-2").instanceId).not.toBe(old.instanceId);
+      const fresh = network.only("s-alpha-2");
+      expect(fresh.instanceId).not.toBe(old.instanceId);
       gate.resolve();
-      expect(await call).toEqual(failed(HANDOVER_OWN_TARGET));
+      expect(await call).toEqual(
+        failed(HANDOVER_OWN_TARGET, { instanceId: fresh.instanceId, outcome: "failed" }),
+      );
       expect(turns).toEqual([]);
       expect(openKind(alpha)).toBeUndefined();
       await settle();
@@ -3452,7 +3516,7 @@ describe("handover action of the talk tool (#260)", () => {
       expect(network.bodies).toEqual([]);
     });
 
-    it("sends nothing when this binding takes the target as its registration after the side turn started", async () => {
+    it("refuses before the side turn a target that this binding publishes and has not taken yet", async () => {
       const { alpha, turns } = await sessions();
       const registered = Promise.withResolvers<void>();
       network.registeredGate = registered.promise;
@@ -3461,12 +3525,40 @@ describe("handover action of the talk tool (#260)", () => {
       await vi.advanceTimersByTimeAsync(1);
       // The new pair is in the registry, and this binding has not taken it yet.
       const fresh = network.only("s-alpha-2");
-      const { call } = startHandover(alpha, { instance: fresh.instanceId });
-      await until(() => openKind(alpha) === "editor");
-      expect(turns).toHaveLength(1);
+      const result = await startHandover(alpha, { instance: fresh.instanceId }).call;
+      expect(result).toEqual(
+        failed(HANDOVER_OWN_TARGET, { instanceId: fresh.instanceId, outcome: "failed" }),
+      );
+      expect(turns).toEqual([]);
+      expect(alpha.views).toEqual([]);
       registered.resolve();
       await settle();
+      expect(network.bodies).toEqual([]);
+      expect(alpha.sent).toEqual([]);
+    });
+
+    it("keeps the body back when this binding takes the target as its registration during the send handshake", async () => {
+      const { alpha, turns } = await sessions();
+      // A live pair of the next session id, while this binding registers another pair for it.
+      const target = network.addForeign("alpha-late", "s-alpha-2", "ok");
+      const register = Promise.withResolvers<void>();
+      network.registerGate = register.promise;
+      network.publishAs = target.instanceId;
+      alpha.reset("s-alpha-2");
+      await vi.advanceTimersByTimeAsync(REPAIR_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(1);
+      const handshake = Promise.withResolvers<void>();
+      network.handshakeGate = handshake.promise;
+      const { call } = startHandover(alpha, { instance: target.instanceId });
       await approve(alpha);
+      expect(turns).toHaveLength(1);
+      // The sending view waits while the request waits in its handshake.
+      await until(() => openKind(alpha) === "text");
+      // The binding publishes the target pair under its own session and takes it.
+      register.resolve();
+      await settle();
+      expect(network.only("s-alpha-2").instanceId).toBe(target.instanceId);
+      handshake.resolve();
       expect(await call).toEqual(failed(HANDOVER_OWN_TARGET, { outcome: "cancelled" }));
       expect(alpha.notices).toContain(HANDOVER_TARGET_IS_THIS_SESSION);
       expect(network.bodies).toEqual([]);
@@ -3482,9 +3574,23 @@ describe("handover action of the talk tool (#260)", () => {
       await refuses(
         handover,
         { instance: ghost.instanceId },
-        `talk: the instance ${ghost.instanceId} did not answer a probe (unreachable). Nothing was sent. Run the action list.`,
+        `talk: the instance ${ghost.instanceId} did not answer a probe (unreachable). Nothing was sent. Check that session, then run the action list again.`,
         { instanceId: ghost.instanceId, outcome: "unreachable" },
       );
+      expect(handover.alpha.notices).toEqual([]);
+    });
+
+    it("tells the user to check the one session that did not answer and to run list again", async () => {
+      const handover = await sessions();
+      const slow = network.addForeign("slow", "s-slow", "timeout");
+      await refuses(
+        handover,
+        { to: "slow" },
+        `talk: ${literal("slow")} did not answer a probe (timeout). Nothing was sent. Check that session, then run the action list again:\n` +
+          `- ${literal("slow")} (session ${literal("s-slow")}): instance ${slow.instanceId}, timeout`,
+        { outcome: "timeout" },
+      );
+      expect(handover.alpha.notices).toEqual([]);
     });
 
     it("refuses a to that resolves to no session", async () => {
@@ -3619,6 +3725,8 @@ describe("handover action of the talk tool (#260)", () => {
       ],
       ["the probe of to", "probe", "to", `the probes failed: ${CLEAN_REASON}`],
       ["the probe of instance", "probe", "instance", `the probe failed: ${CLEAN_REASON}`],
+      ["a registry lookup in the probe of to", "lookup", "to", CLEAN_REASON],
+      ["a registry lookup in the probe of instance", "lookup", "instance", CLEAN_REASON],
     ] as const)(
       "gives the model a fixed text and shows the cleaned diagnostic in a notice for a failure of %s",
       async (_name, step, selector, shown) => {
@@ -3626,7 +3734,8 @@ describe("handover action of the talk tool (#260)", () => {
         if (step === "list") {
           network.listFails = true;
           network.listReason = PATH_REASON;
-        } else network.probeError = new Error(PATH_REASON);
+        } else if (step === "lookup") network.probeHostError = PATH_REASON;
+        else network.probeError = new Error(PATH_REASON);
         const params =
           selector === "to"
             ? { to: "beta" }

@@ -2538,7 +2538,9 @@ describe("talk transport between spawned Bun peers", () => {
    * A Bun client for the closed-socket case of #260 H5: it imports the built
    * bundle, sends one traced request, and in the guard right before the body
    * write prints `guard` and blocks until the test writes a line, so the
-   * test closes the peer's socket while the client's event loop waits.
+   * test closes the peer's socket while the client's event loop waits. It
+   * exits when its standard input ends, so a test that stopped never leaves
+   * it waiting.
    */
   const CLOSED_SOCKET_CLIENT = `
 import { readSync } from "node:fs";
@@ -2553,7 +2555,9 @@ const guard = () => {
   const buffer = Buffer.alloc(1);
   for (;;) {
     try {
-      if (readSync(0, buffer, 0, 1, null) === 1) return true;
+      const read = readSync(0, buffer, 0, 1, null);
+      if (read === 1) return true;
+      if (read === 0) process.exit(3);
     } catch (error) {
       if (error.code !== "EAGAIN") throw error;
       Bun.sleepSync(5);
@@ -2577,48 +2581,67 @@ process.exit(0);
       const pair = { instanceId: hex(8), sessionId: "closed-peer" };
       const path = join(folder, socketName(process.pid));
       const listener = await startFakeListener(path, { mode: "answer", secret, pair });
-      const entryPath = await writeEntry({
-        version: PROTOCOL_VERSION,
-        ...pair,
-        name: "closed-peer",
-        cwd: base,
-        processId: process.pid,
-        endpoint: { kind: "unix", path },
-        startTime: 1_700_000_000_000,
-        secret: secret.toString("hex"),
-      });
-      const child = spawn(BUN_RUNTIME, ["-e", CLOSED_SOCKET_CLIENT], {
-        cwd: REPO_DIR,
-        env: {
-          ...env,
-          TALK_BUNDLE_URL: pathToFileURL(bundle).href,
-          TALK_TARGET: JSON.stringify(pair),
-        },
-        stdio: "pipe",
-      });
-      const errors: Array<string> = [];
-      child.stderr.on("data", (chunk: Buffer) => errors.push(chunk.toString("utf8")));
       const result = Promise.withResolvers<unknown>();
-      child.once("exit", () => result.reject(new Error(`the client exited: ${errors.join("")}`)));
-      createInterface({ input: child.stdout }).on("line", (line) => {
-        if (line === "guard") {
-          // The client waits in its guard: close the peer's end, then let the client write.
-          for (const socket of listener.sockets()) socket.destroy();
-          void waitFor(() => listener.sockets().length === 0, SETTLE_MS, "the closed peer").then(
-            () => child.stdin.write("go\n"),
-          );
-        } else if (line.startsWith("{")) result.resolve(JSON.parse(line));
-      });
+      // The child is another process with real timers, so a fake clock cannot bound it. The
+      // deadline settles the result inside the cleanup scope, so `finally` always kills the child.
+      const deadline = setTimeout(() => {
+        result.reject(new Error("the Bun client gave no result in time"));
+      }, SPAWN_TIMEOUT_MS / 2);
+      let child: ChildProcessWithoutNullStreams | undefined;
+      let entryPath = "";
       try {
+        entryPath = await writeEntry({
+          version: PROTOCOL_VERSION,
+          ...pair,
+          name: "closed-peer",
+          cwd: base,
+          processId: process.pid,
+          endpoint: { kind: "unix", path },
+          startTime: 1_700_000_000_000,
+          secret: secret.toString("hex"),
+        });
+        const spawned = spawn(BUN_RUNTIME, ["-e", CLOSED_SOCKET_CLIENT], {
+          cwd: REPO_DIR,
+          env: {
+            ...env,
+            TALK_BUNDLE_URL: pathToFileURL(bundle).href,
+            TALK_TARGET: JSON.stringify(pair),
+          },
+          stdio: "pipe",
+        });
+        child = spawned;
+        const errors: Array<string> = [];
+        spawned.stderr.on("data", (chunk: Buffer) => errors.push(chunk.toString("utf8")));
+        spawned.once("error", result.reject);
+        spawned.stdin.once("error", result.reject);
+        // `close` follows the last line of standard output, so a result that came first wins.
+        spawned.once("close", (code, signal) => {
+          result.reject(
+            new Error(
+              `the Bun client exited (${code ?? signal}) without a result: ${errors.join("")}`,
+            ),
+          );
+        });
+        createInterface({ input: spawned.stdout }).on("line", (line) => {
+          if (line === "guard") {
+            // The client waits in its guard: close the peer's end, then let the client write.
+            for (const socket of listener.sockets()) socket.destroy();
+            waitFor(() => listener.sockets().length === 0, SETTLE_MS, "the closed peer").then(
+              () => spawned.stdin.write("go\n"),
+              result.reject,
+            );
+          } else if (line.startsWith("{")) result.resolve(JSON.parse(line));
+        });
         expect(await result.promise).toEqual({
           trace: { write: "failed" },
           outcome: "unreachable",
         });
         expect(listener.requests()).toBe(0);
       } finally {
-        child.kill("SIGKILL");
+        clearTimeout(deadline);
+        child?.kill("SIGKILL");
         closeFake(listener);
-        rmSync(entryPath, { force: true });
+        if (entryPath !== "") rmSync(entryPath, { force: true });
         rmSync(path, { force: true });
       }
     },

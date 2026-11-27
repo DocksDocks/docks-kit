@@ -55,6 +55,11 @@ export class TalkRequestFailed extends Schema.TaggedError<
 >()("TalkRequestFailed", {
   outcome: RequestOutcome,
   reason: Schema.String,
+  /**
+   * The lookup of the target's entry in the registry failed in this process
+   * (a trust check, I/O, DPAPI), so the peer was never asked (#260 H4).
+   */
+  lookupFailed: Schema.optionalKey(Schema.Literal(true)),
 }) {}
 
 /**

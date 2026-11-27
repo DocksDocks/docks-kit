@@ -280,15 +280,19 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
         );
     });
 
-  // A lookup that fails (trust check, I/O, DPAPI) is no absence: it gives `unreachable` with the reason.
+  // A lookup that fails (trust check, I/O, DPAPI) is no absence: it gives `unreachable` with the reason,
+  // marked as a failure of this process, not of the peer (#260 H4).
   const readEntry = (fileName: string) =>
-    registry
-      .read(fileName)
-      .pipe(
-        Effect.mapError((error) =>
-          failed("unreachable", `the entry lookup failed: ${describeFailure(error)}`),
-        ),
-      );
+    registry.read(fileName).pipe(
+      Effect.mapError(
+        (error) =>
+          new TalkRequestFailed({
+            outcome: "unreachable",
+            reason: `the entry lookup failed: ${describeFailure(error)}`,
+            lookupFailed: true,
+          }),
+      ),
+    );
 
   const converse = Effect.fnUntraced(function* (
     connection: Connection,

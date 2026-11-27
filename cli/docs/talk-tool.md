@@ -236,6 +236,11 @@ not see yet. The outcomes:
 | Exactly one match answered, and each other match is proven ended | The message goes to that match                                                                     |
 | Any other case                                                   | The call fails, lists each candidate with its full instance id and probe result, and sends nothing |
 
+When only one match is not proven ended and its probe did not answer, there
+is no choice between sessions, so the text says what to do instead:
+``talk: `<to>` did not answer a probe (<outcome>). Nothing was sent. Check
+that session, then run the action list again:`` and the candidate rows.
+
 Only `ok` answers, and only `not-live` proves an end. `not-found`,
 `auth-failed`, `timeout`, `unreachable`, and `unknown-kind` prove neither.
 The probes share the dial limit of the transport: at most 8 connections at a
@@ -484,14 +489,18 @@ description says to use the action only when the user asks for a handover
    [Targets](#targets), with the abort signal of the call on the listing, the
    instance lookup, and the probes. An `instance` resolves without a probe,
    so the action probes it here.
-2. It checks the first four refusals again, and that the pair is neither this
-   binding's registration at the start of the call nor its current one. In
-   the same tick it starts the flow, so no `/talk` flow opens in between.
+2. It checks the first four refusals again, and that the pair is not this
+   binding's registration: not the one at the start of the call, not the
+   current one, and not the one that the binding publishes and has not
+   attached yet. In the same tick it starts the flow, so no `/talk` flow
+   opens in between.
 3. The flow runs the side turn with `HANDOVER_PROMPT`, outside the main
    context. It shows no start notice, because omp shows a notice of a tool
    call only after the call ends. Instead, the side-turn waiting view shows
    `talk: the agent started a handover to <name> (instance <instance id>) · a
-   side turn writes the summary · ⎋ cancels`.
+   side turn writes the summary · ⎋ cancels`. The review mounts only after
+   omp drew this view once, so the user sees who started the handover even
+   when the side turn ends at once.
 4. The review holds only the text that can be sent: the note of `message`,
    cleaned with `safeMultiline` as the draft is, then a blank line, then the
    draft. A note that is blank after the cleaner adds nothing. The note does
@@ -503,11 +512,13 @@ description says to use the action only when the user asks for a handover
    <code>`. A pane too narrow for that line shows only `talk: make the pane
    wider to confirm the destination.` and takes no code.
 6. After the confirm code, the flow checks the pair against this binding's
-   registrations once more. When the pair is now this session, it shows the
-   notice `talk: the destination of this handover is now this session, so
-   talk sent nothing.` and sends nothing. Otherwise it sends the reviewed
-   text with `kind: "handover"` and a wake, and shows the send result as a
-   notice, as `/talk handover` does.
+   registrations once more, the published one that is not attached yet
+   included. The client asks the same check again right before the body
+   write. When the pair is now this session, the flow shows the notice
+   `talk: the destination of this handover is now this session, so talk sent
+   nothing.` and sends nothing. Otherwise it sends the reviewed text with
+   `kind: "handover"` and a wake, and shows the send result as a notice, as
+   `/talk handover` does.
 
 The keys and the abort of the call:
 
@@ -521,14 +532,18 @@ The keys and the abort of the call:
   During the side turn, the review, or the confirm view, it ends the flow
   and nothing is sent: `cancelled`. The client checks the flow once more
   right before the body write, so an abort during the handshake also keeps
-  the body back. After the body write started, an abort gives `unknown`.
+  the body back. After the body write started, the result follows the
+  dispatch record: the answer when one came, `failed` when the write failed,
+  else `unknown`.
 - A call that is already aborted starts no flow. A `/talk` command during
   the flow ends it, because a new flow ends the open one.
 
 ### Refusals
 
 Each refusal fails the call before the side turn and sends nothing. Its text
-says what the user or the agent can do.
+says what the user or the agent can do. Its `details` hold the outcome
+`failed`, or a more specific one such as the probe outcome, and the instance
+id where the action knows it.
 
 | Case                                                                                                           | Text starts with                                                                         |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -541,21 +556,28 @@ says what the user or the agent can do.
 | A `to` that does not resolve                                                                                   | The resolver error of [Targets](#targets)                                                |
 
 omp's no-op UI has `custom` and `notify`, but its `custom` never opens a
-view, so the action also needs `ctx.hasUI`. A `to` that starts more than one
-session id, or that does not name exactly one live session, gets the line
-`Name one session with instance, using its full instance id from list, or
-ask the user which session takes the handover.` after the resolver error. A
-`to` whose every match ended (`not-live`) gets `Run the action list and name
-a live session.`
+view, so the action also needs `ctx.hasUI`. The registration of this
+session is the exact pair at the start of the call, the current one, or the
+one that the binding publishes and has not attached yet; a session id alone
+proves nothing. An `instance` whose probe does not answer ends with
+`Nothing was sent. Check that session, then run the action list again.` A
+`to` that starts more than one session id, or that leaves more than one
+session that did not answer, gets the line `Name one session with instance,
+using its full instance id from list, or ask the user which session takes
+the handover.` after the resolver error. A `to` whose every match ended
+(`not-live`) gets `Run the action list and name a live session.`
 
-When the listing, the instance lookup, or a probe fails, the result is the
-fixed text `talk: the handover did not start: talk could not read the
-session registry to check the target. Nothing was sent. The talk notice in
-this session shows the error to the user. Ask the user to check it before a
-new handover.` The host error, which can hold a path, goes only to a local
-notice: `talk: the agent asked for a handover, but talk could not check its
-target, so nothing was sent. Error: <host error>`, cleaned with
-`safeDiagnostic` (see `cli/docs/talk-ui.md`, "Errors").
+When the listing or the instance lookup fails, or a probe fails in this
+process because the lookup of the target's registry entry failed (a trust
+check, I/O, DPAPI), the result is the fixed text `talk: the handover did not
+start: talk could not read the session registry to check the target.
+Nothing was sent. The talk notice in this session shows the error to the
+user. Ask the user to check it before a new handover.` The host error, which
+can hold a path, goes only to a local notice: `talk: the agent asked for a
+handover, but talk could not check its target, so nothing was sent. Error:
+<host error>`, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`,
+"Errors"). A peer that does not answer a probe, for example with `timeout`,
+gives the probe refusal above, not this text.
 
 ### Outcomes
 
@@ -579,15 +601,17 @@ The result follows the record, not what ended the flow:
 | `write` is `failed`                                                   | The socket did not take the text, and nothing was delivered; with the ids                                                   | `failed`     |
 | `write` is `none`, and the send ended with a failure                  | Nothing was sent, and the talk notice in the session names the reason                                                       | `failed`     |
 | `write` is `none`, and the flow ended first                           | `talk: the handover was cancelled. Nothing was sent.`                                                                       | `cancelled`  |
-| Right before the send, the destination is this session's registration | `talk: the target is this session. Nothing was sent. Name another session as to or instance.`                               | `cancelled`  |
+| The destination is now this session's registration                    | `talk: the target is this session. Nothing was sent. Name another session as to or instance.`                               | `cancelled`  |
 | The side turn failed, or its reply was empty                          | `talk: the handover side turn failed. Nothing was sent.`                                                                    | `failed`     |
 | Another error ended the flow before the send                          | Nothing was sent, and the talk notice in the session names the error                                                        | `failed`     |
 
 Only the first row is a successful call. Every other row, and every refusal,
 is a result with `isError: true` (see [Actions](#actions)). `cancelled`
-carries no ids, because no send started. A stop of the sending view, an
-abort of the call, and a lost or unreadable reply after the body write
-started give `unknown`.
+means that the flow ended before anything went out: by a key, by an abort
+of the call, or by the check of step 6. It carries no ids, because no body
+went out. After the body write started, a stop of the sending view or an
+abort of the call gives the outcome of the record: the answer when one came,
+`failed` for a failed write, else `unknown`.
 
 The flow shows the host error of a failed side turn to the user in a
 notice, cleaned with `safeDiagnostic` (see `cli/docs/talk-ui.md`, "Errors").

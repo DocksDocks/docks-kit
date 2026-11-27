@@ -213,6 +213,8 @@ export class FakeTui {
   size = { columns: 100, rows: 30 };
   /** The theme that each factory gets; omp gives `extensionTheme(currentTheme())`. */
   theme: unknown = { symbols: { preset: "unicode" } };
+  /** omp draws a frame of each mounted overlay; false holds the frames back until `draw` (#260 H2). */
+  drawOnMount = true;
   readonly views: Array<View> = [];
   readonly calls: Array<string> = [];
   readonly notices: Array<{ readonly text: string; readonly level: string }> = [];
@@ -279,6 +281,7 @@ export class FakeTui {
         },
         close: hostClose,
       });
+      if (this.drawOnMount) this.draw(view);
       return promise;
     },
     notify: (text, level) => {
@@ -286,6 +289,12 @@ export class FakeTui {
       this.notices.push({ text, level });
     },
   };
+
+  /** One frame of `view`: the host reads the text of its root, as the painter does. */
+  draw(view: View): void {
+    const text = view.node.props["text"];
+    if (Predicate.isFunction(text)) text();
+  }
 
   /** The last view; it must be open. */
   get top(): View {

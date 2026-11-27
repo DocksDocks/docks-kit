@@ -72,7 +72,7 @@ export const HANDOVER_WORD = "handover";
 
 /** G1: the notice of `/talk` and `alt+t` outside the TUI. */
 export const VIEWS_NEED_TUI =
-  "talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode.";
+  "talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode, except its handover action, which needs such a session too.";
 
 // ── Arguments (G2) ──
 
@@ -302,6 +302,8 @@ const resultOf = <R>(waited: Waited<R>): R | undefined => {
 /** Flow ends that carry no send (#260 H2). */
 const CANCELLED: FlowEnd = { _tag: "Cancelled" };
 const FAILED: FlowEnd = { _tag: "Failed" };
+/** Nothing was sent: the destination became this binding's own registration (#260 H3). */
+const OWN_TARGET: FlowEnd = { _tag: "OwnTarget" };
 
 /** #260 H3: the notice of a tool-started handover whose destination became this session's own registration. */
 export const HANDOVER_TARGET_IS_THIS_SESSION =
@@ -536,13 +538,15 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   /**
    * Runs one talk step while a docked waiting view holds the focus, so no key
    * reaches the composer of omp between two talk views. `escape` and `alt+t`
-   * end the flow, whose abort signal stops the step.
+   * end the flow, whose abort signal stops the step. `drawn` runs when omp
+   * draws the view.
    */
   const waitFor = <R>(
     flow: Flow,
     flowUi: FlowUi,
     text: string,
     task: () => Promise<R>,
+    drawn?: () => void,
   ): Promise<Waited<R>> =>
     mount<Waited<R>>(
       flow,
@@ -554,6 +558,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           text,
           () => (live(flow) ? task() : Promise.reject(new Error("the /talk flow ended"))),
           done,
+          drawn,
         ),
       { _tag: "Close" },
       DOCKED,
@@ -611,14 +616,24 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       if (confirmed._tag !== "Send" || !live(flow)) return CANCELLED;
       if (origin.isOwn()) {
         flowUi.notify(HANDOVER_TARGET_IS_THIS_SESSION, "error");
-        return { _tag: "OwnTarget" };
+        return OWN_TARGET;
       }
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
       const record = newDispatchRecord();
+      // #260 H3: the transport asks `live` right before the body write, so the body stays back
+      // once the destination is this binding's own registration.
+      const sendLife: FlowLife = {
+        signal: flow.life.signal,
+        live: () => flow.life.live() && !origin.isOwn(),
+      };
       // A talk view holds the focus while the send runs; `escape` ends the flow and its signal.
       const waited = await waitFor(flow, flowUi, sendingText(destination), () =>
-        flow.services.send(pair, text, kind, flow.life, record),
+        flow.services.send(pair, text, kind, sendLife, record),
       );
+      if (record.trace.write === "none" && origin.isOwn()) {
+        if (live(flow)) flowUi.notify(HANDOVER_TARGET_IS_THIS_SESSION, "error");
+        return OWN_TARGET;
+      }
       if (waited._tag === "Failed") {
         if (live(flow)) flowUi.notify(talkErrorText(waited.cause), "error");
         return { _tag: "Dispatched", record, settled: true };
@@ -637,7 +652,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
    * confirm view, and the send follow. A flow that ended while the side turn
    * ran mounts no review. A handover of the `talk` tool names its starter in
    * its waiting view and in its confirm view, and puts the note of the agent
-   * above the draft (#260 H2).
+   * above the draft (#260 H2). Its review mounts only after omp drew the
+   * waiting view once, so the user always sees who started it.
    */
   const handover = async (
     flow: Flow,
@@ -654,11 +670,16 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     }
     if (start.notice !== undefined) flowUi.notify(start.notice, "info");
     // A talk view holds the focus while the side turn runs; `escape` ends the flow and aborts it.
-    const draft = resultOf(
-      await waitFor(flow, flowUi, start.waiting, () =>
-        requestDraft(sideTurn, flow.controller.signal),
-      ),
+    const drawn = Promise.withResolvers<void>();
+    const waited = await waitFor(
+      flow,
+      flowUi,
+      start.waiting,
+      () => requestDraft(sideTurn, flow.controller.signal),
+      start.origin.byAgent ? drawn.resolve : undefined,
     );
+    if (start.origin.byAgent) await untilEnded(flow, drawn.promise);
+    const draft = resultOf(waited);
     if (draft === undefined || !live(flow)) return CANCELLED;
     if (draft._tag === "Failed") {
       flowUi.notify(draft.text, "error");

@@ -71,7 +71,8 @@ import {
   talkErrorText,
 } from "./ui/command";
 import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
-import { TALK_SHORTCUT, safeDiagnostic } from "./ui/views";
+import { safeDiagnostic } from "./ui/handover";
+import { TALK_SHORTCUT } from "./ui/views";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
 export const TALK_PROTOCOL_VERSION = 1;
@@ -232,13 +233,19 @@ export const makeTalkTransport = (
         ),
         signal,
       ),
-    probeAll: (targets, signal) =>
+    probeAll: (targets, signal, hostError) =>
       run(
         TalkTransport.use((transport) => transport.probeAll(targets)).pipe(
           Effect.map((results) =>
-            results.map((result): ProbeResult =>
-              Result.isSuccess(result) ? "ok" : result.failure.outcome,
-            ),
+            results.map((result, index): ProbeResult => {
+              if (Result.isSuccess(result)) return "ok";
+              const { failure } = result;
+              const target = targets[index];
+              // #260 H4: a lookup that failed in this process is no answer of the peer; its reason goes to the caller.
+              if (failure.lookupFailed === true && target !== undefined)
+                hostError?.(target, failure.reason);
+              return failure.outcome;
+            }),
           ),
         ),
         signal,
@@ -821,6 +828,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   let beatTimer: { readonly context: SessionContext; readonly timer: unknown } | undefined;
   let closed = false;
   let registering = false;
+  /** The pair that this binding publishes and has not attached yet (#260 H3). */
+  let publishing: Target | undefined;
   let updating = false;
   let published: RegistrationUpdate | undefined;
   let lastWarning: string | undefined;
@@ -972,6 +981,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       cwd: context.cwd(),
     };
     registering = true;
+    publishing = pair;
     const done = talk.registrations.starting({ registration: pair, isActive: active });
     let answer: RegisterAnswer;
     try {
@@ -979,6 +989,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     } finally {
       done();
       registering = false;
+      publishing = undefined;
     }
     if (answer._tag === "RegisterFailed") {
       warn(`talk: this session could not register: ${answer.reason}`);
@@ -1210,7 +1221,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       life.live() ? call() : Promise.reject(new Error("the /talk flow ended. Nothing was sent."));
     return {
       list: () => whileLive(() => talk.transport.list(life.signal)),
-      probeAll: (targets) => whileLive(() => talk.transport.probeAll(targets, life.signal)),
+      probeAll: (targets, _signal, hostError) =>
+        whileLive(() => talk.transport.probeAll(targets, life.signal, hostError)),
       // The client asks `live` again after the handshake, right before the body
       // goes out: a session id that changed with no event stops the body (R1, R11).
       request: (target, kind, body, _signal, _beforeBody, trace) =>
@@ -1282,8 +1294,10 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
    * (#260 H2, H3): the refusals before the side turn, then the `/talk`
    * handover flow for the one exact pair, with the signal of the call.
    * `startRegistration` is this binding's registration when the call
-   * started; the pair must differ from it and from the current one right
-   * before the side turn and again right before the send.
+   * started. The pair must differ from it, from the current one, and from
+   * the one that the binding publishes and has not attached yet: in the
+   * checks before the side turn, right before the side turn, right before
+   * the send, and at the body write.
    */
   const handoverFlow = (
     ctx: unknown,
@@ -1300,11 +1314,14 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       if (method(ctx, "runEphemeralTurn") === undefined) return HANDOVER_NEEDS_SIDE_TURN;
       return undefined;
     };
-    /** The exact pair is this binding's registration now or at the start of the call; a session id alone proves nothing. */
+    /** The exact pair is this binding's registration now, at the start of the call, or the one it publishes; a session id alone proves nothing. */
     const isOwnPair = (pair: Target): boolean =>
-      sameTarget(startRegistration, pair) || sameTarget(delivery.registration, pair);
+      sameTarget(startRegistration, pair) ||
+      sameTarget(delivery.registration, pair) ||
+      sameTarget(publishing, pair);
     return {
       refusal,
+      isOwn: isOwnPair,
       start: async (target, note, signal) => {
         // The checks and the start of the flow run in one tick, so a `/talk` flow that
         // opened while the target resolved refuses the action and stays open.

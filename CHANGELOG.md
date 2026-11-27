@@ -13,26 +13,31 @@ The user still reviews the summary and types the confirm code.
   that target: a side turn writes the summary, the review shows the note
   above the draft, the user edits the text and types the confirm code, and
   the text goes to the target with a request for a turn. The side-turn
-  waiting view names the agent and the target, and the first line of the
-  confirm view says that the agent started the handover; a pane too narrow
-  for that line takes no code. The note does not change the template, but
-  the side-turn model sees it. `escape` in the review, `alt+t`, and an abort
-  of the tool call end the flow; `escape` in the confirm view returns to the
-  review.
+  waiting view names the agent and the target, and the review mounts only
+  after omp drew that view once. The first line of the confirm view says
+  that the agent started the handover; a pane too narrow for that line
+  takes no code. The note does not change the template, but the side-turn
+  model sees it. `escape` in the review, `alt+t`, and an abort of the tool
+  call end the flow; `escape` in the confirm view returns to the review.
 - The action refuses before the side turn, and sends nothing, outside an
   interactive session in a terminal or in Tern (RPC, ACP, print, and json,
   or no `ctx.hasUI`), in a subagent, while a `/talk` view is open (that view
   stays open), without `ctx.runEphemeralTurn`, for this session's own
-  registration (checked again before the side turn and before the send),
-  and for an `instance` that does not answer a probe. It takes no
-  `attachments`, not even an empty list, and no `noWake: true`. An
-  ambiguous or ended `to` says how to pick a live session. When the
-  registry cannot be read, the agent gets a fixed text and the user a
-  notice with the error.
+  registration (the pair at the start of the call, the current one, or the
+  one that the session still publishes; checked again before the side turn,
+  before the send, and at the body write), and for an `instance` that does
+  not answer a probe. It takes no `attachments`, not even an empty list, and
+  no `noWake: true`. Each refusal says what to do: an ambiguous or ended
+  `to` says how to pick a live session, and a session that did not answer
+  says to check it, then run `list` again. When the registry cannot be read,
+  also for the entry lookup of a probe, the agent gets a fixed text and the
+  user a notice with the error. A refusal's details hold the outcome
+  `failed` or a more specific one.
 - The result gives the outcome of the send: `delivered`, `queued`, or
   `submitted`; a refusal such as `busy` or `not-live`; `unknown` when the
   text may have gone out and no usable answer settled the outcome; `failed`;
-  or `cancelled` when the flow ended before the text went out. A failed
+  or `cancelled` when the flow ended before anything went out. After the
+  body write started, the outcome follows the dispatch record. A failed
   handover is a result with `isError: true` that keeps its details: the
   action, the outcome, and the ids. The result never holds the summary or a
   host diagnostic. After a failed side turn it holds only
@@ -49,6 +54,10 @@ The user still reviews the summary and types the confirm code.
 
 - The handover notice of a failed side turn shows the host error on one
   line, without terminal controls or tabs, for `/talk handover` too.
+- The `/talk` notice in RPC, ACP, print, and json mode says that the tool's
+  `handover` action needs an interactive session too.
+- A `to` whose only session did not answer a probe now says to check that
+  session, then run `list` again, for every action.
 - The tool description, the `messageId` help, and its error say that
   `cancel` takes the id of the message to check or withdraw, from a `send`,
   `ask`, or `handover` result.

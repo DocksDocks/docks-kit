@@ -5,7 +5,7 @@ user-invocable: false
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-27"
-  content_hash: "09427f877cd4d69fed53f5d6dea31ea21c0fdceca74f1269bd501b962e2a0b52"
+  content_hash: "e773263f24ee84ebb80d392d36d37de08a2fd2ebee7e26160bdb676ea315268b"
 ---
 
 # talk
@@ -83,13 +83,14 @@ user so, and do not claim that a message went out.
   and confirms the summary in the view. The side-turn model sees your
   `message` note, but the user approves what goes out. The result gives the
   outcome, never the summary, and the ids only once the send started.
-  `cancelled` means that the flow ended before anything went out, by the
-  user or by an abort of the call: do not retry unless the user asks.
+  `cancelled` means that the flow ended before anything went out: do not
+  retry unless the user asks.
 - When `handover` refuses, it sends nothing. Recovery by refusal: in RPC,
   ACP, print, or json mode, or in a subagent, the user needs a main
   interactive session; with a `/talk` view open, the user closes it first;
-  for this session itself, name another session; when talk could not read
-  the registry, ask the user to check the talk notice.
+  for this session itself, name another session; for a session that did not
+  answer, the user checks it, then run `list` again; when talk could not
+  read the registry, ask the user to check the talk notice.
 
 ## Results
 

@@ -37,7 +37,7 @@ In the modes `rpc` (RPC and ACP clients), `print`, and `json`, `/talk` and
 `alt+t` open no view. Each call shows this notice:
 
 ```text
-talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode.
+talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode, except its handover action, which needs such a session too.
 ```
 
 A session with a UI (`ctx.hasUI`) gets the notice through `ctx.ui.notify` as
@@ -490,7 +490,9 @@ for a tool-started handover
 key reaches the composer of omp. When the flow ends during the side turn,
 the flow aborts it, shows no error, and mounts no review. When the reply
 arrives, the flow checks its signal and its session id before it mounts the
-review.
+review. A tool-started handover also waits until omp drew the waiting view
+once, so the line that names the agent shows even when the side turn ends
+at once.
 
 ### Template
 
@@ -586,7 +588,7 @@ Each of these shows an error notice and sends nothing:
 | The target does not resolve     | The resolver error; no side turn starts                                                            |
 
 The host error is the message of the rejection, cleaned with
-`safeDiagnostic` (`cli/talk/ui/views.ts`): each terminal control goes, each
+`safeDiagnostic` (`cli/talk/ui/handover.ts`): each terminal control goes, each
 tab becomes a space, and the text is one line. The draft keeps its tabs. The
 `/talk` flow and a tool-started flow show the same notice.
 
@@ -616,15 +618,18 @@ and types the code. The differences:
   A pane too narrow for it shows
   `talk: make the pane wider to confirm the destination.` and takes no code.
 - Right before the send, the flow checks that the pair is not this binding's
-  registration, now or at the start of the call. When it is, the flow shows
+  registration: now, at the start of the call, or the pair that the binding
+  publishes and has not attached yet. The client asks the same check right
+  before the body write. When the pair is this session, the flow shows
   `talk: the destination of this handover is now this session, so talk sent nothing.`
   and sends nothing.
-- `escape` in the waiting view or the review ends the flow, and the result
-  is `cancelled`. `escape` in the confirm view returns to the review with the
-  text kept, and the tool call still waits. `alt+t` ends the flow: the
-  result is `cancelled` while no body write started. An abort of the tool
-  call ends the flow as `escape` does: `cancelled` before the body write,
-  `unknown` after it started.
+- `escape` in the waiting view or the review ends the flow. `escape` in the
+  confirm view returns to the review with the text kept, and the tool call
+  still waits. `alt+t` ends the flow. An abort of the tool call ends the
+  flow as `escape` does. A flow that ends before the body write gives
+  `cancelled`; after the write started, the result follows the dispatch
+  record: the answer when one came, `failed` for a failed write, else
+  `unknown`.
 - The action refuses before the side turn outside mode `tui`, without
   `ctx.hasUI`, in a subagent, while a `/talk` flow is open (which stays
   open), without `ctx.runEphemeralTurn`, and for the registration of this
@@ -636,7 +641,8 @@ and types the code. The differences:
 The tool result gives the outcome of the send from its dispatch record:
 `delivered`, `queued`, or `submitted`; a refusal such as `busy` or `not-live`;
 `unknown` when the text may have gone out and no usable answer settled the
-outcome; `failed`; or `cancelled` when the flow ended before the body write.
+outcome; `failed`; or `cancelled` when the flow ended before anything went
+out, by a key, an abort, or the destination check.
 After a failed side turn, the result holds only `talk: the handover side
 turn failed. Nothing was sent.` The host error stays in the notice. The
 result never holds the summary. `cli/docs/talk-tool.md`, "Handover", lists

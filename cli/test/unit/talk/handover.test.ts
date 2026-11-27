@@ -31,6 +31,7 @@ import {
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
   agentHandoverWaiting,
+  safeDiagnostic,
 } from "../../../talk/ui/handover";
 import {
   HANDOVER_TARGET_IS_THIS_SESSION,
@@ -755,6 +756,61 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(h.services.sends).toEqual([]);
     expect(h.tui.notices).toEqual([{ text: HANDOVER_TARGET_IS_THIS_SESSION, level: "error" }]);
     expect(h.tui.views.every((view) => view.closed)).toBe(true);
+  });
+
+  it("keeps the body back at the body write when the destination becomes this session's registration during the send (#260 H3)", async () => {
+    const h = await harness();
+    const own = { now: false };
+    const gate = Promise.withResolvers<void>();
+    h.services.sendGate = gate.promise;
+    const { flow } = await agentHandover(h, undefined, { text: undefined }, () => own.now);
+    await approve(h);
+    await flush();
+    const [record] = h.services.records;
+    expect(record).toBeDefined();
+    const life = h.services.lives.at(-1);
+    expect(life?.live()).toBe(true);
+    own.now = true;
+    // The transport asks `live` right before the body write, so it keeps the body back now.
+    expect(life?.live()).toBe(false);
+    gate.resolve();
+    expect(await flow).toEqual({ _tag: "OwnTarget" });
+    expect(h.tui.notices).toEqual([{ text: HANDOVER_TARGET_IS_THIS_SESSION, level: "error" }]);
+  });
+
+  it("mounts the review only after the waiting view that names the agent and the target drew a frame (#260 H2)", async () => {
+    const h = await harness();
+    h.tui.drawOnMount = false;
+    const { flow } = await agentHandover(h);
+    // The side turn answered at once, but omp drew no frame of the waiting view yet.
+    expect(h.services.turns).toHaveLength(1);
+    const waiting = h.tui.views.at(-1);
+    if (waiting === undefined) throw new Error("no waiting view");
+    expect(waiting.node.kind).toBe("text");
+    await flush();
+    expect(h.tui.views.at(-1)).toBe(waiting);
+    h.tui.draw(waiting);
+    await flush();
+    expect(prop(reviewOf(h), "text")).toBe(`${CLEAN_NOTE}\n\n${DRAFT}`);
+    press(reviewOf(h), "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+  });
+
+  it("ends the flow on escape while it waits for the frame of the waiting view", async () => {
+    const h = await harness();
+    h.tui.drawOnMount = false;
+    const { flow } = await agentHandover(h);
+    const waiting = h.tui.views.at(-1);
+    if (waiting === undefined) throw new Error("no waiting view");
+    press(waiting.node, "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
+  });
+
+  it("cleans a host error for a notice: one line, no terminal controls, and a space for each tab", () => {
+    expect(safeDiagnostic("open\t/home/u/x\u001b[31m failed\nretry")).toBe(
+      "open /home/u/x failed retry",
+    );
   });
 
   it("keeps the review open on ctrl+s while the text is blank", async () => {

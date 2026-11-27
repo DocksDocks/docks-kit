@@ -365,16 +365,26 @@ const waitingKeys =
 /**
  * A view that holds the focus while one talk step runs, such as the side
  * turn of a handover or a send: one `text` node with `text`. It starts
- * `task` at once and ends with its result.
+ * `task` at once and ends with its result. With `drawn`, the text is an
+ * accessor that calls `drawn` each time omp draws it, so the start notice of
+ * a tool-started handover can wait for its first frame (#260 H2).
  */
 export const pendingView = <R>(
   ui: HostUi,
   text: string,
   task: () => Promise<R>,
   done: (choice: Waited<R>) => void,
+  drawn?: () => void,
 ): JSXNode => {
   settleWith(task, done);
-  return ui.jsx("text", { text, onKey: waitingKeys(done) });
+  const shown =
+    drawn === undefined
+      ? text
+      : (): string => {
+          drawn();
+          return text;
+        };
+  return ui.jsx("text", { text: shown, onKey: waitingKeys(done) });
 };
 
 // ── Resize view ──
@@ -463,12 +473,6 @@ export const applyEdit = (
  * feed becomes a space, so the field shows the whole draft that it sends.
  */
 export const safeOneLine = (text: string): string => safeMultiline(text).replaceAll("\n", " ");
-
-/**
- * A host error for a notice (#260 H4): one line without terminal controls,
- * and each tab a space, so the notice shows it as plain text.
- */
-export const safeDiagnostic = (text: string): string => safeOneLine(text).replaceAll("\t", " ");
 
 /** The cells of an empty compose row that the placeholder cannot use: the caret bar and the free cell before the placeholder. */
 export const COMPOSE_PLACEHOLDER_CHROME = 2;

@@ -29,12 +29,19 @@ import {
   type ViewKey,
   type ViewSize,
   applyEdit,
-  safeDiagnostic,
+  safeOneLine,
   shownName,
 } from "./views";
 
 /** omp caps the reply of a side turn at 4 KiB (F7); the template stays inside it too. */
 export const MAX_HANDOVER_BYTES = 4096;
+
+/**
+ * A host error for a notice (#260 H4): one line without terminal controls,
+ * and each tab a space, so the notice shows it as plain text. The draft
+ * keeps its tabs.
+ */
+export const safeDiagnostic = (text: string): string => safeOneLine(text).replaceAll("\t", " ");
 
 /**
  * The prompt of the side turn (G6). The side turn runs on a copy of this
