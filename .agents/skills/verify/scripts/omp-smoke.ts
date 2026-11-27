@@ -6,15 +6,20 @@
  * folder, runs the command, and removes the folder. It uses a fake local OpenAI-compatible model, so no
  * real model credential is used.
  *
+ * Each command loads the shipped `talk` extension (`extensions/talk.js`). omp gets `DOCKS_KIT_TALK_DIR` set to a
+ * private registry folder, and each command checks that each talk session registered there and not in the
+ * default talk registry folder of the user. The script only reads the default folder.
+ *
  * Commands:
- *   (default)  Read what omp loads: the linked package, the skills, the task-tool agents, and the warnings.
+ *   (default)  Read what omp loads: the linked package, the skills, the task-tool agents, the extension entries,
+ *              the `talk` tool, and the warnings.
  *   hooks      Drive the verify-gate, context-tree-nudge, and hygiene extensions in `omp -p` sessions in a
  *              scratch git repository. The fake model plays scripted tool calls. Prints `ok <name>` or
  *              `FAIL <name>: <reason>` for each check.
- *   talk       Build the `talk` extension into a copy of the plugin, start one omp as an RPC peer and drive a
- *              second omp in print mode, both with `tools.commands` off and a private registry folder. The fake
- *              model scripts the `talk` calls of each session. Prints `ok <name>` or `FAIL <name>: <reason>`.
- *   talk-ui    Run omp in TUI mode in a pseudo-terminal beside an omp RPC peer, with the same talk plugin copy, and
+ *   talk       Link a copy of the plugin, start one omp as an RPC peer and drive a second omp in print mode, both
+ *              with `tools.commands` off. The fake model scripts the `talk` calls of each session. Prints
+ *              `ok <name>` or `FAIL <name>: <reason>`.
+ *   talk-ui    Run omp in TUI mode in a pseudo-terminal beside an omp RPC peer, with the same plugin copy, and
  *              drive `alt+t`, a resize of the pane below the list size, the compose and confirm views, the message
  *              card, and `/talk handover` with key bytes. An omp older than 19.2.0 must show only the talk
  *              capability notice and no `/talk` command.
@@ -27,11 +32,8 @@
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
-  constants,
-  copyFileSync,
   cpSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -42,18 +44,25 @@ import {
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { Result } from "effect";
+import { ompPaths } from "../../../../cli/src/engine-native/ompPaths.ts";
+import {
+  DARWIN_GETCONF,
+  registryFolderFor,
+  TALK_DIR_OVERRIDE,
+} from "../../../../cli/talk/transport/folder.ts";
+import { ENTRY_NAME } from "../../../../cli/talk/transport/registry.ts";
 
 /** The `name` of the kit plugin package, and of its npm row in `omp plugin list --json`. */
 const PACKAGE_NAME = "docks-kit-omp";
 /** The kit plugin folder, relative to the repository root. */
 const PLUGIN_DIR = "SoT/.omp/plugin";
-/** The 32 skills moved from DocksDocks/docks and `workspace-hygiene`. */
-const EXPECTED_SKILLS = 33;
+/** The shipped `talk` skill: the load mode expects it among the skills that omp loads. */
+const TALK_SKILL = "talk";
 const REQUIRED_AGENTS = ["code-reviewer", "plan-reviewer"];
 const COMMAND_TIMEOUT_MS = 120_000;
 const MODEL_PROVIDER = "omp-smoke";
@@ -157,7 +166,7 @@ const children = new Set<ChildProcess>();
 /** The omp processes that run in a pseudo-terminal (the `talk-ui` mode). */
 const terminalChildren = new Set<Bun.Subprocess>();
 let scratch: string | null = null;
-/** The private registry folder of a talk mode. It lies outside the scratch folder; cleanup removes it too. */
+/** The private talk registry folder of the run. It lies outside the scratch folder; cleanup removes it too. */
 let talkDir: string | null = null;
 let server: Server | null = null;
 
@@ -213,7 +222,7 @@ function createScratch(): string {
   return path;
 }
 
-/** The isolated folders of one run, all inside the scratch folder. */
+/** The isolated folders of one run: the private talk registry folder, and the others inside the scratch folder. */
 interface Isolation {
   /** The home folder of omp: the kit extensions resolve `~/.cache/docks-kit` here. */
   readonly home: string;
@@ -221,13 +230,17 @@ interface Isolation {
   readonly stateDir: string;
   readonly stateHome: string;
   readonly tmpDir: string;
+  /** The private talk registry folder (mode 0700) in the system temporary root. */
+  readonly registry: string;
 }
 
 /**
  * Environment for omp: only the allowed parent variables, so no omp session variable, no docks variable,
  * and no credential reaches omp. HOME is the scratch home, so the kit extensions (`hygiene.ts`) read and write
  * their `~/.cache/docks-kit` files there; PI_CONFIG_DIR names the isolated config root under it; XDG_STATE_HOME
- * is a scratch folder, so the verify-gate writes no line into the user log; TMPDIR is a scratch folder.
+ * is a scratch folder, so the verify-gate writes no line into the user log; TMPDIR is a scratch folder;
+ * DOCKS_KIT_TALK_DIR is the private registry folder, so `talk` does not register in the default folder.
+ * Each environment that a mode derives from this one keeps these variables.
  */
 const ENV_ALLOWLIST = ["PATH", "USER", "LANG", "TERM"];
 function isolatedEnv(isolation: Isolation): Record<string, string> {
@@ -240,6 +253,7 @@ function isolatedEnv(isolation: Isolation): Record<string, string> {
   env["PI_CONFIG_DIR"] = CONFIG_DIR_NAME;
   env["XDG_STATE_HOME"] = isolation.stateHome;
   env["TMPDIR"] = isolation.tmpDir;
+  env[TALK_DIR_OVERRIDE] = isolation.registry;
   return env;
 }
 
@@ -250,14 +264,17 @@ interface OmpResult {
   readonly stderr: string;
 }
 
+/** Runs omp to its exit. `onSpawn` gets the process id of the omp process, or undefined when it did not start. */
 function runOmp(
   argv: readonly string[],
   cwd: string,
   env: Record<string, string>,
+  onSpawn?: (pid: number | undefined) => void,
 ): Promise<OmpResult> {
   const { promise, resolve: done } = Promise.withResolvers<OmpResult>();
   const child = spawn(ompBinary, argv, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
   children.add(child);
+  onSpawn?.(child.pid);
   let stdout = "";
   let stderr = "";
   let timedOut = false;
@@ -299,6 +316,8 @@ interface Script {
    * session lasts until the driver has acted on another session.
    */
   respond?: (request: JsonObject) => Promise<Answer>;
+  /** When set, each answer waits for it first, so the omp session stays live until a check ends. */
+  hold?: Promise<unknown>;
 }
 
 function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): string {
@@ -310,6 +329,7 @@ function sseChunk(model: Json, choice: JsonObject, extra: JsonObject = {}): stri
  * `script.turns[n]` answers a request that holds n assistant messages, unless `script.respond` is set.
  */
 async function scriptedAnswer(script: Script, request: JsonObject): Promise<Answer> {
+  if (script.hold !== undefined) await script.hold;
   let answer: Answer | undefined;
   if (script.respond !== undefined) answer = await script.respond(request);
   else {
@@ -494,6 +514,156 @@ function realStateChanges(before: RealState): string[] {
   return changes;
 }
 
+// ---------- talk registry ----------
+
+/**
+ * The prefix of the private registry folder in the system temporary root. The scratch folder is too deep:
+ * the short path keeps each socket path inside `sun_path`.
+ */
+const TALK_DIR_PREFIX = "dkt-";
+const PRIVATE_FOLDER_MODE = 0o700;
+const PERMISSION_BITS = 0o777;
+/** talk registers at session start, and its repair timer tries again each second. */
+const REGISTRY_TIMEOUT_MS = 10_000;
+/** The check line of the registry attribution, in each command. */
+const REGISTRY_CHECK = "registry";
+const REGISTRY_NOTE = "talk registered only in the private folder";
+
+/** The output line of one check: `ok <name>`, or `FAIL <name>: <problem>`; an empty problem passes. */
+function checkLine(name: string, problem: string): string {
+  if (problem) return `FAIL ${name}: ${problem}`;
+  return name === REGISTRY_CHECK ? `ok ${name}: ${REGISTRY_NOTE}` : `ok ${name}`;
+}
+
+/**
+ * Makes the private registry folder (mode 0700) in the system temporary root, and keeps it for the cleanup.
+ * A wrong mode adds a failure.
+ */
+function privateRegistry(failures: string[]): string {
+  const registry = mkdtempSync(join(tmpdir(), TALK_DIR_PREFIX));
+  talkDir = registry;
+  const mode = statSync(registry).mode & PERMISSION_BITS;
+  if (mode !== PRIVATE_FOLDER_MODE)
+    failures.push(`the registry folder ${registry} has mode ${mode.toString(8)}, expected 700`);
+  return registry;
+}
+
+/**
+ * The default talk registry folder of the user: the folder that talk chooses without `DOCKS_KIT_TALK_DIR`
+ * (`registryFolderFor` in `cli/talk/transport/folder.ts`), on Linux `/tmp/docks-kit-talk-<uid>`. The script
+ * only reads this folder.
+ */
+function defaultTalkFolder(): string {
+  const darwinTempDir =
+    process.platform === "darwin"
+      ? spawnSync(DARWIN_GETCONF, ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).stdout
+      : undefined;
+  const choice = registryFolderFor({
+    platform: process.platform,
+    override: undefined,
+    uid: process.getuid?.(),
+    darwinTempDir,
+    localAppData: process.env["LOCALAPPDATA"],
+  });
+  if (Result.isSuccess(choice)) return choice.success;
+  throw new Error(`the default talk registry folder is unknown: ${choice.failure.reason}`);
+}
+
+/** Whether a file system error tells that the path does not exist. */
+function isMissing(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR")
+  );
+}
+
+/** The real path of `path`, or `path` when it does not resolve. */
+function realOrSame(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * The entry files of a talk registry folder whose JSON has `processId` and, after `realpath`, `cwd`. A missing
+ * folder has none. The function only reads the folder.
+ */
+function attributedEntries(folder: string, processId: number, realCwd: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch (error) {
+    if (isMissing(error)) return [];
+    throw error;
+  }
+  return names.filter((name) => {
+    if (!ENTRY_NAME.test(name)) return false;
+    let source: string;
+    try {
+      source = readFileSync(join(folder, name), "utf8");
+    } catch (error) {
+      // talk withdrew the entry after the folder read.
+      if (isMissing(error)) return false;
+      throw error;
+    }
+    const entry = parseJsonText(source);
+    if (!isObject(entry) || entry["processId"] !== processId) return false;
+    const cwd = entry["cwd"];
+    return typeof cwd === "string" && realOrSame(cwd) === realCwd;
+  });
+}
+
+/**
+ * The registry attribution of one live omp session (H7): waits until the private folder holds an entry with the
+ * process id and the work folder of the session, and then requires that the default folder holds no such entry.
+ * Entries of other sessions do not count, because each check matches the process id and the folder together.
+ * Gives the problem, or an empty text.
+ */
+async function registryAttribution(
+  privateFolder: string,
+  defaultFolder: string,
+  processId: number,
+  cwd: string,
+): Promise<string> {
+  const realCwd = realOrSame(cwd);
+  const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
+  try {
+    while (attributedEntries(privateFolder, processId, realCwd).length === 0) {
+      if (Date.now() > deadline)
+        return `no entry of process ${processId} with the folder ${cwd} in the private registry folder ${privateFolder} within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+      await sleep(POLL_MS);
+    }
+    const leaked = attributedEntries(defaultFolder, processId, realCwd);
+    return leaked.length === 0
+      ? ""
+      : `the default talk registry folder ${defaultFolder} holds the entry ${leaked.join(", ")} of process ${processId} with the folder ${cwd}`;
+  } catch (error) {
+    return `a talk registry folder could not be read: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** The registry attribution of the omp session `label` of a run; the problem names the session. */
+async function sessionAttribution(
+  run: Run,
+  label: string,
+  processId: number | undefined,
+  cwd: string,
+): Promise<string> {
+  const problem =
+    processId === undefined
+      ? "the omp process did not start"
+      : await registryAttribution(run.isolation.registry, run.defaultRegistry, processId, cwd);
+  return problem && `${label}: ${problem}`;
+}
+
+/** The problems of several attributions, as one check problem. */
+async function attributionProblem(checks: readonly Promise<string>[]): Promise<string> {
+  return (await Promise.all(checks)).filter(Boolean).join("; ");
+}
+
 // ---------- plugin discovery ----------
 
 function parseJson(source: string, label: string, failures: string[]): JsonObject | null {
@@ -519,6 +689,16 @@ function pluginAgentNames(root: string): Set<string> {
     if (name !== null) names.add(name);
   }
   return names;
+}
+
+/** The name of each skill folder of a plugin, sorted: the folders under `skills/` that hold a `SKILL.md`. */
+function pluginSkillNames(root: string): string[] {
+  const skillsDir = join(root, "skills");
+  if (!existsSync(skillsDir)) return [];
+  return readdirSync(skillsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(skillsDir, entry.name, "SKILL.md")))
+    .map((entry) => frontmatterName(join(skillsDir, entry.name, "SKILL.md")) ?? entry.name)
+    .sort();
 }
 
 /** Agent names in the "Available Agents" list of the task tool that the model receives. */
@@ -601,6 +781,8 @@ function countWarnings(
 interface OmpOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
+  /** Gets the process id of the omp process, or undefined when it did not start. */
+  readonly onSpawn?: (pid: number | undefined) => void;
 }
 
 interface Run {
@@ -615,7 +797,16 @@ interface Run {
   readonly plugin: LinkedPlugin | null;
   /** The modification time of the fresh sweep stamp in the scratch home. */
   readonly sweepStampMtime: number | null;
+  /** The default talk registry folder of the user, which the run only reads. */
+  readonly defaultRegistry: string;
 }
+
+/** The shipped talk bundle and its manifest entry in the kit plugin. */
+const TALK_BUNDLE = "talk.js";
+const TALK_EXTENSION_ENTRY = `./extensions/${TALK_BUNDLE}`;
+const TALK_TOOL = "talk";
+/** omp offers each enabled tool to the provider and mounts none as a Bash command, so `talk` is a provider tool. */
+const TALK_CONFIG_YAML = "tools:\n  commands: false\n";
 
 /** What a mode changes in the isolated state before omp links the plugin. */
 interface InstallSetup {
@@ -627,18 +818,22 @@ interface InstallSetup {
   readonly pluginFolder: (scratchDir: string, failures: string[]) => string;
 }
 
+/** The `hooks` mode: the plugin folder of this checkout and no `config.yml`. */
 const DEFAULT_SETUP: InstallSetup = {
   modelIds: [MODEL_ID],
   configYaml: null,
   pluginFolder: () => pluginDir,
 };
+/** The load mode: as `DEFAULT_SETUP`, and the `talk` tool reaches the first model request as a provider tool. */
+const LOAD_SETUP: InstallSetup = { ...DEFAULT_SETUP, configYaml: TALK_CONFIG_YAML };
 
 /**
- * Creates the scratch folder with isolated omp state, starts the fake model, links the kit plugin folder of
- * this checkout (or the folder that `setup` makes), and finds its npm row. Each omp command that exits
- * non-zero adds a failure.
+ * Creates the scratch folder with isolated omp state and the private talk registry folder, starts the fake
+ * model, links the kit plugin folder of this checkout (or the folder that `setup` makes), and finds its npm
+ * row. Each omp command that exits non-zero adds a failure.
  */
 async function install(failures: string[], setup: InstallSetup = DEFAULT_SETUP): Promise<Run> {
+  const defaultRegistry = defaultTalkFolder();
   scratch = createScratch();
   const home = join(scratch, "home");
   const isolation: Isolation = {
@@ -646,6 +841,7 @@ async function install(failures: string[], setup: InstallSetup = DEFAULT_SETUP):
     stateDir: join(home, CONFIG_DIR_NAME),
     stateHome: join(scratch, "state"),
     tmpDir: join(scratch, "tmp"),
+    registry: privateRegistry(failures),
   };
   const workDir = join(scratch, "work");
   for (const dir of [
@@ -677,7 +873,7 @@ async function install(failures: string[], setup: InstallSetup = DEFAULT_SETUP):
 
   const results: OmpResult[] = [];
   const omp = async (argv: readonly string[], options: OmpOptions = {}): Promise<OmpResult> => {
-    const result = await runOmp(argv, options.cwd ?? workDir, options.env ?? env);
+    const result = await runOmp(argv, options.cwd ?? workDir, options.env ?? env, options.onSpawn);
     results.push(result);
     if (result.code !== 0) {
       const detail = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
@@ -711,6 +907,7 @@ async function install(failures: string[], setup: InstallSetup = DEFAULT_SETUP):
     omp,
     plugin,
     sweepStampMtime: mtimeOf(stamp),
+    defaultRegistry,
   };
 }
 
@@ -734,71 +931,88 @@ function manifestName(failures: string[]): string {
   return name;
 }
 
-/** The entries of the `omp.extensions` list of a plugin manifest that load a `talk.js` file. */
-function talkExtensionEntries(manifest: JsonObject | null): string[] {
-  const ompField = manifest?.["omp"];
-  const extensions = isObject(ompField) ? ompField["extensions"] : undefined;
-  return Array.isArray(extensions)
-    ? extensions.filter(
-        (entry): entry is string => typeof entry === "string" && basename(entry) === TALK_BUNDLE,
-      )
+/**
+ * The `omp.extensions` list of the plugin manifest in `root`. A list without the shipped `talk.js` entry, or a
+ * plugin without that file, adds a failure.
+ */
+function talkBundleEntries(root: string, failures: string[]): string[] {
+  const manifestPath = join(root, "package.json");
+  if (!existsSync(manifestPath)) {
+    failures.push(`the manifest ${manifestPath} does not exist`);
+    return [];
+  }
+  const ompField = parseJson(readFileSync(manifestPath, "utf8"), manifestPath, failures)?.["omp"];
+  const list = isObject(ompField) ? ompField["extensions"] : undefined;
+  const entries = Array.isArray(list)
+    ? list.filter((entry): entry is string => typeof entry === "string")
     : [];
+  if (!entries.includes(TALK_EXTENSION_ENTRY))
+    failures.push(`the manifest ${manifestPath} has no entry ${TALK_EXTENSION_ENTRY}`);
+  const bundle = join(root, "extensions", TALK_BUNDLE);
+  if (!existsSync(bundle)) failures.push(`${bundle} does not exist`);
+  return entries;
 }
 
-/** The load mode runs before the talk cutover: the manifest of the linked plugin has no `talk.js` entry. */
-function linkedTalkEntries(plugin: LinkedPlugin, failures: string[]): void {
-  const manifest = join(plugin.realPath, "package.json");
-  if (!existsSync(manifest)) {
-    failures.push(`the linked manifest ${manifest} does not exist`);
-    return;
-  }
-  const entries = talkExtensionEntries(
-    parseJson(readFileSync(manifest, "utf8"), manifest, failures),
-  );
-  if (entries.length > 0)
-    failures.push(`the linked manifest ${manifest} has the talk entry ${entries.join(", ")}`);
-}
-
-async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
+/** The load mode: the linked package, its skills, agents, extension entries, the talk tool, and the warnings. */
+async function smoke(): Promise<{ lines: string[]; registry: string | null }> {
+  if (!existsSync(pluginDir))
+    return { lines: [`FAIL plugin folder ${pluginDir} does not exist`], registry: null };
   const failures: string[] = [];
-  if (!existsSync(pluginDir)) {
-    failures.push(`plugin folder ${pluginDir} does not exist`);
-    return { lines: [], failures };
-  }
   const name = manifestName(failures);
   const realBefore = realStateSnapshot();
-  const run = await install(failures);
+  const run = await install(failures, LOAD_SETUP);
   const skillList = parseJson(
     (await run.omp(["skill", "list", "--json"])).stdout,
     "omp skill list --json",
     failures,
   );
-  await run.omp([
-    "-p",
-    "--mode",
-    "json",
-    "--model",
-    `${MODEL_PROVIDER}/${MODEL_ID}`,
-    "--no-title",
-    "--no-session",
-    SESSION_PROMPT,
-  ]);
+  let registryCheck = Promise.resolve("session: the omp session did not start");
+  await run.omp(
+    [
+      "-p",
+      "--mode",
+      "json",
+      "--model",
+      `${MODEL_PROVIDER}/${MODEL_ID}`,
+      "--no-title",
+      "--no-session",
+      SESSION_PROMPT,
+    ],
+    {
+      onSpawn: (pid) => {
+        registryCheck = sessionAttribution(run, "session", pid, run.workDir);
+        // The fake model holds the turn until the check ends, so the session is live during the check.
+        run.script.hold = registryCheck;
+      },
+    },
+  );
+  run.script.hold = undefined;
+  const registryProblem = await registryCheck;
 
   const lines = [`${name} -> ${run.plugin?.realPath ?? "missing"}`];
+  let extensions: string[] = [];
   if (run.plugin !== null) {
     if (run.plugin.realPath !== realpathSync(pluginDir))
       failures.push(`${PACKAGE_NAME} resolves to ${run.plugin.realPath}, expected ${pluginDir}`);
-    linkedTalkEntries(run.plugin, failures);
+    extensions = talkBundleEntries(run.plugin.realPath, failures);
   }
 
   const roots = run.plugin === null ? [] : pluginRoots(run.plugin);
-  const skills = objects(skillList?.["skills"]).filter((skill) => {
-    const filePath = text(skill["filePath"]);
-    return filePath !== undefined && roots.some((root) => filePath.startsWith(root));
-  });
-  lines.push(`skills: ${skills.length}`);
-  if (skills.length !== EXPECTED_SKILLS)
-    failures.push(`skills: ${skills.length}, expected ${EXPECTED_SKILLS}`);
+  const skills = objects(skillList?.["skills"])
+    .filter((skill) => {
+      const filePath = text(skill["filePath"]);
+      return filePath !== undefined && roots.some((root) => filePath.startsWith(root));
+    })
+    .map((skill) => text(skill["name"]) ?? "(no name)")
+    .sort();
+  lines.push(`skills: ${skills.length}`, `skill names: ${skills.join(",")}`);
+  // The expected skills are the skill folders of the plugin, so a new skill folder needs no change here.
+  const shipped = pluginSkillNames(pluginDir);
+  if (skills.join(",") !== shipped.join(","))
+    failures.push(
+      `skills: ${skills.length}, expected the ${shipped.length} skill folders of ${pluginDir}: ${shipped.join(",")}`,
+    );
+  if (!skills.includes(TALK_SKILL)) failures.push(`the loaded skills do not include ${TALK_SKILL}`);
 
   const offered = taskToolAgents(run.requests);
   const ownAgents = run.plugin === null ? new Set<string>() : pluginAgentNames(run.plugin.realPath);
@@ -810,6 +1024,13 @@ async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
   const missingAgents = REQUIRED_AGENTS.filter((agent) => !agents.includes(agent));
   if (missingAgents.length > 0)
     failures.push(`agents missing from the task tool: ${missingAgents.join(",")}`);
+
+  lines.push(`extensions: ${extensions.join(",")}`);
+  const firstRequest = run.requests[0];
+  const talkOffered = firstRequest !== undefined && offersTool(firstRequest, TALK_TOOL);
+  lines.push(`talk tool: ${talkOffered ? "offered" : "missing"}`);
+  if (firstRequest !== undefined && !talkOffered)
+    failures.push(`the first model request does not offer the ${TALK_TOOL} tool`);
 
   const skillWarnings = Array.isArray(skillList?.["warnings"]) ? skillList["warnings"] : [];
   const warnings = countWarnings(
@@ -823,9 +1044,13 @@ async function smoke(): Promise<{ lines: string[]; failures: string[] }> {
     failures.push(
       `omp reported ${warnings.length} warning(s) about the plugin: ${warnings.join(" | ")}`,
     );
+  lines.push(checkLine(REGISTRY_CHECK, registryProblem));
 
   failures.push(...isolationProblems(run), ...realStateChanges(realBefore));
-  return { lines, failures };
+  return {
+    lines: [...lines, ...failures.map((failure) => `FAIL ${failure}`)],
+    registry: run.isolation.registry,
+  };
 }
 
 // ---------- hooks ----------
@@ -947,14 +1172,14 @@ interface SessionResult {
   readonly log: string;
 }
 
-async function hooks(): Promise<string[]> {
+async function hooks(): Promise<{ lines: string[]; registry: string | null }> {
   const checks: string[] = [];
   const check = (name: string, problem: string | null): void => {
-    checks.push(problem ? `FAIL ${name}: ${problem}` : `ok ${name}`);
+    checks.push(checkLine(name, problem ?? ""));
   };
   if (!existsSync(pluginDir)) {
     check("install", `plugin folder ${pluginDir} does not exist`);
-    return checks;
+    return { lines: checks, registry: null };
   }
   const realBefore = realStateSnapshot();
   const installFailures: string[] = [];
@@ -994,6 +1219,7 @@ async function hooks(): Promise<string[]> {
       .filter((subject) => subject === BARE_SUBJECT).length;
 
   const sessionFailures: string[] = [];
+  const registryProblems: string[] = [];
   const stateRoot = run.isolation.stateHome;
   const session = async (
     name: string,
@@ -1002,6 +1228,7 @@ async function hooks(): Promise<string[]> {
     const env: Record<string, string> = { ...gitEnv, XDG_STATE_HOME: join(stateRoot, name) };
     if (mode !== undefined) env["DOCKS_VERIFY_GATE"] = mode;
     run.script.turns = turns;
+    let registryCheck = Promise.resolve(`${name}: the omp session did not start`);
     const result = await run.omp(
       [
         "-p",
@@ -1016,9 +1243,17 @@ async function hooks(): Promise<string[]> {
       {
         cwd: repoDir,
         env,
+        onSpawn: (pid) => {
+          registryCheck = sessionAttribution(run, name, pid, repoDir);
+          // The fake model holds the first turn until the check ends, so the session is live during the check.
+          run.script.hold = registryCheck;
+        },
       },
     );
     run.script.turns = [];
+    run.script.hold = undefined;
+    const registryProblem = await registryCheck;
+    if (registryProblem) registryProblems.push(registryProblem);
     if (result.code !== 0)
       sessionFailures.push(
         `${name} session exited ${result.code}: ${short(result.stderr || result.stdout)}`,
@@ -1237,30 +1472,14 @@ async function hooks(): Promise<string[]> {
   check("sessions", sessionFailures.join("; "));
   check("isolated", isolationProblems(run).join("; "));
   check("real-state", realStateChanges(realBefore).join("; "));
-  return checks;
+  check(REGISTRY_CHECK, registryProblems.join("; "));
+  return { lines: checks, registry: run.isolation.registry };
 }
 
 // ---------- talk ----------
 
-/** The bundle builder of the talk extension, relative to the repository root, and the file that it writes. */
-const TALK_BUILD_SCRIPT = "cli/scripts/build-talk.ts";
-const TALK_BUNDLE = "talk.js";
-/** The manifest entry of the bundle in the plugin copy. */
-const TALK_EXTENSION_ENTRY = `./extensions/${TALK_BUNDLE}`;
-/** The registry folder override of the talk transport (`cli/talk/transport/folder.ts`). */
-const TALK_DIR_ENV = "DOCKS_KIT_TALK_DIR";
-/**
- * The prefix of the private registry folder in the system temporary root. The scratch folder is too deep:
- * the short path keeps each socket path inside `sun_path`.
- */
-const TALK_DIR_PREFIX = "dkt-";
-const PRIVATE_FOLDER_MODE = 0o700;
-const PERMISSION_BITS = 0o777;
 const PEER_MODEL_ID = "talk-peer";
 const SENDER_MODEL_ID = "talk-sender";
-/** omp offers each enabled tool to the provider and mounts none as a Bash command, so `talk` is a provider tool. */
-const TALK_CONFIG_YAML = "tools:\n  commands: false\n";
-const TALK_TOOL = "talk";
 /** The `customType` of a talk message entry in a session (`TALK_MESSAGE_TYPE` in `cli/talk/tool/host.ts`). */
 const TALK_ENTRY_TYPE = "talk";
 /** A prompt with this marker makes the fake model hold the peer turn until the cancel check ends. */
@@ -1314,6 +1533,7 @@ const TALK_CHECKS = [
   "sessions",
   "isolated",
   "real-state",
+  REGISTRY_CHECK,
 ] as const;
 type TalkCheck = (typeof TALK_CHECKS)[number];
 
@@ -1497,6 +1717,8 @@ class PeerModel {
 
 /** An omp process in RPC mode: one JSON command per stdin line, one JSON response or event per stdout line. */
 interface RpcPeer {
+  /** The process id of the omp process, or undefined when it did not start. */
+  readonly pid: number | undefined;
   /** Sends a command; gives the `data` of a response with `success: true`, and fails on any other response. */
   readonly send: (command: JsonObject) => Promise<Json>;
   /** Ends stdin and waits for the exit; SIGTERM, then SIGKILL, when omp does not exit in time. */
@@ -1573,72 +1795,18 @@ async function startRpcOmp(
     }
     return { argv, code, stdout: "", stderr };
   };
-  return { send, close };
+  return { pid: child.pid, send, close };
 }
 
 /**
- * Makes the private registry folder (mode 0700) of a talk mode in the system temporary root, and keeps it for
- * the cleanup. A wrong mode adds a failure.
- */
-function privateRegistry(failures: string[]): string {
-  const registry = mkdtempSync(join(tmpdir(), TALK_DIR_PREFIX));
-  talkDir = registry;
-  const mode = statSync(registry).mode & PERMISSION_BITS;
-  if (mode !== PRIVATE_FOLDER_MODE)
-    failures.push(`the registry folder ${registry} has mode ${mode.toString(8)}, expected 700`);
-  return registry;
-}
-
-/** Whether `path` is a symbolic link; false when nothing is at `path`. */
-function isSymlink(path: string): boolean {
-  return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
-}
-
-/**
- * Builds the talk bundle in the scratch folder, copies the kit plugin folder there, and adds the bundle and
- * its manifest entry to the copy. Returns the copy, which omp links. The copy keeps each symbolic link as it
- * is, so a relative link does not point into the source folder. A write through a link can change a file
- * outside the scratch folder, so the mode refuses a link on each path that it writes, and the bundle is a
- * new file of the copy.
+ * Copies the kit plugin folder, with the shipped `talk.js` and its manifest entry, to the scratch folder.
+ * Returns the copy, which omp links. The copy keeps each symbolic link as it is, so a relative link does not
+ * point into the source folder. A copy without the bundle or its entry adds a failure.
  */
 function talkPluginCopy(scratchDir: string, failures: string[]): string {
-  const buildDir = join(scratchDir, "talk-build");
-  const build = spawnSync(process.execPath, [join(repo, TALK_BUILD_SCRIPT), "--out", buildDir], {
-    cwd: repo,
-    encoding: "utf8",
-  });
   const copy = join(scratchDir, "plugin");
   cpSync(pluginDir, copy, { recursive: true, verbatimSymlinks: true });
-  const bundle = join(buildDir, TALK_BUNDLE);
-  if (build.status !== 0 || !existsSync(bundle)) {
-    failures.push(
-      `bun ${TALK_BUILD_SCRIPT} failed: ${short(build.stderr || String(build.error ?? ""))}`,
-    );
-    return copy;
-  }
-  const extensions = join(copy, "extensions");
-  const target = join(extensions, TALK_BUNDLE);
-  const manifestPath = join(copy, "package.json");
-  const links = [copy, extensions, manifestPath].filter(isSymlink);
-  if (links.length > 0) {
-    failures.push(
-      `the plugin copy has a symbolic link on a path that the talk mode writes: ${links.join(", ")}`,
-    );
-    return copy;
-  }
-  if (lstatSync(target, { throwIfNoEntry: false }) !== undefined) {
-    failures.push(`the plugin copy already has ${target}`);
-    return copy;
-  }
-  copyFileSync(bundle, target, constants.COPYFILE_EXCL);
-  const manifest = parseJson(readFileSync(manifestPath, "utf8"), manifestPath, failures);
-  const ompField = manifest?.["omp"];
-  if (manifest === null || !isObject(ompField) || !Array.isArray(ompField["extensions"])) {
-    failures.push(`${manifestPath} has no omp.extensions list`);
-    return copy;
-  }
-  ompField["extensions"] = [...ompField["extensions"], TALK_EXTENSION_ENTRY];
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  talkBundleEntries(copy, failures);
   return copy;
 }
 
@@ -1804,8 +1972,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
   const lines = (): string[] =>
     TALK_CHECKS.map((name) => {
       const problem = results.get(name);
-      if (problem === undefined) return `FAIL ${name}: not run, because an earlier check failed`;
-      return problem ? `FAIL ${name}: ${problem}` : `ok ${name}`;
+      return checkLine(name, problem ?? "not run, because an earlier check failed");
     });
   if (!existsSync(pluginDir)) {
     results.set("install", `plugin folder ${pluginDir} does not exist`);
@@ -1818,11 +1985,10 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     configYaml: TALK_CONFIG_YAML,
     pluginFolder: talkPluginCopy,
   });
-  const registry = privateRegistry(installFailures);
+  const registry = run.isolation.registry;
   results.set("install", installFailures.join("; "));
   if (installFailures.length > 0) return { lines: lines(), registry };
 
-  const env: Record<string, string> = { ...run.env, [TALK_DIR_ENV]: registry };
   const peerModel = new PeerModel();
   const sender = new ScriptedSession(SENDER_MODEL_ID);
   run.script.respond = (request) =>
@@ -1844,9 +2010,10 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     const rpc = await startRpcOmp(
       ["--mode", "rpc", "--model", `${MODEL_PROVIDER}/${PEER_MODEL_ID}`, "--no-title"],
       run.workDir,
-      env,
+      run.env,
     );
     peer = rpc;
+    const peerRegistry = sessionAttribution(run, "peer", rpc.pid, run.workDir);
     const peerState = async (): Promise<JsonObject> => {
       const data = await rpc.send({ type: "get_state" });
       return isObject(data) ? data : {};
@@ -1947,6 +2114,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       failStep("the first provider request of the peer does not offer the talk tool");
     await waitPeerIdle();
     // The sender: omp in print mode. Each of its turns waits for this program.
+    let senderRegistry = Promise.resolve("sender: the omp session did not start");
     const senderStarted = run.omp(
       [
         "-p",
@@ -1957,7 +2125,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         "--no-title",
         SCRIPTED_PROMPT,
       ],
-      { env },
+      {
+        onSpawn: (pid) => {
+          senderRegistry = sessionAttribution(run, "sender", pid, run.workDir);
+        },
+      },
     );
     senderRun = senderStarted;
     void senderStarted.then((result) => sender.abort(`the sender omp exited ${result.code}`));
@@ -1969,6 +2141,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     if (!offersTool(senderFirst, TALK_TOOL))
       failStep("the first provider request of the sender does not offer the talk tool");
     pass();
+    // Both omp processes are live: the peer waits for RPC commands, and the sender waits in its first turn.
+    results.set(REGISTRY_CHECK, await attributionProblem([peerRegistry, senderRegistry]));
 
     step = "talk-list";
     const firstSession = await peerSessionId();
@@ -2259,6 +2433,7 @@ const UI_CHECKS = [
   "sessions",
   "isolated",
   "real-state",
+  REGISTRY_CHECK,
 ] as const;
 /** The checks of the talk-ui mode on an omp older than 19.2.0 (#251 a8, #248 a11). */
 const OLD_OMP_CHECKS = [
@@ -2371,6 +2546,11 @@ class TerminalOmp {
     this.#process = child;
     terminalChildren.add(child);
     void child.exited.then(() => terminalChildren.delete(child));
+  }
+
+  /** The process id of the omp process. */
+  get pid(): number {
+    return this.#process.pid;
   }
 
   /** A position in the output; `waitFor` searches the output after it. */
@@ -2553,8 +2733,7 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
   const lines = (): string[] =>
     checks.map((name) => {
       const problem = results.get(name);
-      if (problem === undefined) return `FAIL ${name}: not run, because an earlier check failed`;
-      return problem ? `FAIL ${name}: ${problem}` : `ok ${name}`;
+      return checkLine(name, problem ?? "not run, because an earlier check failed");
     });
   if (!existsSync(pluginDir)) {
     results.set("install", `plugin folder ${pluginDir} does not exist`);
@@ -2567,7 +2746,7 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     configYaml: UI_CONFIG_YAML,
     pluginFolder: talkPluginCopy,
   });
-  const registry = privateRegistry(installFailures);
+  const registry = run.isolation.registry;
   // The version decides the flow: omp before 19.2.0 has no reactive UI, so talk only shows its notice.
   const versionText = (await run.omp(["--version"])).stdout;
   const version = OMP_VERSION.exec(versionText);
@@ -2576,11 +2755,7 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
   results.set("install", installFailures.join("; "));
   if (installFailures.length > 0) return { lines: lines(), registry };
 
-  const env: Record<string, string> = {
-    ...run.env,
-    [TALK_DIR_ENV]: registry,
-    TERM: TERMINAL_TYPE,
-  };
+  const env: Record<string, string> = { ...run.env, TERM: TERMINAL_TYPE };
   const peerCalls = new PeerCalls();
   run.script.respond = async (request) => {
     if (request["model"] === PEER_MODEL_ID) return peerCalls.respond(request);
@@ -2613,18 +2788,23 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     );
     results.set("old-notice", "not checked, because old-no-command failed before the output drained");
 
-    // omp gives a line that names no command to the model as a prompt.
+    // omp gives a line that names no command to the model as a prompt. omp 19.1.1 also reads `/talk` as the
+    // shipped `talk` skill and gives the skill text with it. The skill hint requests at the start of omp hold
+    // `/talk` too, so only the requests after Enter count.
     step = "old-no-command";
     const typed = screen.mark();
     screen.write("/talk");
     await screen.waitFor("/talk", typed, "typed /talk");
+    const sentBefore = run.requests.length;
     screen.write(ENTER_KEY);
     const deadline = Date.now() + STEP_TIMEOUT_MS;
     let request: JsonObject | undefined;
     for (;;) {
-      request = run.requests.find(
-        (sent) => sent["model"] === UI_MODEL_ID && newUserText(sent)?.includes("/talk") === true,
-      );
+      request = run.requests
+        .slice(sentBefore)
+        .find(
+          (sent) => sent["model"] === UI_MODEL_ID && newUserText(sent)?.includes("/talk") === true,
+        );
       if (request !== undefined) break;
       if (Date.now() > deadline)
         failStep(`omp did not give /talk to the model within ${STEP_TIMEOUT_MS / 1_000} s`);
@@ -2848,6 +3028,14 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
         run.workDir,
         env,
       );
+      // Both omp processes are live: the TUI omp shows its footer, and the peer waits for RPC commands.
+      results.set(
+        REGISTRY_CHECK,
+        await attributionProblem([
+          sessionAttribution(run, "TUI", screen.pid, run.workDir),
+          sessionAttribution(run, "peer", peer.pid, run.workDir),
+        ]),
+      );
       await currentFlow(screen, peer);
     }
     terminalResult = await screen.close();
@@ -2888,30 +3076,26 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
 
 let exitCode = 1;
 try {
-  if (command === "hooks") {
-    const checks = await hooks();
-    for (const line of checks) console.log(line);
-    exitCode = checks.some((line) => line.startsWith("FAIL")) ? 1 : 0;
-  } else if (command === "talk" || command === "talk-ui") {
-    const talk = command === "talk" ? await talkMode() : await talkUiMode();
-    for (const line of talk.lines) console.log(line);
-    // The registry folder lies outside the scratch folder, so the check runs after the cleanup.
-    const removed = reportCleanup();
-    const kept =
-      talk.registry === null
-        ? "no registry folder was made"
-        : existsSync(talk.registry)
-          ? `the registry folder ${talk.registry} still exists`
-          : null;
-    console.log(kept === null ? "ok registry-removed" : `FAIL registry-removed: ${kept}`);
-    exitCode =
-      removed && kept === null && !talk.lines.some((line) => line.startsWith("FAIL")) ? 0 : 1;
-  } else {
-    const { lines, failures } = await smoke();
-    for (const line of lines) console.log(line);
-    for (const failure of failures) console.log(`FAIL ${failure}`);
-    exitCode = failures.length > 0 ? 1 : 0;
-  }
+  const outcome =
+    command === "hooks"
+      ? await hooks()
+      : command === "talk"
+        ? await talkMode()
+        : command === "talk-ui"
+          ? await talkUiMode()
+          : await smoke();
+  for (const line of outcome.lines) console.log(line);
+  // The registry folder lies outside the scratch folder, so the check runs after the cleanup.
+  const removed = reportCleanup();
+  const kept =
+    outcome.registry === null
+      ? "no registry folder was made"
+      : existsSync(outcome.registry)
+        ? `the registry folder ${outcome.registry} still exists`
+        : "";
+  console.log(checkLine("registry-removed", kept));
+  exitCode =
+    removed && !kept && !outcome.lines.some((line) => line.startsWith("FAIL")) ? 0 : 1;
 } catch (error) {
   console.log(`FAIL ${error instanceof Error ? error.message : String(error)}`);
 } finally {
