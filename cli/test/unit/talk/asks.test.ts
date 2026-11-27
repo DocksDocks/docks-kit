@@ -77,13 +77,43 @@ const reply = (overrides: Partial<ReplyBody> = {}): ReplyBody => ({
   ...overrides,
 });
 
+/** The activity check of a binding that still runs. */
+const live = (): boolean => true;
+
 const storeWithMain = () => {
   const store = makeAskStore(clock);
-  store.noteAgent(MAIN);
-  store.noteAgent(CHILD);
-  store.noteAgent(GRANDCHILD);
+  store.noteAgent(MAIN, live);
+  store.noteAgent(CHILD, live);
+  store.noteAgent(GRANDCHILD, live);
   store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
   return store;
+};
+
+const MAP_ITERATORS = ["values", "keys", "entries", "forEach", Symbol.iterator] as const;
+
+/**
+ * Runs `body` and counts the iterations of a `Map` or a `Set` that start in
+ * it. A count of 0 shows that `body` scanned no collection.
+ */
+const collectionScans = (body: () => void): number => {
+  let scans = 0;
+  const restore: Array<() => void> = [];
+  for (const prototype of [Map.prototype, Set.prototype])
+    for (const key of MAP_ITERATORS) {
+      const original: unknown = Reflect.get(prototype, key);
+      if (typeof original !== "function") continue;
+      Reflect.set(prototype, key, function (this: unknown, ...args: Array<unknown>) {
+        scans += 1;
+        return Reflect.apply(original, this, args);
+      });
+      restore.push(() => Reflect.set(prototype, key, original));
+    }
+  try {
+    body();
+  } finally {
+    for (const undo of restore) undo();
+  }
+  return scans;
 };
 
 describe("reply address", () => {
@@ -107,8 +137,8 @@ describe("reply address", () => {
 
   it("ends the walk on a cycle in the agent map", () => {
     const store = makeAskStore(clock);
-    store.noteAgent({ id: "loop-a", parentId: "loop-b", main: false });
-    store.noteAgent({ id: "loop-b", parentId: "loop-a", main: false });
+    store.noteAgent({ id: "loop-a", parentId: "loop-b", main: false }, live);
+    store.noteAgent({ id: "loop-b", parentId: "loop-a", main: false }, live);
     expect(store.replyAddress({ id: "loop-a", parentId: "loop-b", main: false })).toBeUndefined();
   });
 
@@ -162,9 +192,77 @@ describe("agent map release (C13)", () => {
     const store = storeWithMain();
     store.forgetAgent("never-noted");
     store.forgetAgent(CHILD.id);
-    store.noteAgent(CHILD);
+    store.noteAgent(CHILD, live);
     store.forgetAgent(GRANDCHILD.id);
     expect(store.replyAddress(probeOf(CHILD.id))).toEqual({ origin: "sub", replyTo: MAIN_REG });
+  });
+
+  it("keeps no row for an agent without a parent, such as a main session", () => {
+    const store = makeAskStore(clock);
+    store.noteAgent(MAIN, live);
+    expect(store.ancestryRows).toBe(0);
+    store.noteAgent(CHILD, live);
+    expect(store.ancestryRows).toBe(1);
+    store.forgetAgent(MAIN.id);
+    store.forgetAgent(CHILD.id);
+    expect(store.ancestryRows).toBe(0);
+  });
+
+  it("releases at the sweep the row of an agent whose binding no longer runs, after its last subagent", () => {
+    const store = makeAskStore(clock);
+    store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
+    let childRuns = true;
+    let grandchildRuns = true;
+    store.noteAgent(MAIN, live);
+    store.noteAgent(CHILD, () => childRuns);
+    store.noteAgent(GRANDCHILD, () => {
+      if (!grandchildRuns) throw new Error("getAllTools is missing");
+      return true;
+    });
+    store.sweepAgents();
+    expect(store.ancestryRows).toBe(2);
+    // omp closed the child's binding without a session_shutdown: the grandchild still walks through it.
+    childRuns = false;
+    store.sweepAgents();
+    expect(store.replyAddress(GRANDCHILD)).toEqual({ origin: "sub", replyTo: MAIN_REG });
+    expect(store.ancestryRows).toBe(2);
+    // A check that throws counts as a binding that no longer runs.
+    grandchildRuns = false;
+    store.sweepAgents();
+    expect(store.ancestryRows).toBe(0);
+    expect(store.replyAddress(probeOf(CHILD.id))).toBeUndefined();
+  });
+
+  it("counts the subagents of an agent, also one noted before its parent or noted again under another parent", () => {
+    const store = makeAskStore(clock);
+    store.setRegistration(MAIN.id, { registration: MAIN_REG, isCurrent: () => true });
+    store.noteAgent({ id: "leaf", parentId: "mid", main: false }, live);
+    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false }, live);
+    store.forgetAgent("mid");
+    // The leaf, noted first, still holds the ended parent.
+    expect(store.replyAddress(probeOf("mid"))).toEqual({ origin: "sub", replyTo: MAIN_REG });
+    expect(store.ancestryRows).toBe(2);
+    // The leaf moves to another parent: the ended parent has no subagent left and goes.
+    store.noteAgent({ id: "leaf", parentId: MAIN.id, main: false }, live);
+    expect(store.ancestryRows).toBe(1);
+    expect(store.replyAddress(probeOf("mid"))).toBeUndefined();
+    store.forgetAgent("leaf");
+    expect(store.ancestryRows).toBe(0);
+  });
+
+  it("releases each of many sibling leaves without a scan of the agent map (C13)", () => {
+    const store = makeAskStore(clock);
+    store.noteAgent(MAIN, live);
+    store.noteAgent({ id: "mid", parentId: MAIN.id, main: false }, live);
+    const leaves = Array.from({ length: 1_000 }, (_, index) => `leaf-${index}`);
+    for (const id of leaves) store.noteAgent({ id, parentId: "mid", main: false }, live);
+    store.forgetAgent("mid");
+    expect(store.ancestryRows).toBe(1 + leaves.length);
+    const scans = collectionScans(() => {
+      for (const id of leaves) store.forgetAgent(id);
+    });
+    expect(scans).toBe(0);
+    expect(store.ancestryRows).toBe(0);
   });
 });
 
@@ -268,7 +366,7 @@ describe("ask", () => {
 
   it("allows one waiter per session", async () => {
     const store = storeWithMain();
-    store.noteAgent({ id: "main-2", parentId: undefined, main: true });
+    store.noteAgent({ id: "main-2", parentId: undefined, main: true }, live);
     store.setRegistration("main-2", { registration: OTHER_REG, isCurrent: () => true });
     const deliver = vi.fn(async () => result("delivered"));
     const first = peek(store.ask({ agent: MAIN, askId: ASK_ID, target: PEER, deliver }));
@@ -466,6 +564,39 @@ describe("pending inbound asks", () => {
     pending.clear();
     expect(vi.getTimerCount()).toBe(0);
     expect(pending.list(PEER)).toEqual([]);
+  });
+
+  it("keeps the asks in expiry order: an ask received again moves behind the others and expires at its new deadline", async () => {
+    const pending = makePendingAsks(clock);
+    pending.add(ask("0000000000000001"), PEER);
+    await vi.advanceTimersByTimeAsync(1_000);
+    pending.add(ask("0000000000000002"), PEER);
+    await vi.advanceTimersByTimeAsync(1_000);
+    pending.add(ask("0000000000000001", "Is the build green now?"), PEER);
+    const ids = (): Array<string> => pending.list(PEER).map((entry) => entry.askId);
+    expect(ids()).toEqual(["0000000000000002", "0000000000000001"]);
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS - 1_000);
+    expect(ids()).toEqual(["0000000000000001"]);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ids()).toEqual(["0000000000000001"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ids()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("lets an ask that comes after the clock stepped back expire with the ask before it", async () => {
+    const pending = makePendingAsks(clock);
+    pending.add(ask("0000000000000001"), PEER);
+    vi.setSystemTime(Date.now() - 5_000);
+    pending.add(ask("0000000000000002"), PEER);
+    const ids = (): Array<string> => pending.list(PEER).map((entry) => entry.askId);
+    expect(pending.list(PEER).map((entry) => entry.ageMs)).toEqual([0, 0]);
+    // The clock reads 5 s less than the timers: both asks stay until the deadline of the first.
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS + 4_999);
+    expect(ids()).toEqual(["0000000000000001", "0000000000000002"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ids()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("shows each ask only to the registration that received it (C1)", () => {

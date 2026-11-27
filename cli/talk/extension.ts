@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { isMainThread } from "node:worker_threads";
 
-import { Effect, ManagedRuntime, Option, Predicate, Result, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Predicate, Result, Schema } from "effect";
 
 import { version as packageVersion } from "../../package.json" with { type: "json" };
 import { type AgentRef, type AskStore, type LiveRegistration, makeAskStore } from "./tool/asks";
@@ -105,6 +105,15 @@ export interface TalkTransportRuntime {
   readonly dispose: () => Promise<void>;
 }
 
+/** The settings of `makeTalkTransport`. */
+export interface TalkRuntimeOptions extends Omit<TalkTransportOptions, "admit"> {
+  /**
+   * Services that the runtime adds for the transport and for each call, in
+   * place of the defaults; a test gives `TestClock.layer()`. Default: none.
+   */
+  readonly services?: Layer.Layer<never> | undefined;
+}
+
 /**
  * The transport of E12: one `ManagedRuntime` of `TalkTransport.layer` with
  * the admission hook, and the request handlers that it installs before the
@@ -112,9 +121,12 @@ export interface TalkTransportRuntime {
  */
 export const makeTalkTransport = (
   hooks: TransportHooks,
-  options: Omit<TalkTransportOptions, "admit"> = {},
+  { services, ...options }: TalkRuntimeOptions = {},
 ): TalkTransportRuntime => {
-  const runtime = ManagedRuntime.make(TalkTransport.layer({ ...options, admit: hooks.admit }));
+  const layer = TalkTransport.layer({ ...options, admit: hooks.admit });
+  const runtime = ManagedRuntime.make(
+    services === undefined ? layer : layer.pipe(Layer.provideMerge(services)),
+  );
   const install = TalkTransport.use((transport) =>
     Effect.forEach(hooks.handlers, ([kind, handler]) => transport.handle(kind, handler), {
       discard: true,
@@ -307,8 +319,10 @@ const createProcess = ({ makeTransport, clock, report }: ProcessOptions): TalkPr
   });
 
   // E7, E12: the sweep withdraws each registration whose binding fails its
-  // activity check, also when that binding no longer runs. A throw from a raw
-  // timer ends the omp session, so the callback catches every error.
+  // activity check, also when that binding no longer runs, and releases the
+  // agent map rows of bindings that omp closed without a `session_shutdown`.
+  // A throw from a raw timer ends the omp session, so the callback catches
+  // every error.
   const sweep = setInterval(() => {
     try {
       for (const owner of [...owners.values()]) {
@@ -316,6 +330,7 @@ const createProcess = ({ makeTransport, clock, report }: ProcessOptions): TalkPr
         end(owner);
         transport.withdraw(owner.registration).catch(report);
       }
+      asks.sweepAgents();
     } catch (error) {
       report(error);
     }
@@ -720,6 +735,12 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     markerPath !== undefined &&
     toolRows().some((row) => ownRow(row) && rowPath(row) === markerPath);
   const active = (): boolean => holds(isActive);
+  /**
+   * The check of the agent map row (E6): omp still lists this binding's
+   * marker. omp removes the rows of a suspended or closed extension (F13); a
+   * placeholder source path does not matter here.
+   */
+  const listed = (): boolean => toolRows().some(ownRow);
 
   const requireSession = (): SessionContext => {
     if (session === undefined) throw new Error("talk: the session has not started yet.");
@@ -897,7 +918,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
   api.on("session_start", async (_event, ctx) => {
     rawContext = ctx;
     identity = readContext(ctx, ["agent"]).agent();
-    talk.asks.noteAgent(agentRef(env.scope, bindingKey, identity));
+    talk.asks.noteAgent(agentRef(env.scope, bindingKey, identity), listed);
     // A subagent session is no target (#248 D2): it has no registration and no timer.
     if (identity.kind !== "main") return;
     session = readContext(ctx, MAIN_NEEDS);
@@ -979,6 +1000,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
         pending: delivery.pending,
         queuedCount: delivery.queuedCount,
       };
+      // A row that the sweep released while the extension was suspended comes back.
+      talk.asks.noteAgent(self.agent, listed);
       const outcome = await Effect.runPromise(
         runTalkTool(
           {

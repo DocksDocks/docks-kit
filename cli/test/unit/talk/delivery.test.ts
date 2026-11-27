@@ -1,4 +1,7 @@
-import { Effect, type Schema } from "effect";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
+
+import { Effect, Predicate, type Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { makeAskStore } from "../../../talk/tool/asks";
@@ -7,6 +10,7 @@ import {
   HOLD_MS,
   MAX_QUEUED_BYTES,
   MAX_QUEUED_MESSAGES,
+  QUEUE_RETRY_MS,
   SEND_WAIT_MS,
   WATCH_LIMIT_MS,
   type TalkDelivery,
@@ -27,11 +31,13 @@ import {
   CANCEL_KIND,
   DELIVER_KIND,
   type DeliverBody,
+  MAX_MESSAGE_BYTES,
   REPLY_KIND,
   type ReplyBody,
   encodeCancelBody,
   encodeDeliverBody,
   encodeReplyBody,
+  messageBytes,
 } from "../../../talk/tool/protocol";
 import type { Target } from "../../../talk/transport/request";
 
@@ -186,6 +192,18 @@ const nextMessageId = (): string => {
   return messageCounter.toString(16).padStart(16, "0");
 };
 
+setFlagsFromString("--expose-gc");
+const gcFunction: unknown = runInNewContext("gc");
+
+/** A full garbage collection, after a fresh task, so that no weak reference of the task stays held. */
+const collectGarbage = async (): Promise<void> => {
+  if (!Predicate.isFunction(gcFunction)) throw new Error("the V8 gc function is missing");
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  await promise;
+  Reflect.apply(gcFunction, undefined, []);
+};
+
 const sendBody = (overrides: Partial<DeliverBody> = {}): DeliverBody => ({
   messageId: nextMessageId(),
   from: { name: "alice", cwd: "/work/alice", sessionId: SENDER },
@@ -331,6 +349,20 @@ describe("confirmation and wake (E4)", () => {
     };
     await vi.advanceTimersByTimeAsync(10);
     expect(state.value?.outcome).toBe("delivered");
+  });
+
+  it("drops its read of the entry list when the last watch ends, so a list that omp replaced goes (C6)", async () => {
+    const { fake, delivery } = setup();
+    const watched = ((): WeakRef<Array<unknown>> => {
+      const entries: Array<unknown> = Array.from({ length: 1_000 }, () => ({ type: "message" }));
+      fake.state = { ...fake.state, entries };
+      return new WeakRef(entries);
+    })();
+    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("delivered");
+    // omp replaces the live list, and no other talk message comes.
+    fake.state = stateFor(SESSION_A);
+    await collectGarbage();
+    expect(watched.deref()).toBeUndefined();
   });
 });
 
@@ -685,26 +717,77 @@ describe("results, queue, and busy rules (E5)", () => {
     expect(delivery.pending.list(REG_A)).toHaveLength(1);
   });
 
-  it("answers busy when the queued text would pass 4 MiB, and frees the bytes as messages leave (C8)", async () => {
+  it("answers busy at the first wire-valid message that would pass 4 MiB of queued text, and frees the bytes as messages leave (C8)", async () => {
     const { fake, delivery } = setup();
     fake.idle = false;
-    // Each message is a little above 1,000,000 bytes, so four fit and a fifth does not.
-    const big = (): DeliverBody => sendBody({ text: "x".repeat(1_000_000) });
-    const queued = [big(), big(), big(), big()];
-    for (const body of queued) expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
-    expect(4 * 1_000_000).toBeLessThan(MAX_QUEUED_BYTES);
-    expect((await delivery.deliver(REG_A, big())).outcome).toBe("busy");
-    // A small message still fits.
-    expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
-    const [cancelled] = queued;
-    expect(cancelOf(delivery, cancelled?.messageId ?? "")).toBe("cancelled");
-    expect((await delivery.deliver(REG_A, big())).outcome).toBe("queued");
+    // The longest text of a body that the 512 KiB wire limit still lets through.
+    const overhead = messageBytes(
+      await Effect.runPromise(encodeDeliverBody(sendBody({ text: "" }))),
+    );
+    const largest = (): DeliverBody => sendBody({ text: "x".repeat(MAX_MESSAGE_BYTES - overhead) });
+    expect(messageBytes(await Effect.runPromise(encodeDeliverBody(largest())))).toBe(
+      MAX_MESSAGE_BYTES,
+    );
+    const tooLarge = await Effect.runPromise(
+      Effect.flip(
+        encodeDeliverBody(sendBody({ text: "x".repeat(MAX_MESSAGE_BYTES - overhead + 1) })),
+      ),
+    );
+    expect(tooLarge._tag).toBe("TalkMessageTooLarge");
+    const contentBytes = Buffer.byteLength(formatDelivery(largest()), "utf8");
+    const fit = Math.floor(MAX_QUEUED_BYTES / contentBytes);
+    // The byte limit, not the count limit, refuses the next one.
+    expect(fit).toBeLessThan(MAX_QUEUED_MESSAGES);
+    const queued: Array<DeliverBody> = [];
+    for (let count = 0; count < fit; count += 1) {
+      const body = largest();
+      queued.push(body);
+      expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    }
+    const refused = largest();
+    expect((await delivery.deliver(REG_A, refused)).outcome).toBe("busy");
+    expect(delivery.queuedCount).toBe(fit);
+    expect(cancelOf(delivery, refused.messageId)).toBe("not-found");
+    // A small message still fits in the rest.
+    const small = sendBody();
+    expect(Buffer.byteLength(formatDelivery(small), "utf8")).toBeLessThanOrEqual(
+      MAX_QUEUED_BYTES - fit * contentBytes,
+    );
+    expect((await delivery.deliver(REG_A, small)).outcome).toBe("queued");
+    // A cancelled message frees its bytes.
+    expect(cancelOf(delivery, queued[0]?.messageId ?? "")).toBe("cancelled");
+    expect((await delivery.deliver(REG_A, largest())).outcome).toBe("queued");
+    // Sent messages free theirs: the queue takes as many again.
     fake.idle = true;
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(QUEUE_RETRY_MS * (fit + 2) * 2);
     expect(delivery.queuedCount).toBe(0);
     fake.idle = false;
-    for (const body of [big(), big(), big(), big()])
-      expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    for (let count = 0; count < fit; count += 1)
+      expect((await delivery.deliver(REG_A, largest())).outcome).toBe("queued");
+    expect((await delivery.deliver(REG_A, largest())).outcome).toBe("busy");
+  });
+
+  it("counts the bytes of a message only when it joins the queue, after the count check", async () => {
+    const { fake, delivery } = setup();
+    const sizes = vi.spyOn(Buffer, "byteLength");
+    const sizedTexts = (): Array<string> =>
+      sizes.mock.calls.flatMap(([value]) => (typeof value === "string" ? [value] : []));
+    try {
+      const immediate = sendBody({ text: "goes out at once" });
+      expect((await delivery.deliver(REG_A, immediate)).outcome).toBe("delivered");
+      expect(sizedTexts()).not.toContain(formatDelivery(immediate));
+      fake.idle = false;
+      const queued = sendBody({ text: "joins the queue" });
+      expect((await delivery.deliver(REG_A, queued)).outcome).toBe("queued");
+      expect(sizedTexts()).toContain(formatDelivery(queued));
+      for (let count = 1; count < MAX_QUEUED_MESSAGES; count += 1)
+        expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
+      const refused = sendBody({ text: "the queue is full" });
+      expect((await delivery.deliver(REG_A, refused)).outcome).toBe("busy");
+      expect(sizedTexts()).not.toContain(formatDelivery(refused));
+    } finally {
+      sizes.mockRestore();
+    }
   });
 });
 
@@ -789,7 +872,7 @@ describe("request handlers", () => {
 
   const handlersFor = (delivery: TalkDelivery | undefined) => {
     const asks = makeAskStore(clock);
-    asks.noteAgent({ id: "asker", parentId: undefined, main: true });
+    asks.noteAgent({ id: "asker", parentId: undefined, main: true }, () => true);
     asks.setRegistration("asker", { registration: ASKER, isCurrent: () => true });
     const handlers = new Map(
       talkRequestHandlers({

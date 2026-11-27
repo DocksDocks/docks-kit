@@ -1262,6 +1262,8 @@ const SLOW_PROMPT = `${SLOW_MARKER}: wait for the driver.`;
 const ASK_HINT = /action "reply", replyTo "([0-9a-f]{16})"/;
 /** The id lines of a `send`, `ask`, or `cancel` result (`idLines` in `cli/talk/tool/tool.ts`). */
 const MESSAGE_ID_LINE = /^Message id: ([0-9a-f]{16})$/m;
+/** A talk message id: 16 lowercase hex digits (`MessageId` in `cli/talk/tool/protocol.ts`). */
+const TALK_MESSAGE_ID = /^[0-9a-f]{16}$/;
 const INSTANCE_LINE = /^Instance: (\S+)/m;
 /**
  * One session line of a `list` result: the own marker, the short session id, and the full instance id. The
@@ -1674,6 +1676,91 @@ function mentionsMessage(
   });
 }
 
+/**
+ * One RPC `get_entries` answer of the peer, checked. `get_entries` without a cursor gives every entry of the
+ * session in append order (omp `rpc-compat.ts` v19.2.1:3-19); `parents` maps each entry id to its `parentId`.
+ */
+interface EntriesAnswer {
+  readonly entries: readonly JsonObject[];
+  readonly leafId: string;
+  readonly parents: ReadonlyMap<string, string | null>;
+}
+
+/**
+ * Checks the `data` of a `get_entries` response (`RpcPeer.send` already requires `success: true`): a
+ * `leafId` that names an entry; each entry with a string `id`, a string `type`, and a `parentId` that is
+ * `null` (the root) or names another entry of the answer; each `custom_message` with a string `customType`
+ * and a string or array `content`; each talk entry with a string `content` and `details` whose `messageId`
+ * is a talk message id.
+ */
+function checkedEntries(data: Json): EntriesAnswer {
+  const bad = (problem: string): never => failStep(`RPC get_entries gives ${problem}`);
+  const entries = isObject(data) ? data["entries"] : undefined;
+  if (!isObject(data) || !Array.isArray(entries) || !entries.every(isObject))
+    return bad(`no array of entry objects: ${short(JSON.stringify(data))}`);
+  const parents = new Map<string, string | null>();
+  for (const entry of entries) {
+    const id = text(entry["id"]);
+    if (id === undefined || text(entry["type"]) === undefined || parents.has(id))
+      return bad(`an entry without a unique id and a type: ${short(JSON.stringify(entry))}`);
+    const parentId = entry["parentId"];
+    if (parentId !== null && (typeof parentId !== "string" || parentId === id))
+      return bad(`the entry ${id} a parentId that is not null or another id`);
+    parents.set(id, parentId);
+  }
+  for (const entry of entries) {
+    const id = String(entry["id"]);
+    const parentId = entry["parentId"];
+    if (typeof parentId === "string" && !parents.has(parentId))
+      return bad(`the entry ${id} the parent ${parentId}, which it does not hold`);
+    if (entry["type"] !== "custom_message") continue;
+    const content = entry["content"];
+    if (
+      text(entry["customType"]) === undefined ||
+      (typeof content !== "string" && !Array.isArray(content))
+    )
+      return bad(`the custom message ${id} without a customType and a content`);
+    if (entry["customType"] !== TALK_ENTRY_TYPE) continue;
+    const details = entry["details"];
+    const messageId = isObject(details) ? text(details["messageId"]) : undefined;
+    if (typeof content !== "string" || messageId === undefined || !TALK_MESSAGE_ID.test(messageId))
+      return bad(`the talk entry ${id} without a text content and a message id`);
+  }
+  const leafId = text(data["leafId"]);
+  if (leafId === undefined || !parents.has(leafId))
+    return bad(`a leafId that names no entry: ${short(JSON.stringify(data["leafId"] ?? null))}`);
+  return { entries, leafId, parents };
+}
+
+/** The ids of the entries on the parent chain from the leaf to the root. */
+function leafChain(answer: EntriesAnswer): Set<string> {
+  const chain = new Set<string>();
+  let id: string | null | undefined = answer.leafId;
+  while (typeof id === "string") {
+    if (chain.has(id)) return failStep(`RPC get_entries gives a parent cycle at the entry ${id}`);
+    chain.add(id);
+    id = answer.parents.get(id);
+  }
+  return chain;
+}
+
+/**
+ * Fails unless `later` continues the history of `kept`: every kept entry is there again with the same
+ * `parentId`, and the parent chain from the leaf of `later` holds the talk entry of `sentinel` and the
+ * leaf of `kept`. Only such an answer can prove the absence of an entry (#251 G9 (1)).
+ */
+function expectContinues(kept: EntriesAnswer, later: EntriesAnswer, sentinel: string): void {
+  for (const [id, parentId] of kept.parents)
+    if (!later.parents.has(id) || later.parents.get(id) !== parentId)
+      failStep(`RPC get_entries dropped or moved the entry ${id} of an earlier answer`);
+  const chain = leafChain(later);
+  if (!chain.has(kept.leafId))
+    failStep(`the leaf ${later.leafId} does not descend from the earlier leaf ${kept.leafId}`);
+  const sentinelEntry = text(later.entries[talkEntryIndex(later.entries, sentinel)]?.["id"]);
+  if (sentinelEntry === undefined || !chain.has(sentinelEntry))
+    failStep(`the parent chain of the leaf ${later.leafId} holds no entry of message ${sentinel}`);
+}
+
 /** The talk mode (#250 E13): two isolated omp processes that talk through a private registry folder. */
 async function talkMode(): Promise<{ lines: string[]; registry: string | null }> {
   const results = new Map<TalkCheck, string>();
@@ -1736,14 +1823,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     const peerSessionId = async (): Promise<string> =>
       text((await peerState())["sessionId"]) ?? failStep("RPC get_state gives no sessionId");
     // RPC get_entries without a cursor gives `{ entries, leafId }`: every entry of the current session.
-    const peerEntries = async (): Promise<JsonObject[]> => {
-      const data = await rpc.send({ type: "get_entries" });
-      const entries = isObject(data) ? data["entries"] : undefined;
-      if (Array.isArray(entries) && entries.every(isObject)) return entries;
-      return failStep(
-        `RPC get_entries gives no array of entry objects: ${short(JSON.stringify(data))}`,
-      );
-    };
+    const peerAnswer = async (): Promise<EntriesAnswer> =>
+      checkedEntries(await rpc.send({ type: "get_entries" }));
     const waitFor = async (what: string, probe: () => Promise<boolean>): Promise<void> => {
       const deadline = Date.now() + STEP_TIMEOUT_MS;
       while (!(await probe())) {
@@ -1753,20 +1834,53 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     };
     const waitPeerIdle = (): Promise<void> =>
       waitFor("idle peer", async () => (await peerState())["isStreaming"] === false);
-    /** A `send` result that reads `Delivered`, whose entry the peer session holds; waits for the turn that it starts. */
-    const expectDelivered = async (result: string, instance: string): Promise<string> => {
+    /**
+     * A `send` result that reads `Delivered`, whose entry the peer session holds; waits for the turn that it
+     * starts. Gives the message id and the answer of the idle peer, which holds the entry.
+     */
+    const expectDelivered = async (
+      result: string,
+      instance: string,
+    ): Promise<{ readonly messageId: string; readonly answer: EntriesAnswer }> => {
       if (!result.includes("Delivered:"))
         failStep(`the send did not read Delivered: ${short(result)}`);
       const ids = resultIds(result);
       if (ids.instance !== instance)
         failStep(`the send reached instance ${ids.instance}, expected ${instance}`);
       await waitFor(`entry of message ${ids.messageId} with an answer after it`, async () => {
-        const entries = await peerEntries();
+        const { entries } = await peerAnswer();
         const at = talkEntryIndex(entries, ids.messageId);
         return at >= 0 && entries.slice(at + 1).some(isAssistantEntry);
       });
       await waitPeerIdle();
-      return ids.messageId;
+      const answer = await peerAnswer();
+      if (talkEntryIndex(answer.entries, ids.messageId) < 0)
+        failStep(`RPC get_entries of the idle peer lost the message ${ids.messageId}`);
+      return { messageId: ids.messageId, answer };
+    };
+    /**
+     * The absence check of #251 G9 (1). `kept` is the last checked answer of the session, which holds a
+     * confirmed delivery. After the step that must not deliver, a fresh sentinel message goes to
+     * `instance`, the same session; the answer that holds it must continue `kept`, and only then does the
+     * absence of `messageId` and `payload` count.
+     */
+    const expectAbsent = async (
+      kept: EntriesAnswer,
+      instance: string,
+      messageId: string,
+      payload: string,
+    ): Promise<void> => {
+      const sentinel = await expectDelivered(
+        await sender.call(TALK_TOOL, {
+          action: "send",
+          instance,
+          message: `talk smoke: sentinel after ${step}`,
+        }),
+        instance,
+      );
+      expectContinues(kept, sentinel.answer, sentinel.messageId);
+      if (mentionsMessage(sentinel.answer.entries, messageId, payload))
+        failStep(`the peer session holds the message ${messageId} or its text`);
     };
     /** Lists until a session line shows `sessionId` with an instance that is not in `ended`; gives that instance. */
     const listUntil = async (sessionId: string, ended: readonly string[]): Promise<string> => {
@@ -1831,7 +1945,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     pass();
 
     step = "talk-send";
-    await expectDelivered(
+    const hello = await expectDelivered(
       await sender.call(TALK_TOOL, {
         action: "send",
         to: firstSession,
@@ -1888,14 +2002,14 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     await slow;
     await waitPeerIdle();
     await sleep(SETTLE_MS);
-    if (mentionsMessage(await peerEntries(), queued.messageId, queuedText))
-      failStep(`the peer session holds the cancelled message ${queued.messageId} or its text`);
+    await expectAbsent(hello.answer, firstInstance, queued.messageId, queuedText);
     pass();
 
     /**
      * One session change of the live peer: the list shows the new session id with a new instance, a send to
      * the new id is delivered, and a fresh send to the old instance reads not-live and adds no entry to the new
-     * session, whose entries keep `inherited` when it is set.
+     * session, whose entries keep `inherited` when it is set. The answer that confirmed the delivery to the
+     * new session is the kept answer of the absence check.
      */
     const change = async (
       prefix: "new-session" | "fork",
@@ -1925,6 +2039,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       pass();
 
       step = `${prefix}-old-instance-not-live`;
+      if (inherited !== null && talkEntryIndex(delivered.answer.entries, inherited) < 0)
+        failStep(`RPC get_entries of session ${sessionId} lost the inherited message ${inherited}`);
       const staleText = `talk smoke: to the instance before ${prefix}`;
       const stale = await sender.call(TALK_TOOL, {
         action: "send",
@@ -1935,17 +2051,11 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         failStep(`the send to the old instance did not fail not-live: ${short(stale)}`);
       const staleId = resultIds(stale).messageId;
       await sleep(SETTLE_MS);
+      await expectAbsent(delivered.answer, instance, staleId, staleText);
       const current = await peerSessionId();
       if (current !== sessionId) failStep(`the peer moved to session ${current}`);
-      const entries = await peerEntries();
-      if (mentionsMessage(entries, staleId, staleText))
-        failStep(
-          `RPC get_entries of session ${sessionId} holds the message ${staleId} or its text`,
-        );
-      if (inherited !== null && talkEntryIndex(entries, inherited) < 0)
-        failStep(`RPC get_entries of session ${sessionId} lost the inherited message ${inherited}`);
       pass();
-      return { sessionId, instance, delivered };
+      return { sessionId, instance, delivered: delivered.messageId };
     };
 
     const afterNew = await change(
@@ -1955,7 +2065,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
       null,
     );
     step = "fork-list";
-    const forkAt = text((await peerEntries()).filter(isAssistantEntry).at(-1)?.["id"]);
+    const forkAt = text((await peerAnswer()).entries.filter(isAssistantEntry).at(-1)?.["id"]);
     if (forkAt === undefined) failStep("the peer session has no assistant message to fork at");
     const afterFork = await change(
       "fork",

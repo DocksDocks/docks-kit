@@ -18,7 +18,7 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Effect, Fiber, Layer, Logger, type Scope } from "effect";
+import { Effect, Fiber, Layer, Logger, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -673,6 +673,73 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
             const status = yield* listener.status;
             expect(status.pendingRemovals).toEqual([]);
             expect(status.registrations.map((item) => item.live)).toEqual([false]);
+          }),
+      );
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("refuses a chosen instance id that a live or a withdrawn registration holds, from an index of served ids", async () => {
+    fresh();
+    const chosen = "0123456789abcdef";
+    const input = (sessionId: string, instanceId = chosen) => ({
+      sessionId,
+      instanceId,
+      name: sessionId,
+      cwd: base,
+    });
+    /** Runs `effect` and gives the maps whose iteration started in it. */
+    const iteratedMaps = <A, E>(effect: Effect.Effect<A, E>) =>
+      Effect.gen(function* () {
+        const maps = new Set<unknown>();
+        const restore: Array<() => void> = [];
+        yield* Effect.sync(() => {
+          for (const key of ["values", "keys", "entries", "forEach", Symbol.iterator] as const) {
+            const original: unknown = Reflect.get(Map.prototype, key);
+            if (!Predicate.isFunction(original)) continue;
+            Reflect.set(Map.prototype, key, function (this: unknown, ...args: Array<unknown>) {
+              maps.add(this);
+              return Reflect.apply(original, this, args);
+            });
+            restore.push(() => Reflect.set(Map.prototype, key, original));
+          }
+        });
+        const result = yield* Effect.ensuring(
+          effect,
+          Effect.sync(() => {
+            for (const undo of restore) undo();
+          }),
+        );
+        return { result, maps: [...maps] };
+      });
+    /** A served registration of the listener: it holds a secret and an entry file name. */
+    const holdsServed = (map: unknown): boolean =>
+      map instanceof Map &&
+      [...map.values()].some(
+        (value) =>
+          Predicate.hasProperty(value, "secret") && Predicate.hasProperty(value, "fileName"),
+      );
+    try {
+      await withListener(
+        folder,
+        (real) => real,
+        (listener) =>
+          Effect.gen(function* () {
+            const first = yield* listener.register(input("first"));
+            for (let index = 0; index < 20; index += 1) yield* register(listener, `other-${index}`);
+            const live = yield* Effect.flip(listener.register(input("second")));
+            expect(live.reason).toBe("the instance id is in use");
+            yield* listener.withdraw(first);
+            const withdrawn = yield* iteratedMaps(Effect.flip(listener.register(input("third"))));
+            expect(withdrawn.result.reason).toBe("the instance id is in use");
+            const accepted = yield* iteratedMaps(
+              listener.register(input("fourth", "fedcba9876543210")),
+            );
+            expect(accepted.result.instanceId).toBe("fedcba9876543210");
+            // Neither check read the registrations, which keep every withdrawn one.
+            expect([...withdrawn.maps, ...accepted.maps].filter(holdsServed)).toEqual([]);
+            expect((yield* listener.status).registrations).toHaveLength(22);
           }),
       );
     } finally {

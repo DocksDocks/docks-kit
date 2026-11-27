@@ -96,13 +96,16 @@ interface MessageRecord {
   state: MessageState;
 }
 
-/** A queued message keeps its text; a record does not, so kept outcomes stay small. */
-interface QueuedMessage {
+/** A message on its way out: a record does not keep the text, so kept outcomes stay small. */
+interface Outgoing {
   readonly record: MessageRecord;
   readonly content: string;
+  readonly triggerTurn: boolean;
+}
+
+interface QueuedMessage extends Outgoing {
   /** The UTF-8 size of `content`, counted against `MAX_QUEUED_BYTES`. */
   readonly bytes: number;
-  readonly triggerTurn: boolean;
 }
 
 interface Watch {
@@ -184,7 +187,8 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
    * The confirmation reads only the entries appended since its last read:
    * `scanned` is the entry list that it read last, `scannedTo` its length
    * then. Another list, or a shorter one, is a reset and is read again from
-   * the start.
+   * the start. The cursor exists only while a watch runs, so it keeps no
+   * list that omp replaced after the last watch.
    */
   let scanned: ReadonlyArray<unknown> | undefined;
   let scannedTo = 0;
@@ -235,6 +239,8 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     if (watches.size > 0) return;
     cancelTick?.();
     cancelTick = undefined;
+    scanned = undefined;
+    scannedTo = 0;
     for (const drained of [...drainWaiters]) drained();
   };
 
@@ -284,7 +290,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   };
 
   /** Hands a message to omp and starts its watch. Call only in the tick of a passed guard. */
-  const send = (message: QueuedMessage, target: Target): Watch => {
+  const send = (message: Outgoing, target: Target): Watch => {
     const { record } = message;
     try {
       host.sendMessage(
@@ -380,13 +386,14 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
   const accept = async (target: Target, incoming: Incoming): Promise<AcceptOutcome> => {
     const admission = admit(target);
     if (admission === "not-live" || admission === "busy") return admission;
-    const bytes = Buffer.byteLength(incoming.content, "utf8");
-    // A full queue refuses before a record or a pending ask exists (E5).
-    if (
-      admission === "queued" &&
-      (queue.length >= MAX_QUEUED_MESSAGES || queuedBytes + bytes > MAX_QUEUED_BYTES)
-    )
-      return "busy";
+    // A full queue refuses before a record or a pending ask exists (E5). Only a
+    // message that joins the queue needs its size, so the count check runs first.
+    let bytes = 0;
+    if (admission === "queued") {
+      if (queue.length >= MAX_QUEUED_MESSAGES) return "busy";
+      bytes = Buffer.byteLength(incoming.content, "utf8");
+      if (queuedBytes + bytes > MAX_QUEUED_BYTES) return "busy";
+    }
     const record: MessageRecord = {
       messageId: incoming.messageId,
       senderSessionId: incoming.senderSessionId,
@@ -396,14 +403,13 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     };
     keep(record);
     incoming.onAccept?.();
-    const message: QueuedMessage = {
+    const message: Outgoing = {
       record,
       content: incoming.content,
-      bytes,
       triggerTurn: incoming.triggerTurn,
     };
     if (admission === "queued") {
-      queue.push(message);
+      queue.push({ ...message, bytes });
       queuedBytes += bytes;
       // A closed gate plans the next try when it opens.
       if (gateOpen()) scheduleFlush(QUEUE_RETRY_MS);

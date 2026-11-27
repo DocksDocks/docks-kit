@@ -84,13 +84,27 @@ export type AskOutcome =
 
 /** The process store of E6. */
 export interface AskStore {
-  /** Records the parent of an agent session; each binding calls it at `session_start`. */
-  readonly noteAgent: (agent: AgentRef) => void;
   /**
-   * The binding of an agent session ended. Its entry of the agent map goes
-   * once no noted agent session names it as parent, and so on up the map.
+   * Records the parent of an agent session; each binding calls it at
+   * `session_start`. Only an agent with a parent gets a row of the agent map,
+   * because the walk of `replyAddress` reads only those rows. `isLive` is the
+   * check of the agent's binding that `sweepAgents` asks; a throw counts as
+   * false.
+   */
+  readonly noteAgent: (agent: AgentRef, isLive: () => boolean) => void;
+  /**
+   * The binding of an agent session ended. Its row of the agent map goes
+   * once no row names it as parent, and so on up the map.
    */
   readonly forgetAgent: (agentId: string) => void;
+  /**
+   * Forgets each agent whose binding check fails: omp closed that binding
+   * without a `session_shutdown`, for example while the extension was
+   * suspended. The process sweep calls it.
+   */
+  readonly sweepAgents: () => void;
+  /** The number of rows of the agent map. */
+  readonly ancestryRows: number;
   /** Sets the live registration of a main session. */
   readonly setRegistration: (agentId: string, live: LiveRegistration) => void;
   /** Clears the registration of a main session when it is the given one. */
@@ -129,9 +143,10 @@ type Acknowledgement =
 
 type FirstEnd = Acknowledgement | { readonly _tag: "Waited"; readonly ended: WaitResult };
 
-const isCurrent = (live: LiveRegistration): boolean => {
+/** A binding check that throws counts as false. */
+const holds = (check: () => boolean): boolean => {
   try {
-    return live.isCurrent();
+    return check();
   } catch {
     return false;
   }
@@ -142,10 +157,18 @@ const waited = (ended: WaitResult, result: DeliverResult | undefined): AskOutcom
     ? { _tag: "Replied", result, reply: ended.reply }
     : { _tag: ended._tag, result };
 
+/** One row of the agent map: an agent session that has a parent. */
+interface AncestryRow {
+  readonly parentId: string;
+  readonly isLive: () => boolean;
+  /** The binding of the agent ended; the row stays while another row names it as parent. */
+  ended: boolean;
+}
+
 export const makeAskStore = (clock: TalkClock): AskStore => {
-  const parents = new Map<string, string | undefined>();
-  /** Agents whose binding ended while a noted agent still named them as parent. */
-  const ended = new Set<string>();
+  const rows = new Map<string, AncestryRow>();
+  /** For each parent id, the number of rows that name it. A count of 0 has no key. */
+  const childCounts = new Map<string, number>();
   const registrations = new Map<string, LiveRegistration>();
   const waitersByAsk = new Map<string, Waiter>();
   const waitingAgents = new Set<string>();
@@ -153,7 +176,7 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
   const replyAddress = (agent: AgentRef): AskRoute | undefined => {
     if (agent.main) {
       const own = registrations.get(agent.id);
-      return own === undefined || !isCurrent(own)
+      return own === undefined || !holds(() => own.isCurrent())
         ? undefined
         : { origin: "main", replyTo: own.registration };
     }
@@ -163,27 +186,38 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
       const live = registrations.get(ancestor);
       // The nearest registration decides: a stale one gives no address, never a farther one.
       if (live !== undefined)
-        return isCurrent(live) ? { origin: "sub", replyTo: live.registration } : undefined;
+        return holds(() => live.isCurrent())
+          ? { origin: "sub", replyTo: live.registration }
+          : undefined;
       seen.add(ancestor);
-      ancestor = parents.get(ancestor);
+      ancestor = rows.get(ancestor)?.parentId;
     }
     return undefined;
   };
 
-  const hasChild = (agentId: string): boolean => {
-    for (const parentId of parents.values()) if (parentId === agentId) return true;
-    return false;
+  const countChild = (parentId: string, change: 1 | -1): void => {
+    const count = (childCounts.get(parentId) ?? 0) + change;
+    if (count > 0) childCounts.set(parentId, count);
+    else childCounts.delete(parentId);
   };
 
-  /** Drops the entries of ended agents that no noted agent names as parent, up the map. */
+  /** Drops the rows of ended agents that no row names as parent, up the map. */
   const release = (agentId: string): void => {
     let next: string | undefined = agentId;
-    while (next !== undefined && ended.has(next) && !hasChild(next)) {
-      const parentId = parents.get(next);
-      ended.delete(next);
-      parents.delete(next);
-      next = parentId;
+    while (next !== undefined) {
+      const row = rows.get(next);
+      if (row === undefined || !row.ended || childCounts.has(next)) return;
+      rows.delete(next);
+      countChild(row.parentId, -1);
+      next = row.parentId;
     }
+  };
+
+  const forgetAgent = (agentId: string): void => {
+    const row = rows.get(agentId);
+    if (row === undefined) return;
+    row.ended = true;
+    release(agentId);
   };
 
   /** Registers a waiter before the ask goes out, so a fast reply finds it. */
@@ -259,14 +293,30 @@ export const makeAskStore = (clock: TalkClock): AskStore => {
   };
 
   return {
-    noteAgent: (agent) => {
-      parents.set(agent.id, agent.parentId);
-      ended.delete(agent.id);
+    noteAgent: (agent, isLive) => {
+      const previous = rows.get(agent.id);
+      if (agent.parentId === undefined) {
+        // An agent without a parent needs no row; a row of an earlier note goes.
+        if (previous === undefined) return;
+        rows.delete(agent.id);
+        countChild(previous.parentId, -1);
+        release(previous.parentId);
+        return;
+      }
+      rows.set(agent.id, { parentId: agent.parentId, isLive, ended: false });
+      if (previous?.parentId === agent.parentId) return;
+      countChild(agent.parentId, 1);
+      if (previous === undefined) return;
+      countChild(previous.parentId, -1);
+      release(previous.parentId);
     },
-    forgetAgent: (agentId) => {
-      if (!parents.has(agentId)) return;
-      ended.add(agentId);
-      release(agentId);
+    forgetAgent,
+    sweepAgents: () => {
+      for (const [agentId, row] of [...rows])
+        if (!row.ended && !holds(row.isLive)) forgetAgent(agentId);
+    },
+    get ancestryRows() {
+      return rows.size;
     },
     setRegistration: (agentId, live) => {
       registrations.set(agentId, live);
@@ -330,61 +380,75 @@ interface StoredAsk {
   readonly route: AskRoute;
   readonly receivedBy: Target;
   readonly receivedAt: number;
+  /** The expiry time: the ask timeout after `receivedAt`, and never before the deadline of an earlier ask. */
+  readonly deadline: number;
   readonly preview: string;
 }
 
 /**
- * The store expires each ask from a timer of its own, so an ask that no call
- * reads does not stay; the timer runs only while the store holds an ask.
+ * The store keeps the asks in expiry order: a new ask goes last, also under
+ * an id that the store already holds, and its deadline is never before the
+ * deadline of the ask before it, also when the clock stepped back. So the
+ * expiry removes only the due asks at the front. Each ask expires from a
+ * timer of the store, so an ask that no call reads does not stay; the timer
+ * runs only while the store holds an ask.
  */
 export const makePendingAsks = (clock: TalkClock, timeoutMs = ASK_TIMEOUT_MS): PendingAsks => {
   const asks = new Map<string, StoredAsk>();
+  let lastDeadline = Number.NEGATIVE_INFINITY;
   let cancelExpiry: CancelTimer | undefined;
 
   const stopExpiry = (): void => {
     cancelExpiry?.();
     cancelExpiry = undefined;
+    lastDeadline = Number.NEGATIVE_INFINITY;
   };
 
-  /** Removes the expired asks and plans the next expiry, or none for an empty store. */
+  /** Removes the due asks at the front and plans the next expiry, or none for an empty store. */
   const expire = (): void => {
-    stopExpiry();
+    cancelExpiry = undefined;
     const now = clock.now();
-    let next = Number.POSITIVE_INFINITY;
     for (const [askId, stored] of asks) {
-      const deadline = stored.receivedAt + timeoutMs;
-      if (now >= deadline) asks.delete(askId);
-      else next = Math.min(next, deadline);
+      if (now < stored.deadline) {
+        cancelExpiry = clock.schedule(stored.deadline - now, expire);
+        return;
+      }
+      asks.delete(askId);
     }
-    if (asks.size > 0) cancelExpiry = clock.schedule(next - now, expire);
+    stopExpiry();
   };
 
   const list = (receivedBy: Target | undefined): ReadonlyArray<PendingAsk> => {
     if (receivedBy === undefined) return [];
     const now = clock.now();
     const live: Array<PendingAsk> = [];
-    for (const { receivedAt, ...stored } of asks.values()) {
+    for (const { receivedAt, deadline, ...stored } of asks.values()) {
       if (
-        now - receivedAt < timeoutMs &&
+        now < deadline &&
         stored.receivedBy.instanceId === receivedBy.instanceId &&
         stored.receivedBy.sessionId === receivedBy.sessionId
       )
-        live.push({ ...stored, ageMs: now - receivedAt });
+        live.push({ ...stored, ageMs: Math.max(0, now - receivedAt) });
     }
     return live;
   };
 
   return {
     add: (body, receivedBy) => {
+      const now = clock.now();
+      const deadline = Math.max(now + timeoutMs, lastDeadline);
+      lastDeadline = deadline;
+      asks.delete(body.messageId);
       asks.set(body.messageId, {
         askId: body.messageId,
         from: body.from,
         route: body.ask,
         receivedBy,
-        receivedAt: clock.now(),
+        receivedAt: now,
+        deadline,
         preview: oneLine(body.text).slice(0, PREVIEW_LENGTH),
       });
-      cancelExpiry ??= clock.schedule(timeoutMs, expire);
+      cancelExpiry ??= clock.schedule(deadline - now, expire);
     },
     remove: (askId) => {
       asks.delete(askId);

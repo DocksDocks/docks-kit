@@ -368,12 +368,12 @@ const resolveTarget = Effect.fnUntraced(function* (
       const match = matchTo(yield* listPeers(context.transport), to);
       if (match._tag === "NoMatch")
         return yield* fail(
-          `talk: no listed session matches "${to}" (not-found). Run the action list.`,
+          `talk: no listed session matches ${literal(to)} (not-found). Run the action list.`,
           { outcome: "not-found" },
         );
       if (match._tag === "AmbiguousPrefix")
         return yield* fail(
-          `talk: "${to}" starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
+          `talk: ${literal(to)} starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
         );
       const candidates = yield* probeAll(context, match.peers);
       const decision = decideTo(candidates);
@@ -384,17 +384,17 @@ const resolveTarget = Effect.fnUntraced(function* (
             name: decision.peer.name,
           };
         case "NotFound":
-          return yield* fail(`talk: no listed session matches "${to}" (not-found).`, {
+          return yield* fail(`talk: no listed session matches ${literal(to)} (not-found).`, {
             outcome: "not-found",
           });
         case "NotLive":
           return yield* fail(
-            `talk: "${to}" is not live (not-live). Candidates:\n${describeCandidates(candidates)}`,
+            `talk: ${literal(to)} is not live (not-live). Candidates:\n${describeCandidates(candidates)}`,
             { outcome: "not-live" },
           );
         case "Ambiguous":
           return yield* fail(
-            `talk: "${to}" does not name exactly one live session. Nothing was sent. ` +
+            `talk: ${literal(to)} does not name exactly one live session. Nothing was sent. ` +
               `Use instance with one full instance id:\n${describeCandidates(candidates)}`,
           );
       }
@@ -630,7 +630,7 @@ const runAsk = Effect.fnUntraced(function* (
 
 const askLine = (ask: PendingAsk): string =>
   `- ${ask.askId} from ${literal(ask.from.name)} (session ${literal(ask.from.sessionId.slice(0, SHORT_ID_LENGTH))}), ` +
-  `${Math.floor(ask.ageMs / 1_000)} s ago: ${ask.preview}`;
+  `${Math.floor(ask.ageMs / 1_000)} s ago: ${literal(ask.preview)}`;
 
 const runReply = Effect.fnUntraced(function* (context: ToolContext, params: TalkParams) {
   const text = yield* requireMessage("reply", params.message);
@@ -639,7 +639,7 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
   switch (selection._tag) {
     case "NotFound":
       return yield* fail(
-        `talk: no pending ask has the id ${replyTo ?? ""}. Run the action pending.`,
+        `talk: no pending ask has the id ${literal(replyTo ?? "")}. Run the action pending.`,
       );
     case "None":
       return yield* fail("talk: no ask waits for a reply from this session.");

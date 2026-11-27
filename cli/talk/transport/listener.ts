@@ -248,6 +248,8 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
   const locked = lock.withPermits(1);
   const runFork = yield* FiberSet.makeRuntime<never, void, never>();
   const registrations = new Map<string, Served>();
+  /** The instance id of every registration that `registrations` keeps, withdrawn ones included. */
+  const servedIds = new Set<string>();
   const handlers = new Map<string, RequestHandler>([[PING_KIND, () => Effect.succeed("pong")]]);
   const pendingRemovals = new Set<string>();
   // Accepted sockets whose handshake has not ended; disposal destroys them.
@@ -464,10 +466,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
           );
     return yield* locked(
       Effect.gen(function* () {
-        if (
-          chosen !== undefined &&
-          [...registrations.values()].some((served) => served.instanceId === chosen)
-        )
+        if (chosen !== undefined && servedIds.has(chosen))
           return yield* new TalkRegisterError({ sessionId, reason: "the instance id is in use" });
         yield* registry.prepare;
         if (bound === undefined) bound = yield* bind;
@@ -487,6 +486,7 @@ export const makeListener = Effect.fnUntraced(function* (options: ListenerOption
         };
         yield* publishServed(served, bound.endpoint);
         registrations.set(targetKey(instanceId, sessionId), served);
+        servedIds.add(instanceId);
         const registration: Registration = { instanceId, sessionId, fileName: served.fileName };
         return registration;
       }),

@@ -241,8 +241,10 @@ Markdown code span on one line. Each run of control characters or line
 separators becomes one space, and the fence of the span is longer than every
 backtick run in the text. So a peer cannot start a line or a row, or add
 Markdown structure. The From line, the attachment labels, the reply heading,
-and the rows of `list`, `pending`, and the candidate lists show peer metadata
-this way.
+the rows of `list`, `pending`, and the candidate lists, and the text preview
+of each ask row show peer text this way. An error also shows the `to` or
+`replyTo` value of the call as a literal, because a model can copy a peer
+name into `to`.
 
 ### Size limit
 
@@ -327,9 +329,12 @@ with the message id: in each of the next 8 microtask turns, then every 10 ms.
 It reads omp's live read-only list `getEntriesView()` where omp has it, else
 the copy of `getEntries()`. Each read inspects only the entries that came
 after its last read of the same list; another list, or a shorter one, is a
-reset, and the binding reads it again from its start. So a watch that runs
-for minutes does not copy or scan the whole transcript each 10 ms. The watch
-ends:
+reset, and the binding reads it again from its start. So on a host with the
+live list, a watch that runs for minutes does not copy or scan the whole
+transcript each 10 ms. The `getEntries()` fallback gives a new array on each
+read, so there each read copies and scans the whole transcript. The binding
+keeps its read position only while a watch runs, so it holds no list after
+the last watch ends. The watch ends:
 
 - `delivered` when the entry appears while `getSessionId()` still equals the
   target session id.
@@ -411,7 +416,8 @@ guard and the queue use the same rule.
 - A full queue answers `busy` in every mode. The queue of one registration
   holds at most 64 messages and at most 4 MiB of message text (UTF-8). This
   bounds what a peer can make the receiving omp process hold while the
-  session cannot take messages.
+  session cannot take messages. The receiver checks the count first and
+  measures the text only of a message that joins the queue.
 
 Each registration has one queue, first in first out, outside the transcript.
 The binding tries the queue from a fresh task: once 100 ms after a message
@@ -459,11 +465,14 @@ An ask carries a reply address and an origin flag:
 
 - A main session uses its own registration, with the flag `main`.
 - A subagent session uses the registration of the nearest main session that
-  it descends from, with the flag `sub`. Each binding records its agent id
-  and parent id (`ctx.agent`) in the agent map of the singleton at
-  `session_start`, and the ask walks that map. At `session_shutdown`, the
-  binding releases its entry; the map keeps it only while the entry of a
-  live subagent names it as parent, and then drops it.
+  it descends from, with the flag `sub`. Each binding of a subagent records
+  its agent id and parent id (`ctx.agent`) in the agent map of the
+  singleton at `session_start` and at each `talk` call, and the ask walks
+  that map. A main session has no parent, so it has no entry. The map counts
+  the subagents of each agent. At `session_shutdown`, the binding releases
+  its entry; the map keeps it only while the entry of a live subagent names
+  it as parent, and then drops it. The sweep (see [Sweep](#sweep)) releases
+  the entry of a binding that omp closed without a `session_shutdown`.
 
 A reply address is live only while it is still the current registration of
 its owning binding: that binding is active, and its session id equals the
@@ -501,13 +510,17 @@ still withdraw an ask that the receiver queued.
 The receiver of an ask keeps it as a pending ask until a successful reply,
 the 10-minute ask timeout, or the end of the message (`cancelled` or
 `not-live`). A timer of the pending asks ends each ask at its timeout, also
-when no call reads them; it runs only while an ask is pending. Each pending
-ask belongs to the registration that received it. It stays across an
-after-event that keeps the session id, and it ends with that registration:
-at a withdrawal, at an unseen session id change, and at `session_shutdown`. A
-successor session never sees it in `pending` or `status`, and cannot answer
-it with `reply`. While a transition is pending and the session id differs
-from the registered one, `pending` shows none of them either.
+when no call reads them; it runs only while an ask is pending. The pending
+asks stay in the order of their deadlines: an ask received again under the
+same id goes last, and an ask that comes after the clock stepped back keeps
+at least the deadline of the ask before it. So each expiry removes only the
+due asks at the front. Each pending ask belongs to the registration that
+received it. It stays across an after-event that keeps the session id, and
+it ends with that registration: at a withdrawal, at an unseen session id
+change, and at `session_shutdown`. A successor session never sees it in
+`pending` or `status`, and cannot answer it with `reply`. While a transition
+is pending and the session id differs from the registered one, `pending`
+shows none of them either.
 
 `reply` picks the ask by `replyTo`, or the only pending ask when `replyTo` is
 unset. It fails when `replyTo` names no pending ask, when no ask waits, or
@@ -614,7 +627,11 @@ is `unref`'d and that catches every error in its callback. It withdraws every
 registration of the process whose binding fails its activity check. So the
 registration of a binding that omp closed while the extension was suspended,
 whose own handler and timer no longer run, is withdrawn even when no other
-binding remains and no request comes.
+binding remains and no request comes. The sweep also releases the agent map
+entry of each subagent binding whose marker row omp no longer lists (see
+[Ask](#ask)). A binding that omp only suspended adds its entry again at its
+next `talk` call; until then, an ask of a later subagent of it can fail with
+`no reply address`.
 
 ## Known limits
 
