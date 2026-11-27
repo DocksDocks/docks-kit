@@ -12,7 +12,7 @@ import { Predicate } from "effect";
 import type * as Tui from "@oh-my-pi/pi-tui";
 import type * as Width from "@oh-my-pi/pi-tui/text/width";
 
-/** The host exports that the views, cards, and handover use (Steps 3 to 5). */
+/** The host exports that the capability probe checks (#251 G7); the views, cards, and handover call some of them. */
 export interface HostUi {
   readonly jsx: typeof Tui.jsx;
   readonly signal: typeof Tui.signal;

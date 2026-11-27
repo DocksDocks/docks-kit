@@ -32,7 +32,9 @@ decisions (E1 to E14) that this document names.
 
 omp loads the default export of `talk.js`, the extension factory. omp calls
 the factory once for each session of a module evaluation: for the main
-session and for each subagent session. Each such call is a binding.
+session and for each subagent session, and awaits it. Each such call is a
+binding. The interactive parts of a binding (the `/talk` command, `alt+t`,
+the message cards, and handover) are in `cli/docs/talk-ui.md`.
 
 ### Worker threads
 
@@ -42,15 +44,19 @@ subagent has no `talk` tool.
 
 ### Capability probe
 
-The factory checks by type each member of `pi` that `talk` calls:
-`pi.registerTool`, `pi.sendMessage`, `pi.on`, `pi.getAllTools`,
-`pi.getSessionName`, and the builders `Object`, `String`, `Boolean`,
-`Literal`, `Union`, `Array`, and `Optional` of `pi.typebox.Type`. When all
-are present, it registers the tools and the event handlers. When one is
-missing:
+The factory is async. Before it registers anything, it checks by type each
+member of `pi` that `talk` calls: `pi.registerTool`, `pi.sendMessage`,
+`pi.on`, `pi.getAllTools`, `pi.getSessionName`, `pi.registerCommand`,
+`pi.registerShortcut`, `pi.getShortcutConflict`,
+`pi.registerMessageRenderer`, and the builders `Object`, `String`, `Boolean`,
+`Literal`, `Union`, `Array`, and `Optional` of `pi.typebox.Type`. It also
+loads the omp UI modules and checks their exports (see
+`cli/docs/talk-ui.md`, "UI host probe"). When all are present, it registers
+the tools, the message renderer, the `/talk` command, the `alt+t` shortcut,
+and the event handlers. When one is missing, or a UI module does not load:
 
 - With a callable `pi.on`, the binding registers only a `session_start`
-  handler. That handler shows one notice, which names the missing members and
+  handler. That handler shows one notice, which names each missing part and
   omp 19.2.0. A session with a UI (`ctx.hasUI`) gets it through
   `ctx.ui.notify` as a warning; other sessions get it on standard error.
 - Without `pi.on`, the binding writes the notice to standard error during the
@@ -100,6 +106,10 @@ Each binding registers two tools:
   `execute` only answers that it is internal. The activity check of
   [Session scope](#session-scope) reads its row.
 
+Each binding also registers the renderer of the talk message card, the
+`/talk` command, and the `alt+t` shortcut. `cli/docs/talk-ui.md` describes
+them.
+
 ### Fields
 
 | Field         | Used by                 | Value                                                                              |
@@ -122,7 +132,8 @@ The field rules:
   `instance`. `reply` takes its target from the ask.
 
 A call that breaks a rule fails before it sends anything. The tool has no
-broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
+broker, Herdr, cross-machine, `list-cwd`, or `handover` fields. A handover
+comes only from `/talk handover` (see `cli/docs/talk-ui.md`, "Handover").
 
 ### Actions
 
@@ -135,16 +146,19 @@ broker, Herdr, cross-machine, `list-cwd`, or `handover` fields.
   folder, and the full instance id. Use the full instance id as `instance`.
   When the registry cannot be listed, the call fails. All probes of one call
   go out as one batch of the transport, which reads the socket folder once.
+  The `/talk` list view reads the same rows (`listSessions` of `tool.ts`).
 - `send` resolves the target, sends the message, and returns the result of
-  [Results](#results).
+  [Results](#results). The `/talk` views use the same resolver
+  (`resolveTarget`) and the same send (`sendTo`), so their results, ids, and
+  errors are the same.
 - `ask` sends the message as an ask and waits for the reply. See
   [Asks and replies](#asks-and-replies).
 - `reply` answers an ask that waits for this session.
 - `pending` shows the asks that wait for a reply from this session, oldest
   first: the ask id, the sender's name, the first 8 characters of the
   sender's session id, the age in seconds, and the first 80 characters of the
-  text on one line. It shows only the asks of this session's current
-  registration (see [Reply](#reply)).
+  text on one line, as a literal. It shows only the asks of this session's
+  current registration (see [Reply](#reply)).
 - `status` shows this session's name, the first 8 characters of its session
   id, and its folder; its registration (the full instance id, or none); the
   live peer count; the number of queued messages; and the pending asks, as
@@ -226,10 +240,12 @@ replacement.
 
 Each message has a random message id of 16 lowercase hex digits. The id of an
 ask is also its ask id. The receiving session shows the message as a custom
-message (`customType` `talk`, displayed, `details.messageId` set) with this
-text:
+message (`customType` `talk`, displayed) with versioned `details` (see
+[Details](#details)) and this text:
 
-1. `**From <name>** (<cwd>)`, with the name and the folder as literals.
+1. `**From <name>** (<cwd>)`, with the name and the folder as literals. A
+   handover starts with `**Handover from <name>** (<cwd>): continue this
+   work.` instead.
 2. For an ask: `This is an ask. Answer it with the talk tool: action "reply",
    replyTo "<ask id>".` For a reply that reaches the session as a message:
    `Reply to ask <ask id>.`
@@ -245,6 +261,22 @@ the rows of `list`, `pending`, and the candidate lists, and the text preview
 of each ask row show peer text this way. An error also shows the `to` or
 `replyTo` value of the call as a literal, because a model can copy a peer
 name into `to`.
+
+### Details
+
+The receiver writes these `details` on each talk message: `v` (`1`),
+`messageId`, `kind` (`message`, `ask`, `reply`, or `handover`), `from`
+(`name`, `cwd`, `sessionId`), `sentAt`, `askId` (only on an ask or a reply),
+the `kind` and `name` of each attachment, and `body`, the UTF-16 range of the
+sender's text in the text. The confirmation watch looks for
+`details.messageId`. The message card of `cli/docs/talk-ui.md` decodes the
+details; a message with `details` that hold only `messageId`, from plan
+DocksDocks/docks-kit#250, gets omp's default card.
+
+A `deliver` body has an optional `kind`: `message` or `handover`. The tool
+leaves it out, so its body is the body of plan DocksDocks/docks-kit#250; a
+body without `kind` is a plain message. Only the `/talk` handover sends
+`kind: "handover"`. An ask with `kind: "handover"` does not decode.
 
 ### Size limit
 
@@ -677,16 +709,18 @@ Other limits:
 
 ## Source files
 
-| File                           | Holds                                                                                                                                                                         |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cli/talk/index.ts`            | The bundle entry: it default-exports the factory and keeps the transport exports                                                                                              |
-| `cli/talk/extension.ts`        | The factory: the capability probe, the process singleton and its transport facade, the sweep, and the binding of each session; the only file of `cli/talk/` that runs effects |
-| `cli/talk/tool/protocol.ts`    | The request kinds `deliver`, `reply`, and `cancel`, their body and result Schemas, and the 512 KiB message limit                                                              |
-| `cli/talk/tool/targets.ts`     | Session names, the field rules of each action, and the target selection of `to` and `instance`                                                                                |
-| `cli/talk/tool/format.ts`      | The text of a delivered message and of a reply that reaches a session as a message                                                                                            |
-| `cli/talk/tool/attachments.ts` | The attachment Schemas and their labeled blocks                                                                                                                               |
-| `cli/talk/tool/host.ts`        | The host interface that `extension.ts` fills from `pi` and `ctx`, the clock, and the talk entry check of `getEntries()`                                                       |
-| `cli/talk/tool/delivery.ts`    | The receiver of one binding: the transition hold, the guard, the confirmation watch, the queue, `cancel`, and the request handlers                                            |
-| `cli/talk/tool/asks.ts`        | The ask store of the process (waiters, reply addresses, the agent map) and the pending inbound asks of one session                                                            |
-| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its seven actions, and the text of each result                                                                                               |
-| `cli/talk/transport/`          | The transport; see `cli/docs/talk-transport.md`                                                                                                                               |
+| File                           | Holds                                                                                                                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli/talk/index.ts`            | The bundle entry: it default-exports the factory and keeps the transport exports                                                                                                                                                            |
+| `cli/talk/extension.ts`        | The factory: the capability probe, the process singleton and its transport facade, the sweep, and the binding of each session with its tool, renderer, command, shortcut, and flow services; the only file of `cli/talk/` that runs effects |
+| `cli/talk/tool/protocol.ts`    | The request kinds `deliver`, `reply`, and `cancel`, their body and result Schemas, the message and deliver kinds, and the 512 KiB message limit                                                                                             |
+| `cli/talk/tool/targets.ts`     | Session names, the field rules of each action, and the target selection of `to` and `instance`                                                                                                                                              |
+| `cli/talk/tool/format.ts`      | The text of a delivered message, of a handover, and of a reply that reaches a session as a message, with the range of the sender's text                                                                                                     |
+| `cli/talk/tool/attachments.ts` | The attachment Schemas, their labeled blocks, and the `literal` and `oneLine` cleaners                                                                                                                                                      |
+| `cli/talk/tool/host.ts`        | The host interface that `extension.ts` fills from `pi` and `ctx`, the clock, the `details` Schema, and the talk entry check of `getEntries()`                                                                                               |
+| `cli/talk/tool/delivery.ts`    | The receiver of one binding: the transition hold, the guard, the confirmation watch, the queue, `cancel`, and the request handlers                                                                                                          |
+| `cli/talk/tool/asks.ts`        | The ask store of the process (waiters, reply addresses, the agent map) and the pending inbound asks of one session                                                                                                                          |
+| `cli/talk/tool/tool.ts`        | The `talk` tool: its parameters, its seven actions, the text of each result, and the listing, resolver, and sends that the `/talk` views share                                                                                              |
+| `cli/talk/ui/`                 | The `/talk` command, the views, the message card, handover, and the UI host probe; see `cli/docs/talk-ui.md`                                                                                                                                |
+| `cli/talk/types/`              | The declarations of the omp UI host exports; see `cli/docs/talk-ui.md`                                                                                                                                                                      |
+| `cli/talk/transport/`          | The transport; see `cli/docs/talk-transport.md`                                                                                                                                                                                             |
