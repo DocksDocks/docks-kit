@@ -205,22 +205,35 @@ gets the width less 9 cells (the frame, the scrollbar, the pointer, and the
 two cells that the painter keeps when it cuts a label). So the list needs at
 least 4 rows and 25 columns.
 
-When the space is smaller, the list draws no request inside the picker: in a
-small pane, omp clips the frame, and no row of it can hold a request that the
-operator reads whole. Instead:
+When the space is smaller, the view shows only a line that asks for a larger
+pane. The picker draws no such request: omp clips a frame that does not fit,
+and no row of it can hold a whole request. Instead, the flow shows the resize
+view in place of the list:
 
-- At open, the view ends inside its factory, so omp mounts nothing.
+- At open, the list ends inside its factory, so omp mounts nothing of it.
   `ctx.ui.custom` is still called, because only its factory gets
   `ui.size()`.
 - While the list is open, the next draw after a resize below that size ends
-  the view.
-- In both cases, the flow shows one warning with `ctx.ui.notify` and ends:
+  the list. That draw shows no rows, no empty-state text, and no key hint, so
+  an undersized frame never reads as an empty registry.
+- The resize view is a full-screen overlay whose root is one `text` node,
+  with no frame, no title, and no hint, so the first screen row holds the
+  request also in a one-row pane. On each draw, it shows the longest of
+  these texts that fits the width from `ui.size()`, and cuts `enlarge` to the
+  width as the last resort:
 
 ```text
-talk: the pane is too small for the session list. Enlarge it, then run /talk or press alt+t again.
+talk: enlarge the pane to see the session list
+talk: enlarge the pane
+enlarge the pane
+enlarge
 ```
 
-Enter and `h` never act on a list that does not fit.
+- When the list fits again, the resize view ends at its next draw, and the
+  flow mounts the list with the rows of the same listing.
+- In the resize view, Enter, `h`, and every other key do nothing; `escape`
+  and `alt+t` end the flow. Enter and `h` never act on a list that does not
+  fit.
 
 ## Compose view
 
@@ -295,6 +308,8 @@ code does not prove that omp drew the row.
 | List            | Enter                                               | Normal list: compose. Handover-mode list: handover   |
 | List            | `h`                                                 | Handover to the selected row                         |
 | List            | `escape`, `alt+t`                                   | Closes the list; ends the flow                       |
+| Resize          | `escape`, `alt+t`                                   | Ends the flow                                        |
+| Resize          | Any other key, Enter and `h` included               | Does nothing                                         |
 | Compose         | Enter                                               | Opens the confirm view when the text is not blank    |
 | Compose         | `escape`, `alt+t`                                   | Ends the flow; sends nothing                         |
 | Handover review | `ctrl+s`                                            | Opens the confirm view when the text is not blank    |

@@ -15,6 +15,7 @@ import {
   itemsOf,
   key,
   linesOf,
+  loadUi,
   press,
   prop,
   row,
@@ -26,12 +27,12 @@ import { type ListingAnswer, parseTalkArgs, talkCompletions } from "../../../tal
 import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
-  LIST_TOO_SMALL,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
   drawCode,
   listLayout,
+  resizeText,
 } from "../../../talk/ui/views";
 
 // The `/talk` flows of plan #251 G2 and G3 against the fake TUI host of
@@ -218,25 +219,52 @@ describe("list view (G3)", () => {
   });
 
   it.each([
-    ["no item row fits", { columns: 100, rows: PICKER_FIXED_ROWS }],
+    [
+      "no item row fits",
+      { columns: 100, rows: PICKER_FIXED_ROWS },
+      "talk: enlarge the pane to see the session list",
+    ],
     [
       "the instance id does not fit",
       { columns: INSTANCE_ID_LENGTH + PICKER_LABEL_CHROME - 1, rows: 30 },
+      "talk: enlarge the pane",
     ],
-    ["the pane has one row", { columns: 12, rows: 1 }],
-  ])("mounts no list and shows the too-small notice when %s at open", async (_name, size) => {
-    const h = await harness();
-    h.tui.size = size;
-    const flow = h.run();
-    await flush();
-    // The view ended inside its factory, so omp mounts nothing.
-    expect(h.tui.views).toHaveLength(1);
-    expect(h.tui.views[0]?.closed).toBe(true);
-    await flow;
-    expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
-    expect(h.tui.notices).toEqual([{ text: LIST_TOO_SMALL, level: "warning" }]);
-    expect(h.services.sends).toEqual([]);
-  });
+    ["the pane has one row", { columns: 12, rows: 1 }, "enlarge"],
+  ])(
+    "shows the resize view instead of the list when %s at open, and mounts the list when it fits",
+    async (_name, size, text) => {
+      const h = await harness();
+      h.tui.size = size;
+      const flow = h.run();
+      await flush();
+      // The list ended inside its factory, so omp mounts nothing of it.
+      expect(h.tui.views[0]?.closed).toBe(true);
+      expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
+      const resize = h.tui.top;
+      expect(resize.options).toMatchObject(FULL_SCREEN);
+      // One text node, no frame and no chrome: the first screen row holds the request.
+      expect(resize.node.kind).toBe("text");
+      expect(Object.keys(resize.node.props).sort()).toEqual(["onKey", "text"]);
+      expect(prop(resize.node, "text")).toBe(text);
+      // Enter, h, and other keys do nothing.
+      for (const id of ["enter", "h", "a"]) expect(press(resize.node, id)).toBe(true);
+      await flush();
+      expect(h.tui.top).toBe(resize);
+      // The pane grows: the next draw ends the view, and the flow mounts the list.
+      h.tui.size = { columns: 100, rows: 30 };
+      prop(resize.node, "text");
+      await flush();
+      expect(resize.closed).toBe(true);
+      expect(resize.result).toEqual({ _tag: "Fits" });
+      const list = h.tui.top.node;
+      expect(list.kind).toBe("picker");
+      expect(itemsOf(list)).toHaveLength(2);
+      press(list, "escape");
+      await flow;
+      expect(h.tui.notices).toEqual([]);
+      expect(h.services.sends).toEqual([]);
+    },
+  );
 
   it.each([
     ["no item row fits", { columns: 100, rows: PICKER_FIXED_ROWS }],
@@ -245,7 +273,7 @@ describe("list view (G3)", () => {
       { columns: INSTANCE_ID_LENGTH + PICKER_LABEL_CHROME - 1, rows: 30 },
     ],
   ])(
-    "closes the open list with the too-small notice on a resize where %s, and Enter and h never act",
+    "replaces the open list with the resize view on a resize where %s; the undersized frame reports no empty registry, and Enter and h never act",
     async (_name, size) => {
       const h = await harness();
       const flow = h.run();
@@ -257,18 +285,36 @@ describe("list view (G3)", () => {
       expect(press(list, "enter")).toBe(true);
       fire(list, "onActivate", beta?.id);
       expect(press(list, "h")).toBe(true);
-      // The next draw reads the new size and ends the view.
+      // The undersized draw: no rows, and neither an empty-state text nor a key hint.
       expect(itemsOf(list)).toEqual([]);
+      expect(prop(list, "empty")).toBe("");
+      expect(termOf(list)["hint"]).toBeNull();
       await flush();
       expect(h.tui.views[0]?.closed).toBe(true);
-      await flow;
-      expect(h.tui.views).toHaveLength(1);
       expect(h.tui.views[0]?.result).toEqual({ _tag: "TooSmall" });
-      expect(h.tui.notices).toEqual([{ text: LIST_TOO_SMALL, level: "warning" }]);
+      const resize = h.tui.top;
+      expect(resize.node.kind).toBe("text");
+      // alt+t ends the flow from the resize view.
+      expect(press(resize.node, "alt+t")).toBe(true);
+      await flow;
+      expect(resize.result).toEqual({ _tag: "Close" });
+      expect(h.tui.notices).toEqual([]);
       expect(h.services.sends).toEqual([]);
       expect(h.services.turns).toEqual([]);
     },
   );
+
+  it.each([
+    [100, "talk: enlarge the pane to see the session list"],
+    [30, "talk: enlarge the pane"],
+    [16, "enlarge the pane"],
+    [12, "enlarge"],
+    [7, "enlarge"],
+    [4, "enla"],
+  ])("fits the resize text to %i columns", async (columns, text) => {
+    const ui = await loadUi();
+    expect(resizeText(ui, columns)).toBe(text);
+  });
 
   it("keeps the list open at the smallest size that fits", async () => {
     const h = await harness();

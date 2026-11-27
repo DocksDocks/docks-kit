@@ -273,6 +273,16 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
   };
 }
 
+/**
+ * Teardown of a fake listener, after the assertions of its test: it destroys
+ * each accepted socket and then closes the server, so a connection that a
+ * regression left open cannot keep the worker alive.
+ */
+function closeFake(listener: FakeListener): void {
+  listener.release();
+  listener.server.close();
+}
+
 /** Writes a POSIX entry file as the registry would. */
 function writePosixEntry(folder: string, entry: RegistryEntry): string {
   const path = join(folder, entryFileName(entry.instanceId, entry.sessionId));
@@ -918,7 +928,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
 
   it("keeps a newer kept entry when a late proof of an older attempt arrives, and sends one body per call", async () => {
     fresh();
-    const servers: Array<Server> = [];
+    const listeners: Array<FakeListener> = [];
     const secret = randomBytes(32);
     const instanceId = hex(8);
     const sessionId = "late";
@@ -959,7 +969,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
         mode: "answer",
         label: "second",
       });
-      servers.push(first.server, second.server);
+      listeners.push(first, second);
       writeEntryAt(firstPath);
       const later = await Effect.runPromise(
         Effect.gen(function* () {
@@ -987,7 +997,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       // One request body per call, whatever the count of routes.
       expect(first.requests() + second.requests()).toBe(2);
     } finally {
-      for (const server of servers) server.close();
+      for (const listener of listeners) closeFake(listener);
       cleanUp();
     }
   });
@@ -1059,11 +1069,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       expect(listener.requests()).toBe(1);
       expect(listener.accepted()).toBe(2);
     } finally {
-      // Destroy each accepted socket first, so a leaked connection cannot keep the worker alive.
-      for (const fake of listeners) {
-        fake.release();
-        fake.server.close();
-      }
+      for (const fake of listeners) closeFake(fake);
       cleanUp();
     }
   });
@@ -1072,7 +1078,7 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
 describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () => {
   let base = "";
   let folder = "";
-  const servers: Array<Server> = [];
+  const opened: Array<FakeListener> = [];
   const secret = randomBytes(32);
   const target = { instanceId: hex(8), sessionId: "route" };
 
@@ -1084,7 +1090,7 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
   };
 
   const cleanUp = (): void => {
-    for (const server of servers.splice(0)) server.close();
+    for (const listener of opened.splice(0)) closeFake(listener);
     rmSync(base, { recursive: true, force: true });
   };
 
@@ -1102,7 +1108,7 @@ describe.skipIf(!POSIX)("rebind route and dial slots (in-process client)", () =>
   const fake = async (options: FakeOptions): Promise<{ path: string; fake: FakeListener }> => {
     const path = join(folder, socketName(process.pid));
     const started = await startFakeListener(path, { secret, pair: target, ...options });
-    servers.push(started.server);
+    opened.push(started);
     return { path, fake: started };
   };
 
@@ -2228,7 +2234,7 @@ describe("talk transport between spawned Bun peers", () => {
       const target = targetOf(registration);
       const oldPath = unixPath((await status(r)).endpoint);
       await b.call("list");
-      const silentServers: Array<Server> = [];
+      const silentListeners: Array<FakeListener> = [];
       try {
         await withClient(
           folder,
@@ -2258,7 +2264,7 @@ describe("talk transport between spawned Bun peers", () => {
               const silent = yield* promised(() =>
                 startFakeListener(oldPath, { mode: "silent", gauge }),
               );
-              silentServers.push(silent.server);
+              silentListeners.push(silent);
               expect(
                 yield* promised(() => b.send("request", { target, kind: "echo" })),
               ).toMatchObject(ended);
@@ -2292,7 +2298,7 @@ describe("talk transport between spawned Bun peers", () => {
           "test",
         );
       } finally {
-        for (const server of silentServers) server.close();
+        for (const listener of silentListeners) closeFake(listener);
         await r.stop();
       }
     },

@@ -37,8 +37,8 @@ import type { HostUi } from "./host";
 import {
   type ConfirmChoice,
   type Destination,
-  LIST_TOO_SMALL,
   type ListChoice,
+  type ResizeChoice,
   type ListMode,
   type ListRow,
   type SizeReader,
@@ -47,6 +47,7 @@ import {
   confirmView,
   drawCode,
   listView,
+  resizeView,
   sizeReader,
 } from "./views";
 
@@ -427,26 +428,36 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       flowUi.notify(talkErrorText(answer.text), "error");
       return;
     }
-    const choice = await mount<ListChoice>(
-      flow,
-      flowUi,
-      (size, done) => listView(ui, size, answer.rows, mode, done),
-      { _tag: "Close" },
-      FULL_SCREEN,
-    );
-    switch (choice._tag) {
-      case "Close":
-        return;
-      case "TooSmall":
-        // The view draws no request for a larger pane; the notice asks for it (G3).
-        if (live(flow)) flowUi.notify(LIST_TOO_SMALL, "warning");
-        return;
-      case "Handover":
-        await handover(flow, flowUi, choice.row);
-        return;
-      case "Compose":
-        await compose(flow, flowUi, choice.row);
-        return;
+    // G3: while the list does not fit, the resize view stands in for it; each fits again into the other.
+    for (;;) {
+      const choice = await mount<ListChoice>(
+        flow,
+        flowUi,
+        (size, done) => listView(ui, size, answer.rows, mode, done),
+        { _tag: "Close" },
+        FULL_SCREEN,
+      );
+      switch (choice._tag) {
+        case "Close":
+          return;
+        case "TooSmall": {
+          const resized = await mount<ResizeChoice>(
+            flow,
+            flowUi,
+            (size, done) => resizeView(ui, size, done),
+            { _tag: "Close" },
+            FULL_SCREEN,
+          );
+          if (resized._tag !== "Fits") return;
+          continue;
+        }
+        case "Handover":
+          await handover(flow, flowUi, choice.row);
+          return;
+        case "Compose":
+          await compose(flow, flowUi, choice.row);
+          return;
+      }
     }
   };
 

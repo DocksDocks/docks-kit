@@ -135,12 +135,15 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 };
 
 /**
- * The notice of a list that cannot show one item row with its full instance
- * id (G3). The flow shows it in place of the list: no row of a picker that
- * omp clips can hold a request that the operator reads whole.
+ * The texts of the resize view, longest first (G3): the view shows the
+ * longest one that fits the width, so one screen row holds it whole.
  */
-export const LIST_TOO_SMALL =
-  "talk: the pane is too small for the session list. Enlarge it, then run /talk or press alt+t again.";
+export const RESIZE_TEXTS = [
+  "talk: enlarge the pane to see the session list",
+  "talk: enlarge the pane",
+  "enlarge the pane",
+  "enlarge",
+] as const;
 const LIST_EMPTY = "No live talk sessions.";
 
 /** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
@@ -180,10 +183,11 @@ const rowDetail = (row: ListRow): string =>
 /**
  * The list view: a `picker` root with `size: "screen"`, one item per row
  * (G3). Enter (`activate`) chooses compose, or handover in the handover
- * mode; `h` chooses handover; `escape` and `alt+t` close. The view draws no
- * request for a larger pane: when no item row with the full instance id fits
- * at open, it ends with `TooSmall` before omp mounts it, and a resize below
- * that size ends it with `TooSmall` at the next draw. Neither `activate` nor
+ * mode; `h` chooses handover; `escape` and `alt+t` close. When no item row
+ * with the full instance id fits at open, it ends with `TooSmall` before
+ * omp mounts it; a resize below that size ends it with `TooSmall` at the
+ * next draw, and that draw shows no empty-state text and no key hint, so an
+ * undersized frame never reads as an empty registry. Neither `activate` nor
  * `h` acts while it does not fit.
  */
 export const listView = (
@@ -220,8 +224,12 @@ export const listView = (
       return [];
     },
     selected: () => (layout().fits ? selected() : null),
-    empty: LIST_EMPTY,
-    term: () => ({ maxRows: layout().maxRows, hint: LIST_HINT[mode] }),
+    // An undersized frame shows neither the empty-state text nor the key hint.
+    empty: () => (layout().fits ? LIST_EMPTY : ""),
+    term: () => {
+      const { maxRows, fits } = layout();
+      return { maxRows, hint: fits ? LIST_HINT[mode] : null };
+    },
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
     },
@@ -243,6 +251,52 @@ export const listView = (
       }
       // Enter reaches the picker widget, which reports `activate`, only while the list fits.
       return key.id === "enter" && !layout().fits;
+    },
+  });
+};
+
+// ── Resize view ──
+
+/** How the resize view ends: the list fits again, or the operator closed the flow. */
+export type ResizeChoice = { readonly _tag: "Fits" } | { readonly _tag: "Close" };
+
+/** The resize text for `columns` cells: the longest text that fits, else `enlarge` cut to the width. */
+export const resizeText = (ui: HostUi, columns: number | undefined): string => {
+  const width = Math.max(0, columns ?? 0);
+  const last = RESIZE_TEXTS[RESIZE_TEXTS.length - 1] ?? "";
+  return (
+    RESIZE_TEXTS.find((text) => ui.visibleWidth(text) <= width) ?? ui.truncate(last, width, "")
+  );
+};
+
+/**
+ * The resize view (G3): a full-screen overlay whose root is one `text` node,
+ * with no frame, no title, and no hint, so the first screen row holds the
+ * request for a larger pane even in a one-row pane. It reads `ui.size()` on
+ * each draw; when the list fits again, it ends with `Fits`, and the flow
+ * mounts the list. Enter, `h`, and every other key do nothing; `escape` and
+ * `alt+t` end the flow.
+ */
+export const resizeView = (
+  ui: HostUi,
+  size: SizeReader,
+  done: (choice: ResizeChoice) => void,
+): JSXNode => {
+  // omp mounts no view whose `done` ran while its factory ran (`showHookCustom` v19.2.1).
+  if (listLayout(size()).fits) done({ _tag: "Fits" });
+  return ui.jsx("text", {
+    text: () => {
+      const current = size();
+      if (listLayout(current).fits)
+        queueMicrotask(() => {
+          done({ _tag: "Fits" });
+        });
+      return resizeText(ui, current?.columns);
+    },
+    onKey: (key: ViewKey): boolean => {
+      if (key.kind !== "release" && (key.id === CLOSE_KEY || key.id === TALK_SHORTCUT))
+        done({ _tag: "Close" });
+      return true;
     },
   });
 };
