@@ -44,6 +44,7 @@ import { DIAL_SLOTS } from "../../../talk/transport/client";
 import { socketFileName } from "../../../talk/transport/endpoint";
 import { entryFileName } from "../../../talk/transport/registry";
 import { PING_KIND, type Target } from "../../../talk/transport/request";
+import type { HostModuleLoader } from "../../../talk/ui/host";
 
 // The extension factory of #250 Step 4: capability probe (E11), process
 // singleton (E12), session scope (E7), and the talk tool (E10), against a
@@ -333,6 +334,26 @@ const fakeType = {
   Optional: builder("Optional"),
 };
 
+/** The `@oh-my-pi/pi-tui` exports that the capability probe checks (#251 G7), as stand-ins. */
+const fakeTuiModule = (): Record<string, unknown> => ({
+  jsx: (kind: unknown, props: unknown) => ({ kind, props }),
+  signal: (value: unknown) => () => value,
+  isUiNode: () => false,
+});
+
+/** The `@oh-my-pi/pi-tui/text/width` exports that the capability probe checks, as stand-ins. */
+const fakeWidthModule = (): Record<string, unknown> => ({
+  visibleWidth: (text: string) => text.length,
+  truncate: (text: string) => text,
+  wrap: (text: string) => [text],
+});
+
+/** A host that supplies both modules with every checked export. */
+const fullHost = (): HostModuleLoader => ({
+  tui: async () => fakeTuiModule(),
+  width: async () => fakeWidthModule(),
+});
+
 type MarkerMode = "own" | "missing" | "other-parameters" | "placeholder";
 
 interface ToolCall {
@@ -366,6 +387,8 @@ class FakeSession {
   readonly handlers = new Map<string, Array<Handler>>();
   readonly notices: Array<string> = [];
   readonly sent: Array<{ readonly message: TalkMessage; readonly options: SendOptions }> = [];
+  /** The commands, shortcuts, and message renderers that the binding registered. */
+  readonly uiRegistrations: Array<string> = [];
   /** The managed timers of the binding: each handle maps to its stop function. */
   readonly timers = new Map<object, () => void>();
   registerCalls = 0;
@@ -399,6 +422,16 @@ class FakeSession {
       },
       getAllTools: () => this.rows(),
       getSessionName: () => this.name,
+      registerCommand: (name: string) => {
+        this.uiRegistrations.push(`command ${name}`);
+      },
+      registerShortcut: (key: string) => {
+        this.uiRegistrations.push(`shortcut ${key}`);
+      },
+      getShortcutConflict: () => undefined,
+      registerMessageRenderer: (customType: string) => {
+        this.uiRegistrations.push(`renderer ${customType}`);
+      },
       typebox: { Type: fakeType },
     };
     this.manager = {
@@ -505,24 +538,25 @@ class FakeSession {
 let network: FakeNetwork;
 let stderr: Array<string>;
 
-const factory = (options: TalkExtensionOptions = {}): ((pi: unknown) => void) =>
+const factory = (options: TalkExtensionOptions = {}): ((pi: unknown) => Promise<void>) =>
   makeTalkExtension({
     makeTransport: (hooks) => network.facade(hooks),
     writeError: (text) => {
       stderr.push(text);
     },
+    hostModules: fullHost(),
     ...options,
   });
 
 /** Binds a session to a factory and runs its `session_start`. */
 const start = async (
-  bind: (pi: unknown) => void,
+  bind: (pi: unknown) => Promise<void>,
   id: string,
   setup: (session: FakeSession) => void = () => undefined,
 ): Promise<FakeSession> => {
   const session = new FakeSession(id);
   setup(session);
-  bind(session.pi);
+  await bind(session.pi);
   await session.emit("session_start");
   await settle();
   return session;
@@ -557,10 +591,10 @@ describe("talk extension entry", () => {
 });
 
 describe("capability probe (E11)", () => {
-  it("writes one notice to standard error and registers nothing when pi.on is missing", () => {
+  it("writes one notice to standard error and registers nothing when pi.on is missing", async () => {
     const session = new FakeSession("s-1");
     Reflect.deleteProperty(session.pi, "on");
-    factory()(session.pi);
+    await factory()(session.pi);
     expect(session.registerCalls).toBe(0);
     expect(stderr).toHaveLength(1);
     expect(stderr[0]).toContain("pi.on");
@@ -572,7 +606,7 @@ describe("capability probe (E11)", () => {
     const session = new FakeSession("s-1");
     Reflect.deleteProperty(session.pi, "getAllTools");
     session.hasUI = true;
-    factory()(session.pi);
+    await factory()(session.pi);
     expect(session.registerCalls).toBe(0);
     expect([...session.handlers.keys()]).toEqual(["session_start"]);
     expect(session.handlers.get("session_start")).toHaveLength(1);
@@ -586,7 +620,7 @@ describe("capability probe (E11)", () => {
   it("writes the session_start notice to standard error in a session without a UI", async () => {
     const session = new FakeSession("s-1");
     Reflect.set(session.pi, "typebox", { Type: {} });
-    factory()(session.pi);
+    await factory()(session.pi);
     await session.emit("session_start");
     expect(session.notices).toEqual([]);
     expect(stderr).toHaveLength(1);
@@ -595,7 +629,7 @@ describe("capability probe (E11)", () => {
 
   it("fails session_start with a clear error when a context method is missing", async () => {
     const session = new FakeSession("s-1");
-    factory()(session.pi);
+    await factory()(session.pi);
     Reflect.deleteProperty(session.manager, "getCwd");
     await expect(session.emit("session_start")).rejects.toThrow("ctx.sessionManager.getCwd");
     expect(network.live()).toEqual([]);
@@ -610,10 +644,129 @@ describe("capability probe (E11)", () => {
   });
 });
 
-describe("runtime (E12)", () => {
-  it("registers no tool and no handler in a binding off the main thread", () => {
+describe("capability probe of the UI host (#251 G7)", () => {
+  /** Expects only the one session_start notice, which names `name` and omp 19.2.0. */
+  const expectOnlyNotice = async (session: FakeSession, name: string): Promise<void> => {
+    expect(session.registerCalls).toBe(0);
+    expect(session.uiRegistrations).toEqual([]);
+    expect([...session.handlers.keys()]).toEqual(["session_start"]);
+    expect(session.handlers.get("session_start")).toHaveLength(1);
+    expect(Reflect.get(globalThis, TALK_SINGLETON_KEY)).toBeUndefined();
+    await session.emit("session_start");
+    expect(session.notices).toHaveLength(1);
+    expect(session.notices[0]).toContain(name);
+    expect(session.notices[0]).toContain(`talk needs omp ${OMP_VERSION_NEEDED} or later`);
+    expect(stderr).toEqual([]);
+  };
+
+  const uiSession = (): FakeSession => {
     const session = new FakeSession("s-1");
-    factory({ isMainThread: false })(session.pi);
+    session.hasUI = true;
+    return session;
+  };
+
+  it.each([
+    ["@oh-my-pi/pi-tui", "tui"],
+    ["@oh-my-pi/pi-tui/text/width", "width"],
+  ] as const)("shows only the notice when the import of %s rejects", async (name, key) => {
+    const session = uiSession();
+    const hostModules: HostModuleLoader = {
+      ...fullHost(),
+      [key]: () => Promise.reject(new Error(`Cannot find module '${name}'`)),
+    };
+    await factory({ hostModules })(session.pi);
+    await expectOnlyNotice(session, name);
+  });
+
+  it.each(["jsx", "signal", "isUiNode"])(
+    "shows only the notice when @oh-my-pi/pi-tui has no function %s",
+    async (name) => {
+      const session = uiSession();
+      const tui = { ...fakeTuiModule(), [name]: "not a function" };
+      await factory({ hostModules: { ...fullHost(), tui: async () => tui } })(session.pi);
+      await expectOnlyNotice(session, `${name} of @oh-my-pi/pi-tui`);
+    },
+  );
+
+  it.each(["visibleWidth", "truncate", "wrap"])(
+    "shows only the notice when @oh-my-pi/pi-tui/text/width has no function %s",
+    async (name) => {
+      const session = uiSession();
+      const width = fakeWidthModule();
+      Reflect.deleteProperty(width, name);
+      await factory({ hostModules: { ...fullHost(), width: async () => width } })(session.pi);
+      await expectOnlyNotice(session, `${name} of @oh-my-pi/pi-tui/text/width`);
+    },
+  );
+
+  it.each([
+    "registerCommand",
+    "registerShortcut",
+    "getShortcutConflict",
+    "registerMessageRenderer",
+  ])("shows only the notice when pi.%s is missing", async (name) => {
+    const session = uiSession();
+    Reflect.deleteProperty(session.pi, name);
+    await factory()(session.pi);
+    await expectOnlyNotice(session, `pi.${name}`);
+  });
+
+  it("names every failed check in the one notice", async () => {
+    const session = uiSession();
+    Reflect.deleteProperty(session.pi, "registerShortcut");
+    const hostModules: HostModuleLoader = {
+      tui: async () => ({}),
+      width: () => Promise.reject(new Error("no module")),
+    };
+    await factory({ hostModules })(session.pi);
+    await expectOnlyNotice(
+      session,
+      "this omp has no pi.registerShortcut, jsx of @oh-my-pi/pi-tui, signal of @oh-my-pi/pi-tui, " +
+        "isUiNode of @oh-my-pi/pi-tui, @oh-my-pi/pi-tui/text/width.",
+    );
+  });
+
+  it("loads each host module once per binding, before it registers anything", async () => {
+    const loads: Array<string> = [];
+    const gate = Promise.withResolvers<void>();
+    const hostModules: HostModuleLoader = {
+      tui: async () => {
+        loads.push("tui");
+        await gate.promise;
+        return fakeTuiModule();
+      },
+      width: async () => {
+        loads.push("width");
+        return fakeWidthModule();
+      },
+    };
+    const session = new FakeSession("s-1");
+    const binding = factory({ hostModules })(session.pi);
+    await settle();
+    expect(loads).toEqual(["tui", "width"]);
+    expect(session.registerCalls).toBe(0);
+    expect(session.handlers.size).toBe(0);
+    gate.resolve();
+    await binding;
+    expect(loads).toEqual(["tui", "width"]);
+    expect([...session.tools.keys()]).toEqual([MARKER_TOOL_NAME, "talk"]);
+  });
+
+  it("passes the probe with a full host and registers the marker, the talk tool, and the session handlers as #250 does", async () => {
+    const session = await start(factory(), "s-1");
+    expect([...session.tools.keys()]).toEqual([MARKER_TOOL_NAME, "talk"]);
+    expect(session.handlers.has("session_start")).toBe(true);
+    expect(session.handlers.has("session_shutdown")).toBe(true);
+    expect(session.notices).toEqual([]);
+    expect(stderr).toEqual([]);
+    expect(network.only("s-1").live).toBe(true);
+  });
+});
+
+describe("runtime (E12)", () => {
+  it("registers no tool and no handler in a binding off the main thread", async () => {
+    const session = new FakeSession("s-1");
+    await factory({ isMainThread: false })(session.pi);
     expect(session.registerCalls).toBe(0);
     expect(session.handlers.size).toBe(0);
     expect(stderr).toEqual([]);
@@ -625,12 +778,12 @@ describe("runtime (E12)", () => {
     ["the package version", { protocolVersion: TALK_PROTOCOL_VERSION, packageVersion: "0.0.0" }],
   ])(
     "registers nothing and writes one notice when the singleton differs only in %s",
-    (_label, versions) => {
+    async (_label, versions) => {
       Reflect.set(globalThis, TALK_SINGLETON_KEY, versions);
       const first = new FakeSession("s-1");
       const second = new FakeSession("s-2");
-      factory()(first.pi);
-      factory()(second.pi);
+      await factory()(first.pi);
+      await factory()(second.pi);
       expect(first.registerCalls + second.registerCalls).toBe(0);
       expect(first.handlers.size + second.handlers.size).toBe(0);
       expect(stderr).toHaveLength(1);
@@ -651,6 +804,7 @@ describe("runtime (E12)", () => {
       writeError: (text) => {
         stderr.push(text);
       },
+      hostModules: fullHost(),
     };
     const asker = await start(first.makeTalkExtension(options), "s-asker");
     const singleton: unknown = Reflect.get(globalThis, TALK_SINGLETON_KEY);
@@ -1587,7 +1741,7 @@ describe("startup admission (T2)", () => {
     const gate = Promise.withResolvers<void>();
     network.registerGate = gate.promise;
     const starting = new FakeSession("s-shared");
-    bind(starting.pi);
+    await bind(starting.pi);
     const started = starting.emit("session_start");
     await settle();
     const line = network.log.find((entry) => entry.endsWith(" s-shared"));
@@ -1636,7 +1790,10 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
    * A factory whose process singleton builds a real transport on `folder`;
    * `services`, for example a test clock, go into its runtime.
    */
-  const realFactory = (folder: string, services?: Layer.Layer<never>): ((pi: unknown) => void) =>
+  const realFactory = (
+    folder: string,
+    services?: Layer.Layer<never>,
+  ): ((pi: unknown) => Promise<void>) =>
     makeTalkExtension({
       makeTransport: (hooks) => {
         const runtime = makeTalkTransport(hooks, { folder, services });
@@ -1646,6 +1803,7 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
       writeError: (text) => {
         stderr.push(text);
       },
+      hostModules: fullHost(),
     });
 
   /** The longest wall-clock time of a composed fixture; past it, the fixture failed, not the code under test. */
@@ -1678,13 +1836,13 @@ describe.skipIf(process.platform === "win32")("real transport facade (in-process
   };
 
   const realSession = async (
-    bind: (pi: unknown) => void,
+    bind: (pi: unknown) => Promise<void>,
     id: string,
     setup: (session: FakeSession) => void = () => undefined,
   ): Promise<FakeSession> => {
     const session = new FakeSession(id);
     setup(session);
-    bind(session.pi);
+    await bind(session.pi);
     await session.emit("session_start");
     return session;
   };

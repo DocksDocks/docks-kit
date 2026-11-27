@@ -44,6 +44,7 @@ import {
 import type { AdmissionCheck, RegistrationInput, RegistrationUpdate } from "./transport/listener";
 import type { RequestHandler, Target } from "./transport/request";
 import { TalkTransport, type TalkTransportOptions } from "./transport/transport";
+import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
 export const TALK_PROTOCOL_VERSION = 1;
@@ -400,6 +401,14 @@ interface PiApi {
   readonly getAllTools: () => unknown;
   readonly getSessionName: () => string | undefined;
   readonly Type: TypeBuilder;
+  /** `pi.registerCommand(name, options)` of the `/talk` command (#251 G2). */
+  readonly registerCommand: (name: string, options: object) => void;
+  /** `pi.registerShortcut(key, options)` of `alt+t` (#251 G4). */
+  readonly registerShortcut: (key: string, options: object) => void;
+  /** `pi.getShortcutConflict(key)`: undefined, or the kind of the conflict (#251 G4). */
+  readonly getShortcutConflict: (key: string) => unknown;
+  /** `pi.registerMessageRenderer(customType, renderer)` of the message cards (#251 G5). */
+  readonly registerMessageRenderer: (customType: string, renderer: Method) => void;
 }
 
 type ApiProbe =
@@ -411,9 +420,10 @@ type ApiProbe =
     };
 
 /**
- * E11: checks by type each `pi` member that talk calls. The plan names
- * `pi.typebox.Type.Object`; the probe also checks the other builders that the
- * tool parameters call, so a missing one gives the notice instead of a throw.
+ * E11 and #251 G7: checks by type each `pi` member that talk calls. The plan
+ * names `pi.typebox.Type.Object`; the probe also checks the other builders
+ * that the tool parameters call, so a missing one gives the notice instead of
+ * a throw.
  */
 const probeApi = (pi: unknown): ApiProbe => {
   const registerTool = method(pi, "registerTool");
@@ -421,6 +431,10 @@ const probeApi = (pi: unknown): ApiProbe => {
   const on = method(pi, "on");
   const getAllTools = method(pi, "getAllTools");
   const getSessionName = method(pi, "getSessionName");
+  const registerCommand = method(pi, "registerCommand");
+  const registerShortcut = method(pi, "registerShortcut");
+  const getShortcutConflict = method(pi, "getShortcutConflict");
+  const registerMessageRenderer = method(pi, "registerMessageRenderer");
   const typebox = Predicate.hasProperty(pi, "typebox") ? pi.typebox : undefined;
   const type = Predicate.hasProperty(typebox, "Type") ? typebox.Type : undefined;
   const builders = new Map(TYPE_BUILDER_MEMBERS.map((name) => [name, method(type, name)]));
@@ -436,6 +450,10 @@ const probeApi = (pi: unknown): ApiProbe => {
     ...(on === undefined ? ["pi.on"] : []),
     ...(getAllTools === undefined ? ["pi.getAllTools"] : []),
     ...(getSessionName === undefined ? ["pi.getSessionName"] : []),
+    ...(registerCommand === undefined ? ["pi.registerCommand"] : []),
+    ...(registerShortcut === undefined ? ["pi.registerShortcut"] : []),
+    ...(getShortcutConflict === undefined ? ["pi.getShortcutConflict"] : []),
+    ...(registerMessageRenderer === undefined ? ["pi.registerMessageRenderer"] : []),
     ...TYPE_BUILDER_MEMBERS.filter((name) => builders.get(name) === undefined).map(
       (name) => `pi.typebox.Type.${name}`,
     ),
@@ -451,7 +469,11 @@ const probeApi = (pi: unknown): ApiProbe => {
     sendMessage === undefined ||
     onHandler === undefined ||
     getAllTools === undefined ||
-    getSessionName === undefined
+    getSessionName === undefined ||
+    registerCommand === undefined ||
+    registerShortcut === undefined ||
+    getShortcutConflict === undefined ||
+    registerMessageRenderer === undefined
   )
     return { _tag: "Missing", missing, on: onHandler };
   const Type: TypeBuilder = {
@@ -479,6 +501,16 @@ const probeApi = (pi: unknown): ApiProbe => {
         return Predicate.isString(name) ? name : undefined;
       },
       Type,
+      registerCommand: (name, options) => {
+        registerCommand(name, options);
+      },
+      registerShortcut: (key, options) => {
+        registerShortcut(key, options);
+      },
+      getShortcutConflict: (key) => getShortcutConflict(key),
+      registerMessageRenderer: (customType, renderer) => {
+        registerMessageRenderer(customType, renderer);
+      },
     },
   };
 };
@@ -660,6 +692,8 @@ interface BindingEnv {
   readonly scope: string;
   readonly clock: TalkClock;
   readonly writeError: (text: string) => void;
+  /** The checked host exports of the views, cards, and handover (#251 G7). */
+  readonly ui: HostUi;
 }
 
 // ── One factory binding (E3, E7, E10) ──
@@ -1031,13 +1065,17 @@ export interface TalkExtensionOptions {
   readonly writeError?: ((text: string) => void) | undefined;
   /** Default: the system clock. */
   readonly clock?: TalkClock | undefined;
+  /** Loads the omp host modules of the UI. Default: the literal dynamic imports of `ui/host.ts`. */
+  readonly hostModules?: HostModuleLoader | undefined;
 }
 
 /**
  * The factory of one module evaluation. omp calls it for each session that
- * the evaluation serves.
+ * the evaluation serves and awaits it.
  */
-export const makeTalkExtension = (options: TalkExtensionOptions = {}): ((pi: unknown) => void) => {
+export const makeTalkExtension = (
+  options: TalkExtensionOptions = {},
+): ((pi: unknown) => Promise<void>) => {
   const scope = randomBytes(8).toString("hex");
   const writeError =
     options.writeError ??
@@ -1050,18 +1088,25 @@ export const makeTalkExtension = (options: TalkExtensionOptions = {}): ((pi: unk
   const clock = options.clock ?? systemClock(report);
   const makeTransport =
     options.makeTransport ?? ((hooks: TransportHooks) => makeTalkTransport(hooks).facade);
+  const hostModules = options.hostModules ?? hostModuleLoader;
 
-  return (pi) => {
+  return async (pi) => {
     // E12: a worker thread has its own globalThis, so a binding there registers nothing.
     if (!(options.isMainThread ?? isMainThread)) return;
     const probe = probeApi(pi);
-    if (probe._tag === "Missing") {
-      const notice = capabilityNotice(probe.missing);
-      if (probe.on === undefined) {
+    // #251 G7: the host modules load before anything registers.
+    const host = await probeHost(hostModules);
+    if (probe._tag === "Missing" || host._tag === "Missing") {
+      const notice = capabilityNotice([
+        ...(probe._tag === "Missing" ? probe.missing : []),
+        ...(host._tag === "Missing" ? host.missing : []),
+      ]);
+      const on = probe._tag === "Missing" ? probe.on : probe.api.on;
+      if (on === undefined) {
         writeError(`${notice}\n`);
         return;
       }
-      probe.on("session_start", async (_event, ctx) => {
+      on("session_start", async (_event, ctx) => {
         notifyUser(ctx, notice, writeError);
         return undefined;
       });
@@ -1075,7 +1120,7 @@ export const makeTalkExtension = (options: TalkExtensionOptions = {}): ((pi: unk
       }
       return;
     }
-    bindSession(probe.api, talk, { scope, clock, writeError });
+    bindSession(probe.api, talk, { scope, clock, writeError, ui: host.ui });
   };
 };
 
