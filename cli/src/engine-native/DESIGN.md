@@ -37,9 +37,9 @@ shell engine was removed after the `bash-engine-final` tag.
   `prove-red OK`.
 - **Step ordering is load-bearing.** The omp pipeline resolves Bun, deploys
   the whole files, merges `config.yml` and runs the retired-key removals on
-  the merged result, merges `models.yml` and runs its removals, writes the
-  intercom configuration, materializes the kit plugin, and only then runs the
-  plugin pass, because the plugin pass links the kit plugin directory.
+  the merged result, merges `models.yml` and runs its removals, materializes
+  the kit plugin, and only then runs the plugin pass, because the plugin pass
+  links the kit plugin directory.
 - **One pipeline.** Sync runs only the omp pipeline, which is serial.
   `syncConcurrency.ts` `runBounded` stays for the parallel probes of `tidy`
   and the tidy report.

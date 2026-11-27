@@ -1,6 +1,6 @@
 ---
 name: omp-sync-context
-description: "Use when changing the docks-kit omp harness: the omp sync pipeline (ompSync.ts, syncDispatch.ts engineSync), omp paths (ompPaths.ts), deploy, YAML merge, and retired-key prune of config.yml and models.yml (ompFileDeploy.ts, ompYaml.ts, ompRemovals.ts), the plugin pass and the docks marketplace retirement (ompPlugins.ts, ompKitPlugin.ts, ompChild.ts), the session model in kit.db (ompSession.ts, kitDb.ts), or the docks-kit omp free-session launcher (commands/omp.ts, ompOverlay.ts). Covers dry-run and --skip-plugin-refresh boundaries, the omp folder locks and the omp child environment (ompWriteFolders, spawnOmp, omp --fast), and private file modes. Not for cross-cutting sync flags (use sync-orchestration-context) or tool pins (use toolchain-context)."
+description: "Use when changing the docks-kit omp harness: the omp sync pipeline (ompSync.ts, syncDispatch.ts engineSync), omp paths (ompPaths.ts), deploy, YAML merge, and retired-key prune of config.yml and models.yml (ompFileDeploy.ts, ompYaml.ts, ompRemovals.ts), the plugin pass and the docks marketplace retirement (ompPlugins.ts, ompKitPlugin.ts, ompChild.ts), the session model in kit.db (ompSession.ts, kitDb.ts), or the docks-kit omp free-session launcher (commands/omp.ts, ompOverlay.ts). Covers the dry-run boundary, the pi-intercom notice, the omp folder locks and the omp child environment (ompWriteFolders, spawnOmp, omp --fast), and private file modes. Not for cross-cutting sync flags (use sync-orchestration-context) or tool pins (use toolchain-context)."
 user-invocable: false
 metadata:
   pattern: tool-wrapper
@@ -37,7 +37,7 @@ metadata:
       lines: "1-63"
     - path: cli/src/engine-native/ompChild.ts
       lines: "1-26"
-  updated: "2026-11-23"
+  updated: "2026-11-27"
 ---
 
 # omp Sync Context
@@ -100,13 +100,13 @@ and `bunx vitest run cli/test/unit/ompPaths.test.ts -t "prefers OMP_PROFILE even
 - Change the omp pipeline call in `syncDispatch.ts` — `engineSync`.
 
 Use `sync-orchestration-context` for a sync flag.
-Use `toolchain-context` for the omp binary floor or the `pi-intercom` pin.
+Use `toolchain-context` for the omp binary floor.
 
 ## Deployment Ownership
 
 Treat each Source of Truth file as kit-owned input.
 Keep user-only keys through both the `config.yml` and `models.yml` merges.
-Replace the other three deployed files as whole files.
+Replace the other two deployed files as whole files.
 
 | Source | Deployed target | Root rule |
 |---|---|---|
@@ -114,7 +114,6 @@ Replace the other three deployed files as whole files.
 | `SoT/.omp/mcp.json` | `<agentDir>/mcp.json` | Take `agentDir` from `ompPaths`. |
 | `SoT/.omp/config.yml` | `<agentDir>/config.yml` | Take `agentDir` from `ompPaths`. |
 | `SoT/.omp/models.yml` | `<agentDir>/models.yml` | Take `agentDir` from `ompPaths`. |
-| `SoT/.omp/intercom.json` | `<intercomRoot>/intercom/config.json` | Use the profile `agentDir` under a named profile; otherwise use `$PI_CODING_AGENT_DIR`, defaulting to `~/.pi/agent`. |
 | `SoT/.omp/plugin/**` (payload prefix) | `~/.docks-kit/omp-plugin/` | Kit-owned: `ompKitPlugin.ts syncKitPlugin` writes each file only when it differs, sets `package.json` `version` to the kit version, removes files that the payload no longer lists, and keeps no backups. |
 
 omp loads `<agentDir>/AGENTS.md` only into main sessions and advisors, never
@@ -191,15 +190,7 @@ most 100 ms.
 When you rewrite a condition, run the old and the new condition on each
 buffer of the test table, and make sure that both give the same result.
 
-Under a named profile (`OMP_PROFILE` or `PI_PROFILE`), use the profile `agentDir` from `ompPaths`.
-omp exports `PI_CODING_AGENT_DIR` as that profile `agentDir`, and `pi-intercom` reads that variable.
-Without a named profile, trim the `PI_CODING_AGENT_DIR` value as `pi-intercom` does.
-Resolve a relative value against the current working directory.
-Use an absolute value without modification.
-Use `~/.pi/agent` when the value is absent or empty.
-
 Create the `ompPaths` `agentDir` only outside dry-run mode.
-Create the resolved intercom directory only outside dry-run mode.
 Back up a differing deployed file before replacement.
 The retired-entry prune shares the backup of the merge that runs before it in
 the same sync (see `references/yaml-merge.md`).
@@ -218,8 +209,8 @@ and `bunx vitest run cli/test/unit/ompFastMode.test.ts -t "keeps a symlinked con
 Two homes can share an omp folder through `PI_CODING_AGENT_DIR`, a symlink,
 `XDG_DATA_HOME`, or a `PI_CONFIG_DIR` with `..`. Their home locks differ.
 So a writing sync also takes `<folder>/.docks-kit-sync-lock.db` in each
-folder of `ompSync.ts ompWriteFolders`: the `ompPaths` `agentDir`, the
-resolved intercom directory, and the `ompPaths` `dataRoot`.
+folder of `ompSync.ts ompWriteFolders`: the `ompPaths` `agentDir` and the
+`ompPaths` `dataRoot`.
 
 - `syncDispatch.ts runSync` calls `ompWriteFolders` once, before the locks,
   and passes the result into `ompSync`. `ompSync` writes only into these
@@ -256,7 +247,7 @@ resolved intercom directory, and the `ompPaths` `dataRoot`.
 - A dry run takes no folder lock. `sync-orchestration-context` owns the lock
   order and the folder creation rule.
 
-Verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "shared omp intercom folder"`,
+Verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "shared omp agent folder"`,
 `bunx vitest run cli/test/unit/syncLock.test.ts -t "shared omp data root"`,
 `bunx vitest run cli/test/unit/syncLock.test.ts -t "keeps each omp child on the locked config root"`,
 and `bunx vitest run cli/test/unit/ompFastMode.test.ts -t "omp --fast under the folder lock"`.
@@ -282,7 +273,7 @@ and `bunx vitest run cli/test/unit/ompKitPlugin.test.ts -t "removes stale files 
 ## References
 
 - `references/yaml-merge.md` - YAML merge contract and the retired-entry prune.
-- `references/plugins-and-marketplace.md` - plugin constraints, the retirement of the former marketplace plugins, inventory contract, dry-run and refresh rules.
+- `references/plugins-and-marketplace.md` - plugin constraints, the retirement of the former marketplace plugins, inventory contract, dry-run rules, and the pi-intercom notice.
 - `references/state-and-launcher.md` - kit.db state store, session model, and the free-session launcher.
 
 ## Change Checklist
@@ -292,8 +283,8 @@ and `bunx vitest run cli/test/unit/ompKitPlugin.test.ts -t "removes stale files 
 3. Preserve explicit chmod calls after writes.
 4. Preserve recursive mapping merge and wildcard pruning.
 5. Verify retired marketplace plugin identity through `id` and `scope`.
-6. Verify npm identity through `name` and `version`.
+6. Verify npm identity through `name`; keep a row without a `version`.
 7. Keep every omp subprocess behind the dry-run boundary.
-8. Test missing and present `pi-intercom` paths for refresh skipping.
+8. Test the pi-intercom notice with a registry row, a row without a version, and no row.
 9. Keep sync free of prompts and kit.db writes.
 10. Use durable module, function, and semantic anchors in tests or notes.

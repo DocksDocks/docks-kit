@@ -3,13 +3,14 @@
 `talk` lets live omp sessions send messages to each other without a broker.
 This document describes its build, its registry, and its transport. The
 source lives in `cli/talk/`, outside the npm `files` list. The kit plugin
-does not load `talk` yet: plan DocksDocks/docks-kit#252 does the cutover from
-pi-intercom.
+ships the bundle and loads it (plan DocksDocks/docks-kit#252).
 
 ## Build
 
-`bun cli/scripts/build-talk.ts --out <dir>` bundles `cli/talk/index.ts` into
-`<dir>/talk.js` with `Bun.build`. The file holds, in this order:
+`bun cli/scripts/build-talk.ts` bundles `cli/talk/index.ts` into
+`SoT/.omp/plugin/extensions/talk.js` with `Bun.build`, and `--out <dir>`
+writes `<dir>/talk.js` instead. The committed file is the one that the kit
+plugin ships. The file holds, in this order:
 
 1. A generated-file header.
 2. A license banner: the complete text of each file in `cli/talk/licenses/`
@@ -38,6 +39,14 @@ name `talk.js` and never writes through it; a link in the path of the output
 folder is followed, so give a folder that you own. The package smoke
 (`cli/scripts/package-smoke.ts`) fails when the tarball holds a `cli/talk/`
 entry, a folder entry included.
+
+`bun cli/scripts/build-talk.ts --check` builds into a private temporary folder
+and compares the bytes with the committed `talk.js`. When the file is missing
+or differs, it prints the stale file and the build command and exits 1.
+`bun run check:generated` runs it after the payload check. The generated
+payload `cli/src/generated/sotPayload.ts` embeds `talk.js`, so after a change
+under `cli/talk/`, run the build and then
+`bun cli/scripts/generate-sot-payload.ts`.
 
 ## Registry folder
 

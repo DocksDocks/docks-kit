@@ -9,8 +9,7 @@ are in `cli/docs/talk-tool.md`. The transport is in
 
 The source lives in `cli/talk/ui/`, outside the npm `files` list. Plan
 DocksDocks/docks-kit#251 holds the design decisions (G1 to G9) that this
-document names. The kit plugin does not load `talk` yet: plan
-DocksDocks/docks-kit#252 does the cutover from pi-intercom.
+document names. The kit plugin ships `talk` (plan DocksDocks/docks-kit#252).
 
 ## Contents
 

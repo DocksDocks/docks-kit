@@ -62,7 +62,6 @@ same package can run as the editor's TypeScript language server
 | Flag | Effect |
 |------|--------|
 | `--dry-run` | Preview without applying |
-| `--skip-plugin-refresh` | Install missing omp plugins but skip refresh-only updates |
 | `--verbose` | Also print no-op confirmations |
 
 Full reference: `docks-kit docs flags`.
@@ -97,14 +96,16 @@ Full reference: `docks-kit docs flags`.
 Sync writes the kit plugin `docks-kit-omp` to `~/.docks-kit/omp-plugin` and
 links it into omp. The kit plugin content comes from `SoT/.omp/plugin/`:
 
-- **Skills** — 32 skills, for example
+- **Skills** — 34 skills: 32 docks and plan-lifecycle skills, for example
   `plan-manager`, `plan-workspace`, `code-review`, `security`, and
-  `refactor`, plus the `workspace-hygiene` skill.
+  `refactor`, plus the `workspace-hygiene` and `talk` skills.
 - **Agents** — the `code-reviewer` and `plan-reviewer` task agents.
 - **Extensions** — `verify-gate` checks that each `git commit` carries a
   `Verified:` trailer, `context-tree-nudge` names the context-tree node of
-  each edited file, and `hygiene` gives the agent cleanup tools and
-  reminders.
+  each edited file, `hygiene` gives the agent cleanup tools and reminders,
+  and `talk` lets live omp sessions send messages and questions to each
+  other: the `talk` tool, the `/talk` command, `alt+t`, and `/talk handover`.
+  `talk` needs omp 19.2.0 or later.
 - **Rules and commands** — six trigger rules that teach the safe form of a
   risky command, and the `/cleanup` command.
 
@@ -115,7 +116,7 @@ Report a problem with a skill, an agent, or the kit in
 
 | Path | Purpose |
 |------|---------|
-| `SoT/.omp/` | omp SoT (AGENTS.md, config.yml, models.yml, mcp.json, intercom.json, and the `plugin/` source of `docks-kit-omp`) |
+| `SoT/.omp/` | omp SoT (AGENTS.md, config.yml, models.yml, mcp.json, and the `plugin/` source of `docks-kit-omp`) |
 | `SoT/toolchain.json` | Verified-version floors |
 | `cli/src/engine-native/` | EngineNative sync/toolchain implementation |
 | `cli/src/generated/sotPayload.ts` | Generated in-memory payload used by npm installs |

@@ -60,8 +60,8 @@ runEngineNative(argv, services?, options?)        index.ts
         |-- ompWriteFolders(ctx)                  resolved once, before the locks; ompSync
         |                                         and its omp children use the result
         |-- withFolderLocks(ctx, folders, ...)    <folder>/.docks-kit-sync-lock.db of the
-        |                                         ompWriteFolders agent, intercom, and
-        |                                         data root folders; canonical, sorted
+        |                                         ompWriteFolders agent and data root
+        |                                         folders; canonical, sorted
         |                                         ancestor-first; a missing folder is made
         |                                         under the locks of its ancestors in the
         |                                         set; none in a dry run
@@ -96,4 +96,4 @@ mode table. `toolchain-context` owns the toolchain operations.
 |------|-----------|
 | omp retired marketplace plugin uninstall | A `scope: "user"` row of `docks@docks` or `plan-lifecycle@docks` in the `omp plugin list --json` inventory; a project-scope row only warns, and an unreadable inventory skips the retirement (`ompPlugins.ts retireMarketplacePlugins`). |
 | omp docks marketplace remove | No user uninstall failed, and the active registry lists `docks`, or no active registry exists and the legacy registry lists it; an unreadable registry only warns (`ompPlugins.ts docksRegistryState`). |
-| omp npm plugin install | `pi-intercom` absent or at a version other than the pin; a present `pi-intercom` gets nothing under `--skip-plugin-refresh` (`ompPlugins.ts syncPlugins`). |
+| omp kit plugin link | The `docks-kit-omp` npm row is missing, or its `path` does not resolve to the kit plugin directory (`ompPlugins.ts syncPlugins`). |

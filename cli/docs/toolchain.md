@@ -4,7 +4,7 @@
 
 | Field | Meaning |
 |-------|---------|
-| `kind` | `check` (doctor visibility) / `managed` (kit-managed install) / `pin` (no binary — a version pin for a package that the kit installs through another tool, such as `omp install` for `pi-intercom`; the required `via` field names that tool in the doctor table) |
+| `kind` | `check` (doctor visibility) / `managed` (kit-managed install) |
 | `policy` | Installation policy; `present` installs when missing and never upgrades |
 | `floor` | Minimum acceptable version shown in the doctor table |
 | `verified` | Last kit-tested version and the exact pin for kit-driven installs |
@@ -31,11 +31,11 @@ an installer. An already-present Bun skips that download on every host.
 
 ## Supply-chain stance
 
-Every kit-driven package install from npm, GitHub releases, or
-`omp install` is pinned to a `SoT/toolchain.json` `verified` version — never
-floating `@latest` (the npm-worm / Shai-Hulud attack surface). That includes
+Every kit-driven package install from npm or GitHub releases is pinned to a
+`SoT/toolchain.json` `verified` version — never floating `@latest` (the
+npm-worm / Shai-Hulud attack surface). That includes
 the release workflow (actions pinned to commit SHAs, exact bun/npm versions).
-The kit installs no omp marketplace plugin: the kit plugin ships from this
+The kit installs no omp marketplace plugin and no npm plugin: the kit plugin ships from this
 repository, and sync tries to retire the user-scope installs of the former `docks` marketplace plugins (see
 `sync-layers`). Any new install surface, a new marketplace or plugin source
 included, needs a manifest pin first.
@@ -57,8 +57,8 @@ docks-kit toolchain outdated [--refresh]     # verified pins vs newest upstream 
 ```
 
 `docks-kit toolchain outdated` reads each tool's optional `upstream` entry in
-`SoT/toolchain.json`. An `npm` entry reads the registry `latest` tag. A
-`github` entry reads the latest release tag and strips `tagPrefix`.
+`SoT/toolchain.json`. The only upstream source is a GitHub repository
+(`github`): the report reads its latest release tag and strips `tagPrefix`.
 Set `GITHUB_TOKEN` or `GH_TOKEN` to raise the GitHub rate limit. Successful
 lookups cache for 24 hours in `~/.docks-kit/kit.db`; `--refresh` bypasses the
 cache. The report never installs anything and never edits a pin. A failed

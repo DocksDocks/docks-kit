@@ -39,7 +39,7 @@ metadata:
       lines: "1-18"
     - path: cli/test/lib/goldenProveRed.ts
       lines: "1-63"
-  updated: "2026-11-19"
+  updated: "2026-11-27"
 ---
 
 # EngineNative Golden Contract
@@ -106,6 +106,12 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
   snapshot does not depend on the recording host.
 - Stubs record child-process argv (`goldenResources.ts` stub runner,
   `GOLDEN_ARGV_LOG`), so command shape is part of the contract.
+- A mutation case of `goldenMutationCatalog.ts` can set `env` (extra
+  environment of the run, such as `OMP_PROFILE`) and `seed` (files that it
+  writes below HOME before the run). The driver then compares the sorted entry
+  list and the raw bytes of the seeded folder (`goldenSnapshot.ts
+  seededTreeProblems`) without the line-ending normalization of the snapshot,
+  so a rewrite or a new lock file in that folder fails the case.
 
 ## JSON Helpers
 

@@ -19,7 +19,6 @@ exit 1.
 | Flag | Effect |
 |------|--------|
 | `--dry-run` | Preview without applying; takes no sync lock and no folder lock |
-| `--skip-plugin-refresh` | Install missing omp plugins but skip refresh-only updates |
 | `--verbose` / `-v` | Also print no-op confirmations (already in sync, up to date, left as-is); accepted on `sync` and `toolchain` |
 
 ## Environment overrides
@@ -40,13 +39,13 @@ runs never write the same files at once.
 - Two homes can share an omp folder (`PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`,
   `XDG_DATA_HOME`, or a symlink). So a writing sync also holds
   `.docks-kit-sync-lock.db` inside each such folder that it writes: the omp
-  agent folder, the intercom folder, and the omp data root. The held line then
-  names that lock file.
+  agent folder and the omp data root. The held line then names that lock
+  file.
 - A writing sync creates a missing folder of this set just before it takes the
   lock of that folder, after the locks of its ancestors in the set. Each folder
   that it creates gets mode 0700. The lock step does not change the mode of an
-  existing folder. The omp pipeline then sets mode 0700 on the omp agent folder
-  and the intercom folder.
+  existing folder. The omp pipeline then sets mode 0700 on the omp agent
+  folder.
 - A sync finds the omp folders once, before it takes the locks. The omp
   pipeline and each `omp` command that it starts use these folders. When the
   locked data root is the omp config root, each `omp` command starts without

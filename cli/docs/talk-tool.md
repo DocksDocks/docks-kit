@@ -8,9 +8,10 @@ results, and the known limits. The transport under the tool (registry,
 endpoints, handshake, routes) is in `cli/docs/talk-transport.md`.
 
 The source lives in `cli/talk/`, outside the npm `files` list.
-`bun cli/scripts/build-talk.ts --out <dir>` builds `<dir>/talk.js`. The kit
-plugin does not load `talk` yet: plan DocksDocks/docks-kit#252 does the
-cutover from pi-intercom. Plan DocksDocks/docks-kit#250 holds the design
+`bun cli/scripts/build-talk.ts` builds it into
+`SoT/.omp/plugin/extensions/talk.js`. The kit plugin ships that file and the
+`talk` skill, and omp loads `talk` from the kit plugin (plan
+DocksDocks/docks-kit#252). Plan DocksDocks/docks-kit#250 holds the design
 decisions (E1 to E14) that this document names.
 
 ## Contents

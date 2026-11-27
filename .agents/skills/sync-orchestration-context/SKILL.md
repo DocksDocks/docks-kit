@@ -53,7 +53,7 @@ metadata:
       lines: "1-120"
     - path: cli/src/engine-native/toolchain.ts
       lines: "1-237"
-  updated: "2026-11-20"
+  updated: "2026-11-27"
 ---
 
 # Sync Engine Orchestration
@@ -99,9 +99,9 @@ failure ledger` prints every recorded message under `--- Failures ---` after the
 summary and returns 1, so exit 2 stays reserved for `ExitError` validation
 aborts and exit 1 means a mutation did not happen. A skip is not a failure: a
 missing harness CLI, missing git, an unavailable plugin inventory, and a missing
-Bun or pi-intercom pin in `SoT/toolchain.json` keep exit 0. Probe before
-spawning, so a host without the tool never records one.
-(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "fails the sync when the XDG candidate appears after the locks"` for exit 1 with the ledger, and `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "deploys config without spawning omp plugins when git is unavailable"` for an empty ledger)
+Bun pin in `SoT/toolchain.json` keep exit 0. Probe before spawning, so a host
+without the tool never records one.
+(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "fails the sync when the XDG candidate appears after the locks"` for exit 1 with the ledger, and `bunx vitest run cli/test/unit/ompPluginInventory.test.ts -t "reads only the inventory and changes no plugin when git is unavailable"` for an empty ledger)
 </constraint>
 
 <constraint>
@@ -234,9 +234,9 @@ each writer of such a folder also takes `<folder>/.docks-kit-sync-lock.db`
 (`scratch.ts folderSyncLockPath`).
 
 - `runSync` takes them after `parseArgs`, through
-  `withFolderLocks(ctx, folders, body)`, for the three folders of
-  `ompSync.ts ompWriteFolders`: the omp agent folder, the intercom folder, and
-  the omp data root. `runSync` resolves them once, before the locks, and passes
+  `withFolderLocks(ctx, folders, body)`, for the two folders of
+  `ompSync.ts ompWriteFolders`: the omp agent folder and the omp data root.
+  `runSync` resolves them once, before the locks, and passes
   them into `ompSync` (see `omp-sync-context`).
 - `folderLockPaths` canonicalizes each folder without the need for it to
   exist: the real path of its nearest existing ancestor, joined with the rest.
@@ -254,7 +254,7 @@ each writer of such a folder also takes `<folder>/.docks-kit-sync-lock.db`
 - A dry run (`ctx.dryRun`) takes no folder lock and creates no folder. The
   held line and the wait bound are those of the home lock.
 
-(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes one lock per real folder"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "shared omp agent folder"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "creates no intercom folder in a held omp agent folder and keeps its mode"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "missing omp data root"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no omp folder lock in a dry run"`, and `bunx vitest run cli/test/unit/folderLockCreate.test.ts -t "creates a missing folder and its parents with mode 0700"`)
+(verify: `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes one lock per real folder"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "shared omp agent folder"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "keeps the mode of a held omp agent folder and writes nothing into it"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "missing omp data root"`, `bunx vitest run cli/test/unit/syncLock.test.ts -t "takes no omp folder lock in a dry run"`, and `bunx vitest run cli/test/unit/folderLockCreate.test.ts -t "creates a missing folder and its parents with mode 0700"`)
 
 ### Direct Modes
 
@@ -268,9 +268,9 @@ each writer of such a folder also takes `<folder>/.docks-kit-sync-lock.db`
 
 - Sync has no removal flag. The omp retired-key passes run on every sync
   (see `omp-sync-context`).
-- `--skip-plugin-refresh` only keeps a present `pi-intercom` at its installed
-  version; a missing `pi-intercom` still installs. The retirement of the former
-  `docks` marketplace plugins and the kit plugin link run in every real sync.
+- Sync installs and updates no npm plugin. The retirement of the former
+  `docks` marketplace plugins and the kit plugin link run in every real sync
+  with git (see `omp-sync-context`).
 - `ompSync` starts with the memoized Bun bootstrap (`bun.ts bunBootstrap`).
 
 ## Gotchas

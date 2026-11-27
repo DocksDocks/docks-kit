@@ -9,7 +9,7 @@ AI-assisted dev environment on every machine.
 
 | Piece | Role |
 |-------|------|
-| `SoT/.omp/` | omp config deployed to `~/.omp/agent/` (AGENTS.md, config.yml, models.yml, mcp.json) plus `intercom.json` for pi intercom, plus the `plugin/` tree, deployed to `~/.docks-kit/omp-plugin` and linked as the `docks-kit-omp` omp plugin |
+| `SoT/.omp/` | omp config deployed to `~/.omp/agent/` (AGENTS.md, config.yml, models.yml, mcp.json), plus the `plugin/` tree (skills, agents, rules, and extensions, `talk` among them), deployed to `~/.docks-kit/omp-plugin` and linked as the `docks-kit-omp` omp plugin |
 | `SoT/toolchain.json` | Verified-version floors for external tools (see `docks-kit docs toolchain`) |
 | `cli/src/generated/sotPayload.ts` | Deterministic generated payload embedded in the npm bundle |
 | `cli/src/engine-native/` | EngineNative mutation logic for sync/toolchain and the `docks-kit omp` session overlay |
