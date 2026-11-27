@@ -165,8 +165,10 @@ comes only from the `/talk` views: `/talk handover`, or `h` in the list that
 - `pending` shows the asks that wait for a reply from this session, oldest
   first: the ask id, the sender's name, the first 8 characters of the
   sender's session id, the age in seconds, and the first 80 characters of the
-  text on one line, as a literal. It shows only the asks of this session's
-  current registration (see [Reply](#reply)).
+  text on one line, as a literal. The trust line of
+  [Message text](#message-text) comes once before the rows, because the
+  previews are peer text; an empty result has no trust line. It shows only
+  the asks of this session's current registration (see [Reply](#reply)).
 - `status` shows this session's name, the first 8 characters of its session
   id, and its folder; its registration (the full instance id, or none); the
   live peer count; the number of queued messages; and the pending asks, as
@@ -585,7 +587,8 @@ shows none of them either.
 
 `reply` picks the ask by `replyTo`, or the only pending ask when `replyTo` is
 unset. It fails when `replyTo` names no pending ask, when no ask waits, or
-when several asks wait and `replyTo` is unset; the last error lists the asks.
+when several asks wait and `replyTo` is unset; the last error lists the asks
+as `pending` shows them, after the trust line.
 
 `reply` sends a `reply` request to the reply address of the ask. The body
 names the registration that received the ask and repeats the origin flag. At

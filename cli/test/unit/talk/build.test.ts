@@ -382,15 +382,18 @@ describe("talk build freshness check", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("quotes an output path with a space, so that the shell of the host reads the rebuild command as the same arguments", () => {
-    const outDir = tempDir("check with space");
+  it("quotes an output path with a space and an apostrophe, so that the shell of the host reads the rebuild command as the same arguments", () => {
+    // The test controls the last folder name; the system temporary parent can hold anything.
+    const outDir = tempDir("check with space and it's");
     const { result } = runCheck(outDir);
     expectStale(result, outDir, "is missing");
-    // Both shells take a path without a single quote in single quotes.
-    expect(result.stderr).toContain(`--out '${resolve(outDir)}'`);
-    if (process.platform === "win32") return;
+    // POSIX quotes end around the apostrophe; PowerShell doubles it.
+    const quotedName =
+      process.platform === "win32" ? "with space and it''s-" : String.raw`with space and it'\''s-`;
+    expect(result.stderr).toContain(quotedName);
+    // Where a POSIX shell is present, it prints each argument of the printed command on its own line.
+    if (process.platform === "win32" || !existsSync("/bin/sh")) return;
     const rebuild = result.stderr.trimEnd().split("rebuild with: ")[1] ?? "";
-    // The shell prints each argument of the printed command on its own line.
     const parsed = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${rebuild}`], {
       encoding: "utf8",
     });
@@ -446,6 +449,23 @@ describe("talk build stale diagnostic of each shell", () => {
         outDir: undefined,
       },
       String.raw`[build-talk] stale: C:\repo\SoT\talk.js is missing; rebuild with (PowerShell): bun cli/scripts/build-talk.ts`,
+    ],
+    [
+      "POSIX, a path with an apostrophe",
+      "linux",
+      { path: "/tmp/it's/talk.js", state: "missing", entry: undefined, outDir: "/tmp/it's" },
+      String.raw`[build-talk] stale: /tmp/it's/talk.js is missing; rebuild with: bun cli/scripts/build-talk.ts --out '/tmp/it'\''s'`,
+    ],
+    [
+      "Windows, a path with an apostrophe",
+      "win32",
+      {
+        path: String.raw`C:\it's\talk.js`,
+        state: "missing",
+        entry: undefined,
+        outDir: String.raw`C:\it's`,
+      },
+      String.raw`[build-talk] stale: C:\it's\talk.js is missing; rebuild with (PowerShell): bun cli/scripts/build-talk.ts --out 'C:\it''s'`,
     ],
   ] as const)("prints the line for %s", (_name, platform, stale, line) => {
     expect(staleDiagnostic(stale, platform)).toBe(line);

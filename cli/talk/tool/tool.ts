@@ -748,6 +748,10 @@ const askLine = (ask: PendingAsk): string =>
   `- ${ask.askId} from ${literal(ask.from.name)} (session ${literal(ask.from.sessionId.slice(0, SHORT_ID_LENGTH))}), ` +
   `${Math.floor(ask.ageMs / 1_000)} s ago: ${literal(ask.preview)}`;
 
+/** The rows of a nonempty set of asks. Their previews are peer text, so the trust line comes first. */
+const askRows = (asks: ReadonlyArray<PendingAsk>): string =>
+  `${TRUST_LINE}\n${asks.map(askLine).join("\n")}`;
+
 const runReply = Effect.fnUntraced(function* (context: ToolContext, params: TalkParams) {
   const text = yield* requireMessage("reply", params.message);
   const replyTo = present(params.replyTo);
@@ -761,7 +765,7 @@ const runReply = Effect.fnUntraced(function* (context: ToolContext, params: Talk
       return yield* fail("talk: no ask waits for a reply from this session.");
     case "Ambiguous":
       return yield* fail(
-        `talk: more than one ask waits; set replyTo to one ask id:\n${selection.asks.map(askLine).join("\n")}`,
+        `talk: more than one ask waits; set replyTo to one ask id:\n${askRows(selection.asks)}`,
       );
     case "Found":
       break;
@@ -851,7 +855,7 @@ const runPending = (context: ToolContext): TalkToolOutcome => {
     text:
       asks.length === 0
         ? "No ask waits for a reply from this session."
-        : `Asks that wait for a reply (${asks.length}):\n${asks.map(askLine).join("\n")}`,
+        : `Asks that wait for a reply (${asks.length}):\n${askRows(asks)}`,
     details: { action: "pending" },
   };
 };
@@ -883,9 +887,7 @@ const runStatus = Effect.fnUntraced(function* (context: ToolContext) {
   );
   const asks = self.pending.list(askReceiver(self));
   const pending =
-    asks.length === 0
-      ? "Pending asks: none"
-      : `Pending asks (${asks.length}):\n${asks.map(askLine).join("\n")}`;
+    asks.length === 0 ? "Pending asks: none" : `Pending asks (${asks.length}):\n${askRows(asks)}`;
   return {
     ok: true,
     text: [head, registration, peers, `Queued messages: ${self.queuedCount}`, pending].join("\n"),

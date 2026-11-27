@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   seededTreeProblems,
   snapshotTree,
+  snapshotTreeResult,
   writeSeededTree,
   type SeededTree,
 } from "../lib/goldenSnapshot";
@@ -23,6 +24,35 @@ const SEED: SeededTree = {
   root: ".pi/agent/intercom",
   files: { "config.json": '{\r\n  "user": true\r\n}\r\n', "notes/marker": "kept\n" },
 };
+
+describe("snapshotTreeResult", () => {
+  it("gives the whole snapshot of a readable tree", () => {
+    withSnapshotRoot((root) => {
+      mkdirSync(join(root, "plugin"));
+      writeFileSync(join(root, "plugin", "talk.js"), "bundle\n");
+
+      expect(snapshotTreeResult(root)).toEqual({ kind: "snapshot", tree: snapshotTree(root) });
+    });
+  });
+
+  // A permission does not stop root, and Windows ignores the POSIX mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "gives a problem and no partial snapshot when a file cannot be read",
+    () => {
+      withSnapshotRoot((root) => {
+        writeFileSync(join(root, "a-readable"), "kept\n");
+        writeFileSync(join(root, "b-unreadable"), "secret\n");
+        chmodSync(join(root, "b-unreadable"), 0o000);
+
+        // The whole result: a failure holds no tree, so no partial snapshot leaks out.
+        expect(snapshotTreeResult(root)).toEqual({
+          kind: "failed",
+          problem: expect.stringMatching(/^ {2}the snapshot of HOME cannot be read: .*EACCES/),
+        });
+      });
+    },
+  );
+});
 
 describe("seededTreeProblems", () => {
   it("finds no problem when the seeded folder keeps its bytes and entries", () => {

@@ -26,9 +26,11 @@ later.
 - `talk` is a top-level tool. omp offers it to the model directly and does not
   mount it as a Bash command, so an `ask` waits for its reply in the tool call.
 - `/talk` and `alt+t` (DocksDocks/docks-kit#251). In an interactive session
-  they open the list of live sessions; Enter composes a message, and the
-  user confirms each send with a two-letter code. `/talk <target>` composes a
-  one-line message. Each talk message shows as a card.
+  they open a picker of the registered sessions, with the same rows as `list`:
+  a row whose probe failed without proof that the session ended shows as
+  `unresolved: <outcome>`. Enter composes a message, and the user confirms
+  each send with a two-letter code. `/talk <target>` composes a one-line
+  message. Each talk message shows as a card.
 - `/talk handover` (DocksDocks/docks-kit#251). A side turn writes a summary
   of the work of the session, the user reviews and edits it, and the text
   goes to the target session with a request for a turn.

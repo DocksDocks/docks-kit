@@ -5,7 +5,7 @@ user-invocable: false
 metadata:
   pattern: tool-wrapper
   updated: "2026-11-27"
-  content_hash: "902140cdfd71abd8acb03b8b5dc7b31fc2bd6be75eb733a8383e76c5c38cd58b"
+  content_hash: "e1532d9d6de811422897cbb9fe0af0364c3d2a193fe539d7426ba11377300ab5"
 ---
 
 # talk
@@ -54,8 +54,8 @@ user so, and do not claim that a message went out.
 | `send` | `to` or `instance`, `message`, `attachments`, `noWake` | Sends a message and waits for the delivery result, not for a reply. The receiver waits at most 1 s for the append |
 | `ask` | as `send` | Sends an ask and waits for the reply, at most 10 minutes. A session has at most one waiting ask |
 | `reply` | `replyTo`, `message`, `attachments`, `noWake` | Answers an ask that waits for this session. `replyTo` can stay unset when only one ask waits |
-| `pending` | none | Shows the asks that wait for a reply from this session, oldest first |
-| `status` | none | Shows this session, its registration, the live peer count, the queued messages, and the pending asks |
+| `pending` | none | Shows the asks that wait for a reply from this session, oldest first. The trust line comes before their previews, which are peer text |
+| `status` | none | Shows this session, its registration, the live peer count, the queued messages, and the pending asks as `pending` shows them |
 | `cancel` | `to` or `instance`, `messageId` | Withdraws a queued message, or reads the outcome of another one |
 
 - `to` matches the current listing in this order, and the first rule that

@@ -30,7 +30,7 @@ import {
   diffText,
   diffTrees,
   seededTreeProblems,
-  snapshotTree,
+  snapshotTreeResult,
   stableStringify,
   type TreeSnapshot,
 } from "./lib/goldenSnapshot";
@@ -71,10 +71,29 @@ function matrixLabel(
   return `fixture=${fixture} cmd=${cmd.join(" ")}${stubPart}${variantPart}`;
 }
 
-/** A matrix run: its golden, and the problems of its direct case checks (seed and notice). */
+/**
+ * A matrix or replay run: its golden, and the problems of its direct case
+ * checks (snapshot, seed, and notice). `golden` is undefined when the snapshot
+ * of HOME failed: the case then fails, and no partial snapshot is compared or
+ * recorded.
+ */
 interface MatrixRun {
-  readonly golden: MutationCaseGolden;
+  readonly golden: MutationCaseGolden | undefined;
   readonly problems: ReadonlyArray<string>;
+}
+
+/** The facts of a run that the case checks read besides the tree. */
+type RunFacts = Pick<MutationCaseGolden, "exitCode" | "argvLog" | "output">;
+
+/** The golden of `run`, or the snapshot problem that leaves it without one. */
+function caseGolden(
+  cmd: ReadonlyArray<string>,
+  home: string,
+  facts: RunFacts,
+): { readonly golden: MutationCaseGolden | undefined; readonly problems: Array<string> } {
+  const snapshot = snapshotTreeResult(home);
+  if (snapshot.kind === "failed") return { golden: undefined, problems: [snapshot.problem] };
+  return { golden: { command: [...cmd], ...facts, tree: snapshot.tree }, problems: [] };
 }
 
 function runCase(
@@ -88,19 +107,18 @@ function runCase(
     ...(row.seed !== undefined ? { seed: row.seed } : {}),
   });
   try {
-    const golden: MutationCaseGolden = {
-      command: [...row.cmd],
+    const facts: RunFacts = {
       exitCode: run.exitCode,
-      tree: snapshotTree(run.home),
       argvLog: readArgvLog(run),
       output: run.output,
     };
-    const problems = [
+    const { golden, problems } = caseGolden(row.cmd, run.home, facts);
+    problems.push(
       ...(row.seed !== undefined ? seededTreeProblems(run.home, row.seed) : []),
       ...(row.piIntercomNotice !== undefined
-        ? piIntercomProblems(run.home, golden, row.piIntercomNotice)
+        ? piIntercomProblems(run.home, facts, row.piIntercomNotice)
         : []),
-    ];
+    );
     return { golden, problems };
   } finally {
     cleanup([run]);
@@ -113,18 +131,14 @@ function runCase(
  * or removal command, and deploys the kit plugin with `talk.js` (the bytes of
  * the SoT copy) in its manifest and with the `talk` skill.
  */
-function piIntercomProblems(
-  home: string,
-  golden: MutationCaseGolden,
-  notice: string,
-): Array<string> {
+function piIntercomProblems(home: string, facts: RunFacts, notice: string): Array<string> {
   const problems: Array<string> = [];
-  if (golden.exitCode !== 0) problems.push(`  exit code ${golden.exitCode}, expected 0`);
-  const changes = golden.argvLog
+  if (facts.exitCode !== 0) problems.push(`  exit code ${facts.exitCode}, expected 0`);
+  const changes = facts.argvLog
     .split("\n")
     .filter((line) => line.includes("pi-intercom") && /\b(?:install|uninstall)\b/.test(line));
   if (changes.length > 0) problems.push(`  argv log changes pi-intercom: ${changes.join(" | ")}`);
-  const lines = golden.output.split("\n");
+  const lines = facts.output.split("\n");
   const notices = lines.filter((line) => line.includes("Notice:"));
   if (notices.length !== 1 || notices[0] !== notice) {
     problems.push(`  expected the notice once: ${notice}; got: ${notices.join(" | ") || "none"}`);
@@ -184,7 +198,7 @@ function deployedBytes(path: string, name: string, problems: Array<string>): Buf
   }
 }
 
-function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCaseGolden {
+function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MatrixRun {
   const first = runEngine(cmd, fixture, defaultStubs);
   try {
     if (first.exitCode !== 0) {
@@ -196,13 +210,11 @@ function runReplayCase(fixture: string, cmd: ReadonlyArray<string>): MutationCas
       throw new Error(`first replay for '${cmd.join(" ")}' produced no sync completion summary`);
     }
     const second = runEngine(cmd, fixture, defaultStubs, { reuseHome: first.home });
-    return {
-      command: [...cmd],
+    return caseGolden(cmd, second.home, {
       exitCode: second.exitCode,
-      tree: snapshotTree(second.home),
       argvLog: readArgvLog(second),
       output: second.output,
-    };
+    });
   } finally {
     cleanup([first]);
   }
@@ -369,14 +381,27 @@ function collectCases(): {
   selectedChecks: number;
 } {
   const cases: Record<string, MutationCaseGolden> = {};
+  // Labels, also of a case whose snapshot failed and that `cases` lacks.
+  const labels = new Set<string>();
   let invariantFailures = 0;
   let selectedChecks = 0;
+
+  /** Keeps the golden of `run`, and prints its problems as one case failure. */
+  const record = (label: string, run: MatrixRun): void => {
+    if (run.golden !== undefined) cases[label] = run.golden;
+    if (run.problems.length > 0) {
+      invariantFailures++;
+      banner(`CASE CHECK FAILURE ${label}`);
+      for (const problem of run.problems) console.log(problem);
+    }
+  };
 
   for (const row of MATRIX) {
     const { fixture, cmd, stubs, variant } = row;
     const label = matrixLabel(fixture, cmd, stubs, variant);
-    if (label in cases)
+    if (labels.has(label))
       throw new Error(`duplicate matrix label ${label} — add a variant to disambiguate`);
+    labels.add(label);
     if (!labelSelected(label, options.filter)) continue;
     selectedChecks++;
     const stubDir = stubs !== undefined ? makeStubDir(stubs) : defaultStubs;
@@ -386,21 +411,16 @@ function collectCases(): {
             .filter(([, body]) => body === null)
             .map(([name]) => name)
         : [];
-    const { golden, problems } = runCase(row, stubDir, maskTools);
-    cases[label] = golden;
-    if (problems.length > 0) {
-      invariantFailures++;
-      banner(`CASE CHECK FAILURE ${label}`);
-      for (const problem of problems) console.log(problem);
-    }
+    record(label, runCase(row, stubDir, maskTools));
   }
 
   for (const { fixture, cmd } of REPLAYS) {
     const label = `fixture=${fixture} cmd=${cmd.join(" ")} replay=2nd`;
-    if (label in cases) throw new Error(`duplicate replay label ${label}`);
+    if (labels.has(label)) throw new Error(`duplicate replay label ${label}`);
+    labels.add(label);
     if (!labelSelected(label, options.filter)) continue;
     selectedChecks++;
-    cases[label] = runReplayCase(fixture, cmd);
+    record(label, runReplayCase(fixture, cmd));
   }
 
   if (labelSelected("channel-invariants", options.filter)) {
@@ -422,15 +442,15 @@ if (options.updateGoldens) {
     console.error("GOLDEN_FILTER matched no cases");
     process.exit(2);
   }
-  if (options.filter !== undefined && Object.keys(selectedCases).length === 0) {
-    console.error("GOLDEN_FILTER selected no snapshot cases");
-    process.exit(2);
-  }
   if (invariantFailures > 0) {
     console.error(
       `\ngolden-mutation: ${invariantFailures} invariant failure(s); goldens not updated`,
     );
     process.exit(1);
+  }
+  if (options.filter !== undefined && Object.keys(selectedCases).length === 0) {
+    console.error("GOLDEN_FILTER selected no snapshot cases");
+    process.exit(2);
   }
 
   const cases =

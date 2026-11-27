@@ -113,6 +113,27 @@ export function snapshotTree(root: string, dir = root, acc: TreeSnapshot = {}): 
   return snapshotTreeWithTemporaryDirs(root, dir, acc, registeredTemporaryDirs());
 }
 
+/** A snapshot of a whole tree, or the problem that stopped it. A partial snapshot is never a result. */
+export type TreeSnapshotResult =
+  | { readonly kind: "snapshot"; readonly tree: TreeSnapshot }
+  | { readonly kind: "failed"; readonly problem: string };
+
+/**
+ * `snapshotTree(root)`, with an entry that cannot be read (a file without
+ * read permission, for example) as a problem line instead of a throw, so the
+ * driver can fail one case and go on with the matrix.
+ */
+export function snapshotTreeResult(root: string): TreeSnapshotResult {
+  try {
+    return { kind: "snapshot", tree: snapshotTree(root) };
+  } catch (error) {
+    return {
+      kind: "failed",
+      problem: `  the snapshot of HOME cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 function snapshotTreeWithTemporaryDirs(
   root: string,
   dir: string,

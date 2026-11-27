@@ -118,6 +118,11 @@ verify: `GOLDEN_FILTER='(' bun run golden:dryrun` must exit 2 with
   with the store that the environment of the omp child selects (`OMP_PROFILE`,
   else `PI_PROFILE`), so a profile case gives the default store and the named
   profile distinct rows, and a sync that drops the profile fails the case.
+- `golden-mutation.ts` snapshots each case with `goldenSnapshot.ts
+  snapshotTreeResult`. An entry that it cannot read, such as a deployed file
+  without read permission, fails that case with a problem line, and the
+  matrix goes on. The case then has no golden: the driver compares and records
+  no partial snapshot, and `--update-goldens` writes nothing.
 
 ## JSON Helpers
 

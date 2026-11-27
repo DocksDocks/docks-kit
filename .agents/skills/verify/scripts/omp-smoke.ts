@@ -145,6 +145,11 @@ const REAL_GATE_LOG = join(
   "verify-gate.jsonl",
 );
 const COMMANDS = ["hooks", "talk", "talk-ui"];
+/**
+ * The internal command of the registry scan child: `omp-smoke.ts registry-scan <JSON request>`. The smoke starts
+ * it for each registry scan (`scanInChild`); a user does not run it.
+ */
+const SCAN_COMMAND = "registry-scan";
 
 // ---------- JSON narrowing ----------
 
@@ -186,10 +191,11 @@ const { values: args, positionals } = parseArgs({
   strict: true,
 });
 const command = positionals[0] ?? null;
+const scanChild = command === SCAN_COMMAND && positionals.length === 2;
 if (
   args.help === true ||
-  positionals.length > 1 ||
-  (command !== null && !COMMANDS.includes(command))
+  (!scanChild &&
+    (positionals.length > 1 || (command !== null && !COMMANDS.includes(command))))
 ) {
   console.log("usage: omp-smoke.ts [hooks|talk|talk-ui] [--repo <path>] [--omp <binary>]");
   process.exit(args.help === true ? 0 : 2);
@@ -776,22 +782,20 @@ interface Attribution {
 }
 
 /**
- * The polls of one attribution. Each poll scans the private folder and then the default folder; the default
- * scan runs also when the private scan failed, so its diagnostic is not lost. `scan.running` tells the caller
- * whether a scan was still running when the deadline interrupted the polls.
+ * The polls of one attribution, in the scan child. Each poll scans the private folder and then the default
+ * folder; the default scan runs also when the private scan failed, so its diagnostic is not lost. Gives the
+ * attribution, or undefined when no poll before `stopAt` found a valid private entry or a problem.
  */
 const attributionPolls = Effect.fn("attributionPolls")(function* (
   privateFolder: string,
   defaultFolder: string,
   registration: Registration,
-  scan: { running: boolean },
+  stopAt: number,
 ) {
   const realCwd = realOrSame(registration.cwd);
   for (;;) {
-    scan.running = true;
     const found = yield* Effect.result(privateEntry(privateFolder, registration, realCwd));
     const leaked = yield* Effect.result(readRegistry(defaultFolder));
-    scan.running = false;
     const problems: string[] = [];
     if (Result.isFailure(leaked)) problems.push(leaked.failure);
     else {
@@ -807,61 +811,10 @@ const attributionPolls = Effect.fn("attributionPolls")(function* (
       const passed: Attribution = { problem: "", instanceId: found.success.instanceId };
       return passed;
     }
+    if (Date.now() >= stopAt) return undefined;
     yield* Effect.sleep(POLL_MS);
   }
 });
-
-/**
- * Runs a registry scan under one deadline of `REGISTRY_TIMEOUT_MS`. At the deadline the timeout interrupts the
- * scan that runs (on macOS that kills a running `ls -led` of the folder check), and a result that comes after
- * the deadline is not used. Gives the result, the problem of a failed setup of the trust checks, or undefined
- * at the deadline.
- */
-async function scanWithinDeadline<A>(
-  scan: Effect.Effect<A, never, TalkPosixSystem>,
-): Promise<{ readonly value: A } | { readonly problem: string } | undefined> {
-  const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
-  const outcome = await Effect.runPromise(
-    scan.pipe(
-      Effect.timeoutOption(REGISTRY_TIMEOUT_MS),
-      Effect.provide(TalkPosixSystem.layer),
-      Effect.result,
-    ),
-  );
-  if (Result.isFailure(outcome))
-    return {
-      problem: `the talk registry folders could not be read: ${describeFailure(outcome.failure)}`,
-    };
-  if (Option.isNone(outcome.success) || Date.now() > deadline) return undefined;
-  return { value: outcome.success.value };
-}
-
-/**
- * The registry attribution of one live omp session (H7). A default folder that holds an entry of the omp child
- * fails at once: a session that lost `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the
- * private folder holds a valid entry of the registration. An unsafe or unreadable folder, or a private entry
- * that talk peers reject, fails at once. Entries of other sessions do not count, because each check matches
- * the process id and the folder together. One deadline bounds the whole attribution (`scanWithinDeadline`).
- */
-async function registryAttribution(
-  privateFolder: string,
-  defaultFolder: string,
-  registration: Registration,
-): Promise<Attribution> {
-  const scan = { running: false };
-  const outcome = await scanWithinDeadline(
-    attributionPolls(privateFolder, defaultFolder, registration, scan),
-  );
-  if (outcome !== undefined)
-    return "value" in outcome ? outcome.value : { problem: outcome.problem, instanceId: undefined };
-  const within = `within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
-  return {
-    problem: scan.running
-      ? `the scans of the talk registry folders ${privateFolder} and ${defaultFolder} did not end ${within}`
-      : `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} ${within}`,
-    instanceId: undefined,
-  };
-}
 
 /** A registration that a mode attributed, and the label of its omp session. */
 interface Attributed {
@@ -870,19 +823,15 @@ interface Attributed {
 }
 
 /**
- * The final scan of the default folder, before the smoke ends a talk session that a mode attributed, while the
- * session is still live. One read of the default folder, under the deadline of `scanWithinDeadline`, matches
- * each registration by its process id and folder. A match fails with the diagnostic that names the default
- * folder, so a copy that a session writes there after its attribution passed still fails the run. The
- * registrations of one process after a session change match the same entries, so each process counts once.
+ * The final scan, in the scan child: one read of the default folder, and the match of each registration by its
+ * process id and folder. The registrations of one process after a session change match the same entries, so
+ * each process counts once. Gives the problem, or an empty text.
  */
-async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Promise<string> {
-  if (attributed.length === 0) return "";
-  const outcome = await scanWithinDeadline(Effect.result(readRegistry(run.defaultRegistry)));
-  if (outcome === undefined)
-    return `the final scan of the default talk registry folder ${run.defaultRegistry} did not end within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
-  if ("problem" in outcome) return outcome.problem;
-  const files = outcome.value;
+const finalScanProblem = Effect.fn("finalScanProblem")(function* (
+  defaultFolder: string,
+  attributed: readonly Attributed[],
+) {
+  const files = yield* Effect.result(readRegistry(defaultFolder));
   if (Result.isFailure(files)) return files.failure;
   const reported = new Set<string>();
   return attributed
@@ -891,10 +840,184 @@ async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Pr
       const key = `${registration.processId} ${realOrSame(registration.cwd)}`;
       if (names.length === 0 || reported.has(key)) return "";
       reported.add(key);
-      return `${label} before it ended: ${leakProblem(run.defaultRegistry, names, registration)}`;
+      return `${label} before it ended: ${leakProblem(defaultFolder, names, registration)}`;
     })
     .filter(Boolean)
     .join("; ");
+});
+
+/** A registration as JSON, for a request to the scan child. */
+function registrationJson(registration: Registration): JsonObject {
+  return {
+    processId: registration.processId,
+    cwd: registration.cwd,
+    sessionId: registration.sessionId ?? null,
+  };
+}
+
+/** The registration of a request to the scan child, or undefined when the JSON has no such shape. */
+function registrationOf(value: unknown): Registration | undefined {
+  if (!isObject(value)) return undefined;
+  const processId = value["processId"];
+  const cwd = text(value["cwd"]);
+  if (typeof processId !== "number" || cwd === undefined) return undefined;
+  return { processId, cwd, sessionId: text(value["sessionId"]) };
+}
+
+/**
+ * The scan of a request to the scan child, with its JSON result: `{ status: "done", problem, instanceId }` or
+ * `{ status: "none" }` for an attribution, and `{ status: "done", problem }` for a final scan. Undefined for a
+ * request without a known shape.
+ */
+function scanProgram(request: JsonObject): Effect.Effect<JsonObject, never, TalkPosixSystem> | undefined {
+  const defaultFolder = text(request["defaultFolder"]);
+  const stopAt = request["stopAt"];
+  if (defaultFolder === undefined || typeof stopAt !== "number") return undefined;
+  if (request["kind"] === "attribution") {
+    const privateFolder = text(request["privateFolder"]);
+    const registration = registrationOf(request["registration"]);
+    if (privateFolder === undefined || registration === undefined) return undefined;
+    return attributionPolls(privateFolder, defaultFolder, registration, stopAt).pipe(
+      Effect.map(
+        (attribution): JsonObject =>
+          attribution === undefined
+            ? { status: "none" }
+            : {
+                status: "done",
+                problem: attribution.problem,
+                instanceId: attribution.instanceId ?? null,
+              },
+      ),
+    );
+  }
+  if (request["kind"] !== "final") return undefined;
+  const attributed = objects(request["attributed"]).flatMap((item): Attributed[] => {
+    const label = text(item["label"]);
+    const registration = registrationOf(item["registration"]);
+    return label === undefined || registration === undefined ? [] : [{ label, registration }];
+  });
+  return finalScanProblem(defaultFolder, attributed).pipe(
+    Effect.map((problem): JsonObject => ({ status: "done", problem })),
+  );
+}
+
+/**
+ * The scan child (`SCAN_COMMAND`): runs the scan of the JSON request `source` with the trust checks of talk and
+ * prints one JSON result line. It only reads the registry folders. Gives the exit code.
+ */
+async function runScanChild(source: string): Promise<number> {
+  const request = parseJsonText(source);
+  const program = isObject(request) ? scanProgram(request) : undefined;
+  if (program === undefined) return 2;
+  const result = await Effect.runPromise(
+    program.pipe(Effect.provide(TalkPosixSystem.layer), Effect.result),
+  );
+  const answer: JsonObject = Result.isSuccess(result)
+    ? result.success
+    : {
+        status: "done",
+        problem: `the talk registry folders could not be read: ${describeFailure(result.failure)}`,
+        instanceId: null,
+      };
+  process.stdout.write(`${JSON.stringify(answer)}\n`);
+  return 0;
+}
+
+/** The scan child stops its polls this long before the deadline, so its result reaches the smoke in time. */
+const SCAN_REPORT_MARGIN_MS = 1_000;
+
+/**
+ * Runs one registry scan, entry matching included, in a scan child process (`SCAN_COMMAND`) under one deadline
+ * of `REGISTRY_TIMEOUT_MS`. A file system call that stalls blocks only the child: at the deadline the smoke kills
+ * it and gives up on it at once, also when the killed child does not exit yet. Gives the JSON result, or
+ * undefined when the child did not end by the deadline, exited with an error, or printed no JSON object.
+ */
+function scanInChild(request: JsonObject): Promise<JsonObject | undefined> {
+  const deadline = Date.now() + REGISTRY_TIMEOUT_MS;
+  const payload = JSON.stringify({ ...request, stopAt: deadline - SCAN_REPORT_MARGIN_MS });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), SCAN_COMMAND, payload], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  children.add(child);
+  const output: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+  const scanned = Promise.withResolvers<JsonObject | undefined>();
+  let settled = false;
+  const settle = (result: JsonObject | undefined): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    children.delete(child);
+    scanned.resolve(result);
+  };
+  // A child in an uninterruptible file system call ends only when the call returns, so the scan does not wait
+  // for its exit after the kill.
+  const timer = setTimeout(() => {
+    child.kill("SIGKILL");
+    settle(undefined);
+  }, REGISTRY_TIMEOUT_MS);
+  child.on("error", () => settle(undefined));
+  child.on("close", (code, signal) => {
+    if (code !== 0 || signal !== null || Date.now() > deadline) return settle(undefined);
+    const parsed = parseJsonText(Buffer.concat(output).toString("utf8"));
+    settle(isObject(parsed) ? parsed : undefined);
+  });
+  return scanned.promise;
+}
+
+/**
+ * The registry attribution of one live omp session (H7). A default folder that holds an entry of the omp child
+ * fails at once: a session that lost `DOCKS_KIT_TALK_DIR` registers only there. The check passes when the
+ * private folder holds a valid entry of the registration. An unsafe or unreadable folder, or a private entry
+ * that talk peers reject, fails at once. Entries of other sessions do not count, because each check matches
+ * the process id and the folder together. The polls run in one scan child under one deadline (`scanInChild`).
+ */
+async function registryAttribution(
+  privateFolder: string,
+  defaultFolder: string,
+  registration: Registration,
+): Promise<Attribution> {
+  const result = await scanInChild({
+    kind: "attribution",
+    privateFolder,
+    defaultFolder,
+    registration: registrationJson(registration),
+  });
+  const within = `within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
+  if (result?.["status"] === "none")
+    return {
+      problem: `no valid entry of ${describeRegistration(registration)} in the private registry folder ${privateFolder} ${within}`,
+      instanceId: undefined,
+    };
+  const problem = text(result?.["problem"]);
+  if (result?.["status"] !== "done" || problem === undefined)
+    return {
+      problem: `the scans of the talk registry folders ${privateFolder} and ${defaultFolder} did not end ${within}`,
+      instanceId: undefined,
+    };
+  return { problem, instanceId: text(result["instanceId"]) };
+}
+
+/**
+ * The final scan of the default folder for the registrations of one omp process, immediately before the smoke
+ * ends that process, while it is still live. It runs in a scan child under one deadline (`scanInChild`). A match
+ * fails with the diagnostic that names the default folder, so a copy that a session writes there after its
+ * attribution passed still fails the run.
+ */
+async function finalLeakProblem(run: Run, attributed: readonly Attributed[]): Promise<string> {
+  if (attributed.length === 0) return "";
+  const result = await scanInChild({
+    kind: "final",
+    defaultFolder: run.defaultRegistry,
+    attributed: attributed.map(({ label, registration }) => ({
+      label,
+      registration: registrationJson(registration),
+    })),
+  });
+  const problem = text(result?.["problem"]);
+  return result?.["status"] === "done" && problem !== undefined
+    ? problem
+    : `the final scan of the default talk registry folder ${run.defaultRegistry} did not end within ${REGISTRY_TIMEOUT_MS / 1_000} s`;
 }
 
 /**
@@ -2295,19 +2418,19 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
   let peer: RpcPeer | null = null;
   let peerResult: OmpResult | null = null;
   let senderRun: Promise<OmpResult> | null = null;
-  // The registrations that the mode attributed, and the problems of the `registry` line.
-  const attributed: Attributed[] = [];
+  // The registrations that the mode attributed for each omp process, and the problems of the `registry` line.
+  const peerAttributed: Attributed[] = [];
+  const senderAttributed: Attributed[] = [];
   const registryProblems: string[] = [];
   const reportRegistry = (): void => {
     results.set(REGISTRY_CHECK, registryProblems.filter(Boolean).join("; "));
   };
-  let finalScanned = false;
-  // The final scan of the default folder runs once, after the registry check started and before the smoke ends
-  // the first omp session, so both sessions are still live.
-  const finalScan = async (): Promise<void> => {
-    if (finalScanned || !results.has(REGISTRY_CHECK)) return;
-    finalScanned = true;
-    registryProblems.push(await finalLeakProblem(run, attributed));
+  // The final scan of the default folder for one omp process, immediately before the smoke ends that process.
+  // Each scan adds its problem, so a later scan never hides an earlier one.
+  const finalScan = async (attributed: readonly Attributed[]): Promise<void> => {
+    const problem = await finalLeakProblem(run, attributed);
+    if (!problem) return;
+    registryProblems.push(problem);
     reportRegistry();
   };
   try {
@@ -2320,7 +2443,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     peer = rpc;
     const peerRegistry = sessionAttribution(run, "peer", rpc.pid, run.workDir);
     if (rpc.pid !== undefined)
-      attributed.push({ label: "peer", registration: { processId: rpc.pid, cwd: run.workDir } });
+      peerAttributed.push({ label: "peer", registration: { processId: rpc.pid, cwd: run.workDir } });
     const peerState = async (): Promise<JsonObject> => {
       const data = await rpc.send({ type: "get_state" });
       return isObject(data) ? data : {};
@@ -2436,7 +2559,10 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         onSpawn: (pid) => {
           senderRegistry = sessionAttribution(run, "sender", pid, run.workDir);
           if (pid !== undefined)
-            attributed.push({ label: "sender", registration: { processId: pid, cwd: run.workDir } });
+            senderAttributed.push({
+              label: "sender",
+              registration: { processId: pid, cwd: run.workDir },
+            });
         },
       },
     );
@@ -2549,7 +2675,7 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
         sessionId,
       );
       if (rpc.pid !== undefined)
-        attributed.push({
+        peerAttributed.push({
           label: `peer after ${prefix}`,
           registration: { processId: rpc.pid, cwd: run.workDir, sessionId },
         });
@@ -2618,8 +2744,8 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     );
 
     step = "closed-peer-not-live";
-    // Both omp processes are still live.
-    await finalScan();
+    // The smoke ends the peer here; the sender stays live until the end of the mode.
+    await finalScan(peerAttributed);
     peerResult = await rpc.close();
     const closed = await sender.call(TALK_TOOL, {
       action: "send",
@@ -2633,13 +2759,15 @@ async function talkMode(): Promise<{ lines: string[]; registry: string | null }>
     results.set(step, error instanceof Error ? error.message : String(error));
   }
 
-  // On a failure, the final scan runs here, before the smoke ends the sessions.
-  await finalScan();
   // The sender ends after its next turn, and a slow peer turn that still waits ends; a sender that still
-  // waits in a tool call is stopped.
+  // waits in a tool call is stopped. After a failed step, the peer ends here too.
+  await finalScan(senderAttributed);
   sender.finish();
   peerModel.release();
-  if (peer !== null && peerResult === null) peerResult = await peer.close();
+  if (peer !== null && peerResult === null) {
+    await finalScan(peerAttributed);
+    peerResult = await peer.close();
+  }
   const senderResult =
     senderRun === null
       ? null
@@ -3353,15 +3481,14 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
     pass();
   };
 
-  // The registrations that the mode attributed. The final scan of the default folder runs once, after the
-  // registry check, before the smoke ends the first omp session, so both sessions are still live.
-  const attributed: Attributed[] = [];
-  let finalScanned = false;
-  const finalScan = async (): Promise<void> => {
-    if (finalScanned || !results.has(REGISTRY_CHECK)) return;
-    finalScanned = true;
+  // The registrations that the mode attributed for each omp process. The final scan of the default folder for
+  // one process runs immediately before the smoke ends that process; each scan adds its problem.
+  const terminalAttributed: Attributed[] = [];
+  const peerAttributed: Attributed[] = [];
+  const finalScan = async (attributed: readonly Attributed[]): Promise<void> => {
     const problem = await finalLeakProblem(run, attributed);
-    results.set(REGISTRY_CHECK, [results.get(REGISTRY_CHECK), problem].filter(Boolean).join("; "));
+    if (problem)
+      results.set(REGISTRY_CHECK, [results.get(REGISTRY_CHECK), problem].filter(Boolean).join("; "));
   };
   try {
     const screen = new TerminalOmp(
@@ -3381,9 +3508,12 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
         env,
       );
       // Both omp processes are live: the TUI omp shows its footer, and the peer waits for RPC commands.
-      attributed.push({ label: "TUI", registration: { processId: screen.pid, cwd: run.workDir } });
+      terminalAttributed.push({
+        label: "TUI",
+        registration: { processId: screen.pid, cwd: run.workDir },
+      });
       if (peer.pid !== undefined)
-        attributed.push({ label: "peer", registration: { processId: peer.pid, cwd: run.workDir } });
+        peerAttributed.push({ label: "peer", registration: { processId: peer.pid, cwd: run.workDir } });
       results.set(
         REGISTRY_CHECK,
         await attributionProblem([
@@ -3393,15 +3523,18 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
       );
       await currentFlow(screen, peer);
     }
-    await finalScan();
+    await finalScan(terminalAttributed);
     terminalResult = await screen.close();
   } catch (error) {
     results.set(step, error instanceof Error ? error.message : String(error));
   }
 
-  // On a failure, the final scan runs here, before the smoke ends the sessions.
-  await finalScan();
-  if (terminal !== null && terminalResult === null) terminalResult = await terminal.close();
+  if (terminal !== null && terminalResult === null) {
+    await finalScan(terminalAttributed);
+    terminalResult = await terminal.close();
+  }
+  // The peer stays live while the TUI omp closes, so its final scan comes after that.
+  if (peer !== null) await finalScan(peerAttributed);
   const peerResult = peer === null ? null : await peer.close();
   const sessionFailures: string[] = [];
   const sessions: Array<readonly [string, OmpResult | null]> = [["TUI", terminalResult]];
@@ -3431,6 +3564,9 @@ async function talkUiMode(): Promise<{ lines: string[]; registry: string | null 
   results.set("real-state", realStateChanges(realBefore).join("; "));
   return { lines: lines(), registry };
 }
+
+// The registry scan child runs one scan, prints its result, and exits; it makes no scratch folder.
+if (scanChild) process.exit(await runScanChild(positionals[1] ?? ""));
 
 let exitCode = 1;
 try {
