@@ -1,27 +1,31 @@
-import { Predicate } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { literal } from "../../../talk/tool/attachments";
-import type { Target } from "../../../talk/transport/request";
 import {
-  type FlowServices,
-  type FlowSlot,
-  type FlowUi,
-  HANDOVER_NOT_READY,
-  type ListingAnswer,
-  type SendAnswer,
-  type TalkCommand,
-  type TargetAnswer,
-  makeFlowSlot,
-  parseTalkArgs,
-  talkCompletions,
-} from "../../../talk/ui/command";
-import { type HostModuleLoader, type HostUi, probeHost } from "../../../talk/ui/host";
+  FULL_SCREEN,
+  ID_A,
+  ID_B,
+  ID_C,
+  codeOf,
+  composeTo,
+  confirmTo,
+  fire,
+  flush,
+  harness,
+  itemsOf,
+  key,
+  linesOf,
+  press,
+  prop,
+  row,
+  termOf,
+  typeCode,
+} from "../../lib/talkFlowHost";
+import { literal } from "../../../talk/tool/attachments";
+import { type ListingAnswer, parseTalkArgs, talkCompletions } from "../../../talk/ui/command";
 import {
   CONFIRM_TOO_SMALL,
   INSTANCE_ID_LENGTH,
   LIST_TOO_SMALL,
-  type ListRow,
   PICKER_FIXED_ROWS,
   PICKER_LABEL_CHROME,
   PICKER_ROW_LIMIT,
@@ -29,301 +33,8 @@ import {
   listLayout,
 } from "../../../talk/ui/views";
 
-// The `/talk` flows of plan #251 G2 and G3 against a fake TUI host: a fake
-// `ctx.ui` that mounts each view and records every call, fake services in
-// place of the transport, and a `jsx` that records each node.
-
-// ── Fake host modules ──
-
-/** One node that the fake `jsx` built: its kind and its props, as given. */
-interface FakeNode {
-  readonly kind: string;
-  readonly props: Readonly<Record<string, unknown>>;
-}
-
-const isFakeNode = (value: unknown): value is FakeNode =>
-  Predicate.hasProperty(value, "kind") &&
-  Predicate.isString(value.kind) &&
-  Predicate.hasProperty(value, "props") &&
-  Predicate.isObject(value.props);
-
-/** A signal without reactivity: tests read each accessor again after each step. */
-const fakeSignal = (initial: unknown): unknown => {
-  let value = initial;
-  return Object.assign(() => value, {
-    set: (next: unknown) => {
-      value = next;
-    },
-    update: (fn: (current: unknown) => unknown) => {
-      value = fn(value);
-    },
-    peek: () => value,
-  });
-};
-
-const fakeModules: HostModuleLoader = {
-  tui: async () => ({
-    jsx: (kind: unknown, props: Readonly<Record<string, unknown>>): FakeNode => ({
-      kind: String(kind),
-      props,
-    }),
-    signal: fakeSignal,
-    isUiNode: isFakeNode,
-  }),
-  width: async () => ({
-    visibleWidth: (text: string) => [...text].length,
-    truncate: (text: string, width: number) => [...text].slice(0, width).join(""),
-    wrap: (text: string) => [text],
-  }),
-};
-
-const loadUi = async (): Promise<HostUi> => {
-  const probe = await probeHost(fakeModules);
-  if (probe._tag !== "Ready") throw new Error(`fake host is missing ${probe.missing.join(", ")}`);
-  return probe.ui;
-};
-
-// ── Node access ──
-
-/** A prop as the host reads it: an accessor gives its current value. */
-const prop = (node: FakeNode, name: string): unknown => {
-  const value = node.props[name];
-  return Predicate.isFunction(value) ? Reflect.apply(value, undefined, []) : value;
-};
-
-/** Calls the handler `name` of a node, as the host does. */
-const fire = (node: FakeNode, name: string, ...args: ReadonlyArray<unknown>): unknown => {
-  const handler = node.props[name];
-  if (!Predicate.isFunction(handler)) throw new Error(`no ${name} on ${node.kind}`);
-  return Reflect.apply(handler, undefined, args);
-};
-
-type KeyKind = "press" | "repeat" | "release";
-
-const key = (id: string, kind: KeyKind = "press", afterPaste = false): object => ({
-  id,
-  kind,
-  raw: id,
-  ...(id.length === 1 ? { text: id } : {}),
-  ...(afterPaste ? { afterPaste } : {}),
-});
-
-const press = (node: FakeNode, id: string, kind: KeyKind = "press"): unknown =>
-  fire(node, "onKey", key(id, kind));
-
-interface Item {
-  readonly id: string;
-  readonly label: string;
-  readonly detail: string;
-}
-
-const isItem = (value: unknown): value is Item =>
-  Predicate.hasProperty(value, "id") &&
-  Predicate.isString(value.id) &&
-  Predicate.hasProperty(value, "label") &&
-  Predicate.isString(value.label) &&
-  Predicate.hasProperty(value, "detail") &&
-  Predicate.isString(value.detail);
-
-const itemsOf = (node: FakeNode): ReadonlyArray<Item> => {
-  const items = prop(node, "items");
-  if (!Array.isArray(items) || !items.every(isItem)) throw new Error("picker without items");
-  return items;
-};
-
-const termOf = (node: FakeNode): Readonly<Record<string, unknown>> => {
-  const term = prop(node, "term");
-  if (!Predicate.isObject(term)) throw new Error("picker without term");
-  return Object.fromEntries(Object.entries(term));
-};
-
-/** The text of a `text` node: its `text` prop, or its spans joined. */
-const textOf = (node: unknown): string => {
-  if (!isFakeNode(node)) throw new Error("not a node");
-  const text = prop(node, "text");
-  if (Predicate.isString(text)) return text;
-  const spans = prop(node, "spans");
-  if (Array.isArray(spans))
-    return spans
-      .map((span: unknown) =>
-        Predicate.hasProperty(span, "t") && Predicate.isString(span.t) ? span.t : "",
-      )
-      .join("");
-  throw new Error("text node without text");
-};
-
-const linesOf = (node: FakeNode): ReadonlyArray<string> => {
-  const children = prop(node, "children");
-  if (!Array.isArray(children)) throw new Error(`${node.kind} without children`);
-  return children.map(textOf);
-};
-
-const CODE_LINE = /^Send to ([0-9a-f]{16}): type ([a-z])([a-z])$/u;
-
-/** The instance id and the code of a confirm view's first line. */
-const codeOf = (node: FakeNode): { readonly instanceId: string; readonly code: string } => {
-  const match = CODE_LINE.exec(linesOf(node)[0] ?? "");
-  if (match === null) throw new Error(`no code line in ${JSON.stringify(linesOf(node))}`);
-  const [, instanceId = "", first = "", second = ""] = match;
-  return { instanceId, code: `${first}${second}` };
-};
-
-// ── Fake ctx.ui ──
-
-interface View {
-  readonly node: FakeNode;
-  readonly options: unknown;
-  closed: boolean;
-  result: unknown;
-}
-
-const FULL_SCREEN = { overlay: true, fullscreen: true };
-
-/** A fake TUI `ctx.ui`: it mounts each view at once and records each call by method name. */
-class FakeTui {
-  size = { columns: 100, rows: 30 };
-  readonly views: Array<View> = [];
-  readonly calls: Array<string> = [];
-  readonly notices: Array<{ readonly text: string; readonly level: string }> = [];
-  readonly ui: FlowUi = {
-    custom: (factory, options) => {
-      this.calls.push("custom");
-      const { promise, resolve } = Promise.withResolvers<unknown>();
-      const state = { closed: false, result: undefined as unknown };
-      const node = factory({ size: () => this.size }, {}, {}, (value) => {
-        if (state.closed) throw new Error("done called twice");
-        state.closed = true;
-        state.result = value;
-        resolve(value);
-      });
-      if (!isFakeNode(node)) throw new Error("the factory gave no node");
-      const view: View = {
-        node,
-        options,
-        get closed() {
-          return state.closed;
-        },
-        get result() {
-          return state.result;
-        },
-      };
-      this.views.push(view);
-      return promise;
-    },
-    notify: (text, level) => {
-      this.calls.push("notify");
-      this.notices.push({ text, level });
-    },
-  };
-
-  /** The last view; it must be open. */
-  get top(): View {
-    const view = this.views.at(-1);
-    if (view === undefined || view.closed) throw new Error("no open view");
-    return view;
-  }
-}
-
-// ── Fake services ──
-
-const ID_A = "aaaaaaaaaaaaaaa1";
-const ID_B = "bbbbbbbbbbbbbbb2";
-const ID_C = "ccccccccccccccc3";
-
-const row = (instanceId: string, name: string, extra: Partial<ListRow> = {}): ListRow => ({
-  instanceId,
-  sessionId: `session-${name}-0001`,
-  name,
-  cwd: `/work/${name}`,
-  own: false,
-  probe: "ok",
-  ...extra,
-});
-
-class FakeServices implements FlowServices {
-  session = "s-1";
-  rows: ReadonlyArray<ListRow> = [row(ID_A, "self", { own: true }), row(ID_B, "beta")];
-  listing: Promise<ListingAnswer> | undefined;
-  /** Set: the listing rejects with it, as a defect of the transport runtime. */
-  listError: Error | undefined;
-  target: TargetAnswer = {
-    _tag: "Failed",
-    text: "talk: no listed session matches `x` (not-found).",
-  };
-  readonly targets: Array<string> = [];
-  readonly sends: Array<{ readonly pair: Target; readonly text: string }> = [];
-  answer: SendAnswer = { ok: true, text: "Delivered: the message is in the session." };
-
-  readonly sessionId = (): string => this.session;
-  readonly list = (): Promise<ListingAnswer> =>
-    this.listError === undefined
-      ? (this.listing ?? Promise.resolve({ _tag: "Listed", rows: this.rows }))
-      : Promise.reject(this.listError);
-  readonly resolve = async (target: string): Promise<TargetAnswer> => {
-    this.targets.push(target);
-    return this.target;
-  };
-  readonly send = async (pair: Target, text: string): Promise<SendAnswer> => {
-    this.sends.push({ pair, text });
-    return this.answer;
-  };
-}
-
-/** Lets every pending promise step of a flow run. */
-const flush = (): Promise<void> => {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setImmediate(resolve);
-  return promise;
-};
-
-interface Harness {
-  readonly tui: FakeTui;
-  readonly services: FakeServices;
-  readonly run: (command?: TalkCommand) => Promise<void>;
-  readonly slot: FlowSlot;
-}
-
-const harness = async (): Promise<Harness> => {
-  const tui = new FakeTui();
-  const services = new FakeServices();
-  const slot = makeFlowSlot(await loadUi());
-  return {
-    tui,
-    services,
-    slot,
-    run: async (command = { _tag: "List" }) => {
-      const flow = slot.run(tui.ui, services, command);
-      await flush();
-      return flow;
-    },
-  };
-};
-
-/** Activates the item of `instanceId` in the open list and types `text` in the compose view. */
-const composeTo = async (h: Harness, instanceId: string, text: string): Promise<FakeNode> => {
-  const list = h.tui.top.node;
-  const item = itemsOf(list).find((candidate) => candidate.label.startsWith(instanceId));
-  if (item === undefined) throw new Error(`no item of ${instanceId}`);
-  fire(list, "onSelect", item.id);
-  fire(list, "onActivate", item.id);
-  await flush();
-  const compose = h.tui.top.node;
-  expect(compose.kind).toBe("input");
-  fire(compose, "onEdit", { from: 0, to: 0, text, cursor: text.length, len: 0 });
-  return compose;
-};
-
-/** Composes `text` to `instanceId` and confirms it with enter; returns the confirm node. */
-const confirmTo = async (h: Harness, instanceId: string, text: string): Promise<FakeNode> => {
-  const compose = await composeTo(h, instanceId, text);
-  expect(press(compose, "enter")).toBe(true);
-  await flush();
-  return h.tui.top.node;
-};
-
-const typeCode = (node: FakeNode, code: string): void => {
-  for (const letter of code) press(node, letter);
-};
+// The `/talk` flows of plan #251 G2 and G3 against the fake TUI host of
+// `cli/test/lib/talkFlowHost.ts`. The handover flows are in `handover.test.ts`.
 
 // ── Tests ──
 
@@ -485,20 +196,6 @@ describe("list view (G3)", () => {
     expect(h.tui.calls).toEqual(["custom"]);
   });
 
-  it("takes h for handover of the selected row, which this version does not have yet", async () => {
-    const h = await harness();
-    const flow = h.run();
-    await flush();
-    expect(press(h.tui.top.node, "h")).toBe(true);
-    await flow;
-    expect(h.tui.views.at(-1)?.result).toMatchObject({
-      _tag: "Handover",
-      row: { instanceId: ID_B },
-    });
-    expect(h.tui.notices).toEqual([{ text: HANDOVER_NOT_READY, level: "warning" }]);
-    expect(h.services.sends).toEqual([]);
-  });
-
   it("sets term.maxRows from the overlay height after the fixed rows, also after a resize", async () => {
     const h = await harness();
     h.tui.size = { columns: 100, rows: 40 };
@@ -563,7 +260,7 @@ describe("list view (G3)", () => {
     typeCode(confirm, code);
     await flow;
     expect(h.services.sends).toEqual([
-      { pair: { instanceId: ID_C, sessionId: "session-shared" }, text: "hello" },
+      { pair: { instanceId: ID_C, sessionId: "session-shared" }, text: "hello", kind: "message" },
     ]);
   });
 
@@ -606,7 +303,11 @@ describe("compose and confirm views (G3)", () => {
     typeCode(confirm, code);
     await flow;
     expect(h.services.sends).toEqual([
-      { pair: { instanceId: ID_B, sessionId: "session-beta-0001" }, text: "hello there" },
+      {
+        pair: { instanceId: ID_B, sessionId: "session-beta-0001" },
+        text: "hello there",
+        kind: "message",
+      },
     ]);
     expect(h.tui.notices).toEqual([{ text: h.services.answer.text, level: "info" }]);
     expect(h.tui.calls).toEqual(["custom", "custom", "custom", "notify"]);
@@ -715,7 +416,11 @@ describe("compose and confirm views (G3)", () => {
     typeCode(secondConfirm, secondCode);
     await flow;
     expect(h.services.sends).toEqual([
-      { pair: { instanceId: ID_B, sessionId: "session-beta-0001" }, text: "keep me" },
+      {
+        pair: { instanceId: ID_B, sessionId: "session-beta-0001" },
+        text: "keep me",
+        kind: "message",
+      },
     ]);
   });
 
@@ -758,7 +463,7 @@ describe("compose and confirm views (G3)", () => {
   });
 });
 
-describe("/talk <target> and /talk handover (G2)", () => {
+describe("/talk <target> (G2)", () => {
   it("resolves the target before any view and composes for that pair", async () => {
     const h = await harness();
     h.services.target = {
@@ -777,7 +482,7 @@ describe("/talk <target> and /talk handover (G2)", () => {
     typeCode(confirm, codeOf(confirm).code);
     await flow;
     expect(h.services.sends).toEqual([
-      { pair: { instanceId: ID_C, sessionId: "session-gamma" }, text: "hi" },
+      { pair: { instanceId: ID_C, sessionId: "session-gamma" }, text: "hi", kind: "message" },
     ]);
   });
 
@@ -789,16 +494,6 @@ describe("/talk <target> and /talk handover (G2)", () => {
       { text: h.services.target._tag === "Failed" ? h.services.target.text : "", level: "error" },
     ]);
   });
-
-  it.each([undefined, "beta"])(
-    "answers /talk handover %s with the notice that handover is not here yet",
-    async (target) => {
-      const h = await harness();
-      await h.run({ _tag: "Handover", target });
-      expect(h.tui.calls).toEqual(["notify"]);
-      expect(h.tui.notices).toEqual([{ text: HANDOVER_NOT_READY, level: "warning" }]);
-    },
-  );
 });
 
 describe("flow slot (G3)", () => {

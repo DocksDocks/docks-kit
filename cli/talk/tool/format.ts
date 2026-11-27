@@ -1,8 +1,10 @@
 /**
  * The text that a receiving session shows for a talk message (#250 E9): the
  * From line, the reply hint of an ask or the ask that a reply answers, the
- * text, and then each attachment as a labeled block. With the text comes the
- * range of the sender's text in it, for the message card (#251 G5).
+ * text, and then each attachment as a labeled block. A handover starts with
+ * the handover line instead of the From line, so the receiver acts on the
+ * summary (#251 G6). With the text comes the range of the sender's text in
+ * it, for the message card (#251 G5).
  */
 import { formatAttachment, literal } from "./attachments";
 import type { DeliverBody, ReplyBody } from "./protocol";
@@ -28,8 +30,14 @@ export interface FormattedMessage {
 
 type MessageParts = Pick<DeliverBody, "from" | "text" | "attachments" | "sentAt">;
 
-const formatMessage = (message: MessageParts, note: string | undefined): FormattedMessage => {
-  const head = `**From ${literal(message.from.name)}** (${literal(message.from.cwd)})`;
+const fromLine = (from: DeliverBody["from"]): string =>
+  `**From ${literal(from.name)}** (${literal(from.cwd)})`;
+
+const formatMessage = (
+  message: MessageParts,
+  head: string,
+  note: string | undefined,
+): FormattedMessage => {
   const lead = note === undefined ? `${head}\n` : `${head}\n${note}\n`;
   const blocks = message.attachments.map((attachment) =>
     formatAttachment(attachment, message.sentAt),
@@ -38,10 +46,18 @@ const formatMessage = (message: MessageParts, note: string | undefined): Formatt
   return { content, body: { start: lead.length, end: lead.length + message.text.length } };
 };
 
-/** The text of a send, or of an ask with its reply hint. */
-export const formatDelivery = (body: DeliverBody): FormattedMessage =>
-  formatMessage(body, body.ask === undefined ? undefined : replyHint(body.messageId));
+/** The text of a send, of an ask with its reply hint, or of a handover. */
+export const formatDelivery = (body: DeliverBody): FormattedMessage => {
+  if (body.ask !== undefined)
+    return formatMessage(body, fromLine(body.from), replyHint(body.messageId));
+  if (body.kind === "handover") {
+    // The handover line names the sender and tells the receiver to go on with the work (G6).
+    const head = `**Handover from ${literal(body.from.name)}** (${literal(body.from.cwd)}): continue this work.`;
+    return formatMessage(body, head, undefined);
+  }
+  return formatMessage(body, fromLine(body.from), undefined);
+};
 
 /** The text of a reply that reaches the session as a message (E6). */
 export const formatReply = (body: ReplyBody): FormattedMessage =>
-  formatMessage(body, replyNote(body.askId));
+  formatMessage(body, fromLine(body.from), replyNote(body.askId));

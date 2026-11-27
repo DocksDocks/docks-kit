@@ -178,6 +178,11 @@ const talkMessage = (
       const formatted = formatReply(body);
       return messageOf(formatted.content, detailsFor(kind, body, formatted, ASK_ID));
     }
+    case "handover": {
+      const body = deliverBody({ kind: "handover", text, attachments });
+      const formatted = formatDelivery(body);
+      return messageOf(formatted.content, detailsFor(kind, body, formatted, undefined));
+    }
   }
 };
 
@@ -194,6 +199,7 @@ describe("message card (#251 G5)", () => {
     ["message", []],
     ["ask", [replyHint(ASK_ID)]],
     ["reply", [`Reply to ask ${ASK_ID}.`]],
+    ["handover", []],
   ] as const)(
     "draws a %s card: header, its note, and the first 3 body lines with the rest counted",
     async (kind, note) => {
@@ -207,6 +213,7 @@ describe("message card (#251 G5)", () => {
     ["message", []],
     ["ask", [replyHint(ASK_ID)]],
     ["reply", [`Reply to ask ${ASK_ID}.`]],
+    ["handover", []],
   ] as const)("draws every body line of an expanded %s card", async (kind, note) => {
     const card = cardOf(await render(talkMessage(kind, FIVE_LINES), true));
     expect(card.head).toBe(header(kind));

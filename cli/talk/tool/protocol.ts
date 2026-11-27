@@ -43,12 +43,22 @@ export const SentAt = Schema.Int.check(
 );
 
 /**
- * The kinds of a talk message in a transcript (#251 G5): a send, an ask, or
- * a reply that reaches the session as a message. A new kind goes here.
+ * The kinds of a talk message in a transcript (#251 G5, G6): a send, an ask,
+ * a reply that reaches the session as a message, or a handover. A new kind
+ * goes here.
  */
-export const MESSAGE_KINDS = ["message", "ask", "reply"] as const;
+export const MESSAGE_KINDS = ["message", "ask", "reply", "handover"] as const;
 export const MessageKind = Schema.Literals(MESSAGE_KINDS);
 export type MessageKind = typeof MessageKind.Type;
+
+/**
+ * The `kind` of a deliver body without an ask (#251 G6): a plain message or
+ * a handover. The `ask` field, not `kind`, makes a message an ask. A body
+ * without `kind`, such as a body of #250, is a plain message.
+ */
+export const DELIVER_KINDS = ["message", "handover"] as const;
+export const DeliverKind = Schema.Literals(DELIVER_KINDS);
+export type DeliverKind = typeof DeliverKind.Type;
 
 /** The ask part of a deliver body: the origin flag and the reply address (E6). */
 export const AskRoute = Schema.Struct({ origin: Origin, replyTo: RegistrationPair });
@@ -62,8 +72,19 @@ const messageFields = {
   noWake: Schema.Boolean,
 };
 
-/** The body of a `deliver` request. With `ask`, the message is an ask whose ask id is `messageId`. */
-export const DeliverBody = Schema.Struct({ ...messageFields, ask: Schema.optionalKey(AskRoute) });
+/**
+ * The body of a `deliver` request. With `ask`, the message is an ask whose
+ * ask id is `messageId`; an ask is never a handover.
+ */
+export const DeliverBody = Schema.Struct({
+  ...messageFields,
+  kind: Schema.optionalKey(DeliverKind),
+  ask: Schema.optionalKey(AskRoute),
+}).check(
+  Schema.makeFilter((body) =>
+    body.ask !== undefined && body.kind === "handover" ? "an ask cannot be a handover" : undefined,
+  ),
+);
 export type DeliverBody = typeof DeliverBody.Type;
 
 /**

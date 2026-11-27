@@ -100,6 +100,14 @@ describe("deliver body", () => {
     expect(plain.ask).toBeUndefined();
   });
 
+  it("round-trips a handover and keeps a #250 body without kind as it is (#251 G6)", () => {
+    const handover: DeliverBody = { ...send, kind: "handover" };
+    expect(run(decodeDeliverBody(overTheWire(run(encodeDeliverBody(handover)))))).toEqual(handover);
+    const plain = run(decodeDeliverBody(overTheWire(run(encodeDeliverBody(send)))));
+    expect(plain).toEqual(send);
+    expect("kind" in plain).toBe(false);
+  });
+
   it.each([
     [
       "a message id that is not 16 lowercase hex digits",
@@ -129,6 +137,9 @@ describe("deliver body", () => {
     ["a send time that is not an integer", { ...send, sentAt: 1.5 }],
     ["a missing noWake flag", { ...send, noWake: undefined }],
     ["text that is not a string", { ...send, text: 42 }],
+    ["an unknown message kind", { ...send, kind: "urgent" }],
+    ["the kind ask, which only the ask route gives", { ...send, kind: "ask" }],
+    ["an ask that is also a handover", { ...ask, kind: "handover" }],
   ])("rejects %s", (_label, body) => {
     const error = invalid(decodeDeliverBody(overTheWire(body as Schema.Json)));
     expect(error._tag).toBe("TalkBodyInvalid");

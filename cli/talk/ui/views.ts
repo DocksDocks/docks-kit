@@ -2,10 +2,12 @@
  * The views of `/talk` (plan #251 G3): the session list, the compose view,
  * and the confirm view. Each builder returns the root node of one
  * `ctx.ui.custom` view, built with the loaded `jsx` and `signal` of omp
- * (F6), and closes the view only through `done`.
+ * (F6), and closes the view only through `done`. The handover review view
+ * is in `handover.ts`.
  *
  * - The list is a `picker` root with `size: "screen"`, shown as a full-screen
- *   overlay. It selects a registration pair; it sends nothing.
+ *   overlay. It selects a registration pair; it sends nothing. Its mode sets
+ *   what Enter starts: compose, or handover (G2, G6).
  * - The compose view is an `input` root, so the field has the focus (F5).
  * - The confirm view is a full-screen `col` root. Its first line names the
  *   full instance id of the destination and a code of two letters; only the
@@ -40,6 +42,8 @@ export type SizeReader = () => ViewSize | undefined;
 export interface ViewKey {
   readonly id: string;
   readonly kind: "press" | "repeat" | "release";
+  /** The bytes of the key: `enter` comes from `\r`, or from `\n` for `ctrl+j` (F5). */
+  readonly raw?: string;
   /** The first key decoded from the same read right after a bracketed paste. */
   readonly afterPaste?: boolean;
 }
@@ -72,7 +76,7 @@ export const sizeReader =
   };
 
 /** The keys that close a view: `escape`, and the shortcut that opens the list (F2). */
-const CLOSE_KEY = "escape";
+export const CLOSE_KEY = "escape";
 export const TALK_SHORTCUT = "alt+t";
 
 // ── Destinations ──
@@ -132,7 +136,18 @@ export const listLayout = (size: ViewSize | undefined): ListLayout => {
 
 export const LIST_TOO_SMALL = "talk: make the pane larger to show the sessions.";
 const LIST_EMPTY = "No live talk sessions.";
-const LIST_HINT = "⏎ message · h handover · ⎋ close";
+
+/** What Enter (`activate`) starts in the list: compose, or handover (G2, G6). */
+export type ListMode = "message" | "handover";
+
+const LIST_TITLE: Record<ListMode, string> = {
+  message: "talk sessions",
+  handover: "talk: hand over to",
+};
+const LIST_HINT: Record<ListMode, string> = {
+  message: "⏎ message · h handover · ⎋ close",
+  handover: "⏎ hand over · ⎋ close",
+};
 
 /** How the list view ends. */
 export type ListChoice =
@@ -157,15 +172,16 @@ const rowDetail = (row: ListRow): string =>
 
 /**
  * The list view: a `picker` root with `size: "screen"`, one item per row
- * (G3). Enter (`activate`) chooses compose; `h` chooses handover; `escape`
- * and `alt+t` close. While no item row fits or the label cannot hold the
- * instance id, the picker shows only the request for a larger pane, and
- * neither `activate` nor `h` does anything.
+ * (G3). Enter (`activate`) chooses compose, or handover in the handover
+ * mode; `h` chooses handover; `escape` and `alt+t` close. While no item row
+ * fits or the label cannot hold the instance id, the picker shows only the
+ * request for a larger pane, and neither `activate` nor `h` does anything.
  */
 export const listView = (
   ui: HostUi,
   size: SizeReader,
   rows: ReadonlyArray<ListRow>,
+  mode: ListMode,
   done: (choice: ListChoice) => void,
 ): JSXNode => {
   const byId = new Map(rows.map((row) => [itemId(row), row]));
@@ -181,7 +197,7 @@ export const listView = (
   const chosen = (item: string | null): ListRow | undefined =>
     item === null || !layout().fits ? undefined : byId.get(item);
   return ui.jsx("picker", {
-    title: "talk sessions",
+    title: LIST_TITLE[mode],
     noun: "sessions",
     size: "screen",
     items: () => (layout().fits ? items : []),
@@ -189,14 +205,15 @@ export const listView = (
     empty: () => (layout().fits ? LIST_EMPTY : LIST_TOO_SMALL),
     term: () => {
       const { maxRows, fits } = layout();
-      return fits ? { maxRows, hint: LIST_HINT } : { maxRows, hint: null, title: null };
+      return fits ? { maxRows, hint: LIST_HINT[mode] } : { maxRows, hint: null, title: null };
     },
     onSelect: (item: string) => {
       if (byId.has(item)) selected.set(item);
     },
     onActivate: (item: string) => {
       const row = chosen(item);
-      if (row !== undefined) done({ _tag: "Compose", row });
+      if (row === undefined) return;
+      done(mode === "handover" ? { _tag: "Handover", row } : { _tag: "Compose", row });
     },
     onKey: (key: ViewKey): boolean => {
       if (key.kind === "release") return false;
@@ -217,8 +234,8 @@ export const listView = (
 
 // ── Compose view ──
 
-/** How the compose view ends. */
-export type ComposeChoice =
+/** How a text view ends: the compose view, or the handover review. */
+export type TextChoice =
   | { readonly _tag: "Confirm"; readonly text: string }
   | { readonly _tag: "Cancel" };
 
@@ -232,7 +249,7 @@ export const composeView = (
   ui: HostUi,
   destination: Destination,
   text: string,
-  done: (choice: ComposeChoice) => void,
+  done: (choice: TextChoice) => void,
 ): JSXNode => {
   const draft = ui.signal(text);
   const cursor = ui.signal(text.length);

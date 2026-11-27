@@ -1,36 +1,47 @@
 /**
- * The `/talk` command and its flows (plan #251 G1 to G3).
+ * The `/talk` command and its flows (plan #251 G1 to G3, G6).
  *
  * `/talk` opens the session list; `/talk <target>` opens the compose view
- * for the one pair that the target resolves to; `/talk handover` and
- * `/talk handover <target>` are the handover sub-command (G2). The `alt+t`
- * shortcut opens the list (G4).
+ * for the one pair that the target resolves to; `/talk handover <target>`
+ * starts handover to that pair, and `/talk handover` opens the list in
+ * handover mode (G2). `h` in the normal list starts handover to the selected
+ * row. The `alt+t` shortcut opens the list (G4).
  *
  * Each binding runs at most one flow at a time, tied to the session id of
  * the context that started it. A flow ends when another flow starts, when
  * the binding calls `end` (a session transition, `session_clear`, or
  * shutdown), and when the session id differs from the one it started in.
- * An ended flow closes its open view through the view's own `done`, mounts
- * no other view, and sends nothing. A flow calls only `ctx.ui.custom` and
- * `ctx.ui.notify` (#248 D9).
+ * An ended flow aborts its listing or side turn, closes its open view
+ * through the view's own `done`, mounts no other view, and sends nothing. A
+ * flow calls only `ctx.ui.custom` and `ctx.ui.notify` (#248 D9).
  *
  * This module runs no effect: the binding in `cli/talk/extension.ts` gives
- * each flow the listing, the resolver, and the pair send as promises.
+ * each flow the listing, the resolver, the pair send, and the side turn as
+ * promises.
  */
 import { Predicate } from "effect";
 
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 
 import { oneLine } from "../tool/attachments";
+import type { DeliverKind } from "../tool/protocol";
 import type { Target } from "../transport/request";
+import {
+  HANDOVER_NO_SIDE_TURN,
+  HANDOVER_STARTED,
+  type SideTurn,
+  requestDraft,
+  reviewView,
+} from "./handover";
 import type { HostUi } from "./host";
 import {
-  type ComposeChoice,
   type ConfirmChoice,
   type Destination,
   type ListChoice,
+  type ListMode,
   type ListRow,
   type SizeReader,
+  type TextChoice,
   composeView,
   confirmView,
   drawCode,
@@ -40,7 +51,7 @@ import {
 
 export const TALK_COMMAND = "talk";
 export const TALK_COMMAND_DESCRIPTION =
-  "Talk to other live omp sessions: /talk opens the list, /talk <session> composes a message";
+  "Talk to other live omp sessions: /talk opens the list, /talk <session> composes a message, /talk handover <session> hands over the work";
 export const TALK_SHORTCUT_DESCRIPTION = "Open the talk session list";
 
 /** The word that starts the handover sub-command (G2). */
@@ -49,10 +60,6 @@ export const HANDOVER_WORD = "handover";
 /** G1: the notice of `/talk` and `alt+t` outside the TUI. */
 export const VIEWS_NEED_TUI =
   "talk: the /talk views need an interactive omp session in a terminal or in Tern. The talk tool works in every mode.";
-
-/** Handover (G6) is not in this version; `/talk handover` and `h` in the list say so. */
-export const HANDOVER_NOT_READY =
-  "talk: handover is not available in this version of talk. Nothing was sent.";
 
 // ── Arguments (G2) ──
 
@@ -160,8 +167,10 @@ export interface FlowServices {
   readonly list: () => Promise<ListingAnswer>;
   /** The E8 resolver of a `/talk <target>` text. */
   readonly resolve: (target: string) => Promise<TargetAnswer>;
-  /** The send to one exact pair through the `instance` path (G3). */
-  readonly send: (pair: Target, text: string) => Promise<SendAnswer>;
+  /** The send to one exact pair through the `instance` path (G3), as a message or a handover (G6). */
+  readonly send: (pair: Target, text: string, kind: DeliverKind) => Promise<SendAnswer>;
+  /** `ctx.runEphemeralTurn` of the flow's context; undefined when the host has none (F7). */
+  readonly sideTurn: SideTurn | undefined;
 }
 
 // ── Flow slot (G3) ──
@@ -190,9 +199,6 @@ export const talkErrorText = (cause: unknown): string => {
 };
 
 const FULL_SCREEN = { overlay: true, fullscreen: true } as const;
-
-/** The message kind that the confirm view names. Step 5 adds `handover`. */
-const MESSAGE_KIND = "message";
 
 export interface FlowSlotOptions {
   /** Default: `drawCode` of `views.ts` with `crypto.randomInt`. */
@@ -268,44 +274,80 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     return choice;
   };
 
-  /** Compose, confirm, and send to one destination (G3). */
-  const composeAndSend = async (
+  /** A view that edits the text of one send: compose, or the handover review. */
+  type EditView = (size: SizeReader, text: string, done: (choice: TextChoice) => void) => JSXNode;
+
+  /**
+   * Edit, confirm, and send to one destination (G3, G6). `escape` in the
+   * confirm view returns to the edit view with the text kept.
+   */
+  const editConfirmSend = async (
     flow: Flow,
     flowUi: FlowUi,
     destination: Destination,
+    kind: DeliverKind,
+    first: string,
+    edit: EditView,
   ): Promise<void> => {
-    let text = "";
+    let text = first;
     for (;;) {
-      const composed = await mount<ComposeChoice>(
+      const edited = await mount<TextChoice>(
         flow,
         flowUi,
-        (_size, done) => composeView(ui, destination, text, done),
+        (size, done) => edit(size, text, done),
         { _tag: "Cancel" },
         undefined,
       );
-      if (composed._tag !== "Confirm") return;
-      text = composed.text;
+      if (edited._tag !== "Confirm") return;
+      text = edited.text;
       const code = nextCode(lastCode);
       lastCode = code;
       const confirmed = await mount<ConfirmChoice>(
         flow,
         flowUi,
-        (size, done) =>
-          confirmView(ui, size, destination, { kind: MESSAGE_KIND, text, code }, done),
+        (size, done) => confirmView(ui, size, destination, { kind, text, code }, done),
         { _tag: "Close" },
         FULL_SCREEN,
       );
       if (confirmed._tag === "Back") continue;
       if (confirmed._tag !== "Send" || !live(flow)) return;
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
-      const sent = await flow.services.send(pair, text);
+      const sent = await flow.services.send(pair, text, kind);
       if (sent.ok) flowUi.notify(sent.text, "info");
       else flowUi.notify(talkErrorText(sent.text), "error");
       return;
     }
   };
 
-  const listFlow = async (flow: Flow, flowUi: FlowUi): Promise<void> => {
+  /**
+   * G6: a side turn writes the draft with the flow's signal; the review, the
+   * confirm view, and the send follow. A flow that ended while the side turn
+   * ran mounts no review.
+   */
+  const handover = async (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> => {
+    const { sideTurn } = flow.services;
+    if (sideTurn === undefined) {
+      flowUi.notify(HANDOVER_NO_SIDE_TURN, "error");
+      return;
+    }
+    flowUi.notify(HANDOVER_STARTED, "info");
+    const draft = await untilEnded(flow, requestDraft(sideTurn, flow.controller.signal));
+    if (draft === undefined || !live(flow)) return;
+    if (draft._tag === "Failed") {
+      flowUi.notify(draft.text, "error");
+      return;
+    }
+    await editConfirmSend(flow, flowUi, destination, "handover", draft.text, (size, text, done) =>
+      reviewView(ui, size, text, done),
+    );
+  };
+
+  const compose = (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> =>
+    editConfirmSend(flow, flowUi, destination, "message", "", (_size, text, done) =>
+      composeView(ui, destination, text, done),
+    );
+
+  const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
     const answer = await untilEnded(flow, flow.services.list());
     if (answer === undefined || !live(flow)) return;
     if (answer._tag === "Failed") {
@@ -315,7 +357,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     const choice = await mount<ListChoice>(
       flow,
       flowUi,
-      (size, done) => listView(ui, size, answer.rows, done),
+      (size, done) => listView(ui, size, answer.rows, mode, done),
       { _tag: "Close" },
       FULL_SCREEN,
     );
@@ -323,30 +365,44 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       case "Close":
         return;
       case "Handover":
-        flowUi.notify(HANDOVER_NOT_READY, "warning");
+        await handover(flow, flowUi, choice.row);
         return;
       case "Compose":
-        await composeAndSend(flow, flowUi, choice.row);
+        await compose(flow, flowUi, choice.row);
         return;
     }
+  };
+
+  /** The one pair of a `/talk` target, resolved before any view opens (G2); undefined after a notice or an end. */
+  const resolveTarget = async (
+    flow: Flow,
+    flowUi: FlowUi,
+    target: string,
+  ): Promise<Destination | undefined> => {
+    const answer = await untilEnded(flow, flow.services.resolve(target));
+    if (answer === undefined || !live(flow)) return undefined;
+    if (answer._tag === "Resolved") return answer.destination;
+    flowUi.notify(talkErrorText(answer.text), "error");
+    return undefined;
   };
 
   const steps = async (flow: Flow, flowUi: FlowUi, command: TalkCommand): Promise<void> => {
     switch (command._tag) {
       case "List":
-        await listFlow(flow, flowUi);
+        await listFlow(flow, flowUi, "message");
         return;
-      case "Handover":
-        flowUi.notify(HANDOVER_NOT_READY, "warning");
-        return;
-      case "Compose": {
-        const answer = await untilEnded(flow, flow.services.resolve(command.target));
-        if (answer === undefined || !live(flow)) return;
-        if (answer._tag === "Failed") {
-          flowUi.notify(talkErrorText(answer.text), "error");
+      case "Handover": {
+        if (command.target === undefined) {
+          await listFlow(flow, flowUi, "handover");
           return;
         }
-        await composeAndSend(flow, flowUi, answer.destination);
+        const destination = await resolveTarget(flow, flowUi, command.target);
+        if (destination !== undefined) await handover(flow, flowUi, destination);
+        return;
+      }
+      case "Compose": {
+        const destination = await resolveTarget(flow, flowUi, command.target);
+        if (destination !== undefined) await compose(flow, flowUi, destination);
         return;
       }
     }

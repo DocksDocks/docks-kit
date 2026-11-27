@@ -22,7 +22,12 @@ export type SessionMode = "tui" | "rpc" | "print" | "json";
 export const TALK_DETAILS_VERSION = 1;
 
 /** Whether a message of each kind names an ask: an ask its own id, a reply the ask that it answers. */
-const NAMES_ASK: Record<MessageKind, boolean> = { message: false, ask: true, reply: true };
+const NAMES_ASK: Record<MessageKind, boolean> = {
+  message: false,
+  ask: true,
+  reply: true,
+  handover: false,
+};
 
 const Offset = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 

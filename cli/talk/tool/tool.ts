@@ -16,6 +16,7 @@ import {
   CANCEL_KIND,
   DELIVER_KIND,
   type DeliverBody,
+  type DeliverKind,
   DeliverResult,
   MessageId,
   REPLY_KIND,
@@ -523,11 +524,14 @@ export interface SendInput {
   readonly text: string;
   readonly attachments: NonNullable<TalkParams["attachments"]>;
   readonly noWake: boolean;
+  /** `handover` only from the `/talk` handover flow (#251 G6); the tool sends `message`. */
+  readonly kind: DeliverKind;
 }
 
 /**
  * The send to one resolved pair (E5): the `send` action and the `/talk`
- * views call it, so both give the same results, ids, and errors.
+ * views call it, so both give the same results, ids, and errors. A plain
+ * message leaves `kind` out, so its body is the body of #250.
  */
 export const sendTo = Effect.fnUntraced(function* (
   context: ToolContext,
@@ -542,6 +546,7 @@ export const sendTo = Effect.fnUntraced(function* (
     attachments: input.attachments,
     sentAt: context.clock.now(),
     noWake: input.noWake,
+    ...(input.kind === "message" ? {} : { kind: input.kind }),
   });
   const { outcome } = yield* dispatched(
     "the send",
@@ -589,6 +594,7 @@ const runSend = Effect.fnUntraced(function* (
     text,
     attachments: params.attachments ?? [],
     noWake: params.noWake ?? false,
+    kind: "message",
   });
 });
 

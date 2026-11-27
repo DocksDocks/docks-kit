@@ -1147,8 +1147,12 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     },
   });
 
-  /** The listing, the resolver, and the pair send of one flow, bound to its context (#251 G3). */
-  const flowServices = (context: SessionContext): FlowServices => {
+  /**
+   * The listing, the resolver, the pair send, and the side turn of one flow,
+   * bound to its context (#251 G3, G6).
+   */
+  const flowServices = (ctx: unknown, context: SessionContext): FlowServices => {
+    const runEphemeralTurn = method(ctx, "runEphemeralTurn");
     const toolContext = (): ToolContext => ({
       transport: peers,
       asks: talk.asks,
@@ -1183,15 +1187,18 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             }),
           ),
         ),
-      send: (pair, text) =>
+      send: (pair, text, kind) =>
         Effect.runPromise(
-          sendToPair(toolContext(), pair, { text, attachments: [], noWake: false }).pipe(
+          sendToPair(toolContext(), pair, { text, attachments: [], noWake: false, kind }).pipe(
             Effect.match({
               onFailure: (error): SendAnswer => ({ ok: false, text: error.message }),
               onSuccess: (outcome): SendAnswer => ({ ok: true, text: outcome.text }),
             }),
           ),
         ),
+      // G6: called with the flow's signal and without `maxTokens` or `tools`.
+      sideTurn:
+        runEphemeralTurn === undefined ? undefined : async (request) => runEphemeralTurn(request),
     };
   };
 
@@ -1207,7 +1214,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
         notifyUser(ctx, NO_FLOW_UI, env.writeError);
         return Promise.resolve();
       }
-      return flows.run(ui, flowServices(readContext(ctx, TOOL_NEEDS)), command);
+      return flows.run(ui, flowServices(ctx, readContext(ctx, TOOL_NEEDS)), command);
     } catch (error) {
       notifyUser(ctx, talkErrorText(error), env.writeError);
       return Promise.resolve();

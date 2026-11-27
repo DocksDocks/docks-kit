@@ -549,7 +549,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
           content: formatted.content,
           details:
             ask === undefined
-              ? talkDetails("message", body, formatted.body, undefined)
+              ? talkDetails(body.kind ?? "message", body, formatted.body, undefined)
               : talkDetails("ask", body, formatted.body, body.messageId),
           triggerTurn: !body.noWake,
           onAccept:

@@ -934,6 +934,18 @@ describe("message details (#251 G5)", () => {
     expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
   });
 
+  it("writes the kind handover with a wake for a handover (#251 G6)", async () => {
+    const { fake, delivery } = setup();
+    const body = sendBody({ kind: "handover", text: "## Next task\nShip it." });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("handover");
+    expect(details.askId).toBeUndefined();
+    expect(content.startsWith("**Handover from ")).toBe(true);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+    expect(fake.sent[0]?.options).toEqual({ triggerTurn: true });
+  });
+
   it("keeps the details of a queued message until it goes out, and the watch confirms it", async () => {
     const { fake, delivery } = setup();
     fake.idle = false;

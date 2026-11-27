@@ -45,6 +45,7 @@ import { socketFileName } from "../../../talk/transport/endpoint";
 import { entryFileName } from "../../../talk/transport/registry";
 import { PING_KIND, type Target } from "../../../talk/transport/request";
 import { VIEWS_NEED_TUI } from "../../../talk/ui/command";
+import { HANDOVER_NO_SIDE_TURN, HANDOVER_PROMPT } from "../../../talk/ui/handover";
 import type { HostModuleLoader } from "../../../talk/ui/host";
 
 // The extension factory of #250 Step 4: capability probe (E11), process
@@ -456,6 +457,8 @@ class FakeSession {
   readonly views: Array<UiView> = [];
   /** Each `ctx.ui` call by method name. */
   readonly uiCalls: Array<string> = [];
+  /** `ctx.runEphemeralTurn`; undefined leaves the member without a function. */
+  sideTurn: ((options: unknown) => Promise<unknown>) | undefined = undefined;
   /** The managed timers of the binding: each handle maps to its stop function. */
   readonly timers = new Map<object, () => void>();
   registerCalls = 0;
@@ -562,6 +565,7 @@ class FakeSession {
       mode: { get: () => this.mode, enumerable: true, configurable: true },
       hasUI: { get: () => this.hasUI, enumerable: true, configurable: true },
       agent: { get: () => this.agent, enumerable: true, configurable: true },
+      runEphemeralTurn: { get: () => this.sideTurn, enumerable: true, configurable: true },
     });
   }
 
@@ -2496,5 +2500,132 @@ describe("/talk, alt+t, and the views (#251 G1 to G4)", () => {
     expect(alpha.notices).toHaveLength(1);
     expect(alpha.notices[0]).toMatch(/^talk: (?!talk:)/u);
     expect(alpha.notices[0]).toContain("ctx.sessionManager.getCwd");
+  });
+
+  it("hands over to the exact pair with a side turn, a review, and the code, and the peer gets details.kind handover with a wake (#251 G6)", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    const requests: Array<unknown> = [];
+    alpha.sideTurn = async (options) => {
+      requests.push(options);
+      return { replyText: "## Next task\nShip it.", assistantMessage: {} };
+    };
+    const flow = alpha.command("handover beta");
+    await until(() => alpha.views.length === 1);
+    expect(requests).toHaveLength(1);
+    const [request] = requests;
+    expect(Predicate.isObject(request) ? Object.keys(request).sort() : []).toEqual([
+      "promptText",
+      "signal",
+    ]);
+    expect(Predicate.hasProperty(request, "promptText") ? request.promptText : "").toBe(
+      HANDOVER_PROMPT,
+    );
+    const review = alpha.top.node;
+    expect(review.kind).toBe("editor");
+    const draft = nodeProp(review, "text");
+    const length = Predicate.isString(draft) ? draft.length : 0;
+    const edited = "## Next task\nShip it today.";
+    fireNode(review, "onEdit", { from: 0, to: length, text: edited, cursor: 0, len: length });
+    pressKey(review, "ctrl+s");
+    await until(() => alpha.views.length === 2);
+    const confirm = alpha.top.node;
+    expect(confirmCode(confirm).instanceId).toBe(betaId);
+    expect(beta.sent).toEqual([]);
+    typeCode(confirm, confirmCode(confirm).code);
+    await until(() => alpha.notices.length === 2);
+    await flow;
+    await until(() => beta.talkTexts().length === 1);
+    expect(alpha.notices[1]).toContain("Delivered");
+    expect(alpha.notices[1]).toContain(`Instance: ${betaId}`);
+    const [received] = beta.sent;
+    expect(received?.message.details).toMatchObject({ v: 1, kind: "handover" });
+    expect(received?.options).toEqual({ triggerTurn: true });
+    expect(beta.talkTexts()[0]).toBe(
+      `**Handover from ${literal("alpha")}** (${literal("/work/project")}): continue this work.\n${edited}`,
+    );
+  });
+
+  it("shows a notice and opens no view when the host has no runEphemeralTurn (#251 G6)", async () => {
+    const { alpha, beta } = await pair();
+    await alpha.command("handover beta");
+    expect(alpha.views).toEqual([]);
+    expect(alpha.notices).toEqual([HANDOVER_NO_SIDE_TURN]);
+    await settle();
+    expect(beta.talkTexts()).toEqual([]);
+  });
+
+  it("calls no ctx.ui member other than custom and notify in any /talk flow (#248 D9, #251 G6)", async () => {
+    const { alpha, beta } = await pair();
+    const betaId = network.only("s-beta").instanceId;
+    alpha.sideTurn = async () => ({ replyText: "## Next task\nShip it." });
+    const touched = new Set<string>();
+    const ui = alpha.ctx["ui"];
+    if (!Predicate.isObject(ui)) throw new Error("no ctx.ui");
+    // A recording ctx.ui that also offers every other method of omp's ctx.ui.
+    const other = (name: string) => () => {
+      throw new Error(`ctx.ui.${name} was called`);
+    };
+    const full = {
+      ...Object.fromEntries(
+        ["select", "confirm", "input", "editor", "setWidget", "setStatus", "setTitle"].map(
+          (name) => [name, other(name)],
+        ),
+      ),
+      ...ui,
+    };
+    alpha.ctx["ui"] = new Proxy(full, {
+      get: (target, property, receiver) => {
+        touched.add(String(property));
+        return Reflect.get(target, property, receiver);
+      },
+      has: (target, property) => {
+        touched.add(String(property));
+        return Reflect.has(target, property);
+      },
+    });
+    /** The kind of the open view, else undefined. */
+    const topKind = (): string | undefined => {
+      const view = alpha.views.at(-1);
+      return view === undefined || view.closed() ? undefined : view.node.kind;
+    };
+    // The list, compose, and the send.
+    const sent = await listToConfirm(alpha, betaId, "hello");
+    typeCode(sent.confirm, confirmCode(sent.confirm).code);
+    await sent.flow;
+    // /talk <target>, cancelled in compose.
+    const composed = alpha.command("beta");
+    await until(() => topKind() === "input");
+    pressKey(alpha.top.node, "escape");
+    await composed;
+    // /talk handover <target>, sent.
+    const handedOver = alpha.command("handover beta");
+    await until(() => topKind() === "editor");
+    pressKey(alpha.top.node, "ctrl+s");
+    await until(() => topKind() === "col");
+    typeCode(alpha.top.node, confirmCode(alpha.top.node).code);
+    await handedOver;
+    // /talk handover: the handover-mode list, then activate and cancel the review.
+    const handoverList = alpha.command("handover");
+    await until(() => topKind() === "picker");
+    const item = pickerItems(alpha.top.node).find((candidate) =>
+      candidate.label.startsWith(betaId),
+    );
+    fireNode(alpha.top.node, "onActivate", item?.id);
+    await until(() => topKind() === "editor");
+    pressKey(alpha.top.node, "escape");
+    await handoverList;
+    // h in the list opened by alt+t, then cancel the review.
+    alpha.shortcut();
+    await until(() => topKind() === "picker");
+    pressKey(alpha.top.node, "h");
+    await until(() => topKind() === "editor");
+    pressKey(alpha.top.node, "escape");
+    // A target that does not resolve.
+    await alpha.command("handover nobody");
+    await settle();
+    await until(() => beta.talkTexts().length === 2);
+    expect([...touched].sort()).toEqual(["custom", "notify"]);
+    expect(alpha.notices.some((text) => text.includes("not-found"))).toBe(true);
   });
 });
