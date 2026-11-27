@@ -37,10 +37,18 @@ export const Sender = Schema.Struct({
 });
 
 /** Epoch milliseconds, inside the range of a JavaScript date. */
-const SentAt = Schema.Int.check(
+export const SentAt = Schema.Int.check(
   Schema.isGreaterThanOrEqualTo(0),
   Schema.isLessThanOrEqualTo(8_640_000_000_000_000),
 );
+
+/**
+ * The kinds of a talk message in a transcript (#251 G5): a send, an ask, or
+ * a reply that reaches the session as a message. A new kind goes here.
+ */
+export const MESSAGE_KINDS = ["message", "ask", "reply"] as const;
+export const MessageKind = Schema.Literals(MESSAGE_KINDS);
+export type MessageKind = typeof MessageKind.Type;
 
 /** The ask part of a deliver body: the origin flag and the reply address (E6). */
 export const AskRoute = Schema.Struct({ origin: Origin, replyTo: RegistrationPair });

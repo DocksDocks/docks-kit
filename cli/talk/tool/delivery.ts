@@ -8,13 +8,15 @@
 import { Effect, Schema } from "effect";
 
 import { type AskStore, type PendingAsks, makePendingAsks } from "./asks";
-import { formatDelivery, formatReply } from "./format";
+import { type BodyRange, formatDelivery, formatReply } from "./format";
 import {
   type AfterTransition,
   type BeforeTransition,
   type CancelTimer,
   type SessionMode,
+  TALK_DETAILS_VERSION,
   TALK_MESSAGE_TYPE,
+  type TalkDetails,
   type TalkClock,
   type TalkHost,
   type TransitionKind,
@@ -27,6 +29,7 @@ import {
   DELIVER_KIND,
   type DeliverBody,
   type DeliverResult,
+  type MessageKind,
   REPLY_KIND,
   type ReplyBody,
   type ReplyResult,
@@ -100,6 +103,7 @@ interface MessageRecord {
 interface Outgoing {
   readonly record: MessageRecord;
   readonly content: string;
+  readonly details: TalkDetails;
   readonly triggerTurn: boolean;
 }
 
@@ -125,13 +129,32 @@ interface Hold {
 
 /** One message on its way into the session. */
 interface Incoming {
-  readonly messageId: string;
-  readonly senderSessionId: string;
   readonly content: string;
+  readonly details: TalkDetails;
   readonly triggerTurn: boolean;
   /** Runs when the receiver accepts the message: an ask becomes pending. */
   readonly onAccept: (() => void) | undefined;
 }
+
+/** The details that the receiver writes for a message (#251 G5). */
+const talkDetails = (
+  kind: MessageKind,
+  body: DeliverBody | ReplyBody,
+  range: BodyRange,
+  askId: string | undefined,
+): TalkDetails => ({
+  v: TALK_DETAILS_VERSION,
+  messageId: body.messageId,
+  kind,
+  from: body.from,
+  sentAt: body.sentAt,
+  ...(askId === undefined ? {} : { askId }),
+  attachments: body.attachments.map((attachment) => ({
+    kind: attachment.type,
+    name: attachment.name,
+  })),
+  body: range,
+});
 
 type AcceptOutcome = "delivered" | "queued" | "submitted" | "busy" | "not-live";
 
@@ -298,7 +321,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
           customType: TALK_MESSAGE_TYPE,
           content: message.content,
           display: true,
-          details: { messageId: record.messageId },
+          details: message.details,
         },
         { triggerTurn: message.triggerTurn },
       );
@@ -395,8 +418,8 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       if (queuedBytes + bytes > MAX_QUEUED_BYTES) return "busy";
     }
     const record: MessageRecord = {
-      messageId: incoming.messageId,
-      senderSessionId: incoming.senderSessionId,
+      messageId: incoming.details.messageId,
+      senderSessionId: incoming.details.from.sessionId,
       instanceId: target.instanceId,
       isAsk: incoming.onAccept !== undefined,
       state: "queued",
@@ -406,6 +429,7 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
     const message: Outgoing = {
       record,
       content: incoming.content,
+      details: incoming.details,
       triggerTurn: incoming.triggerTurn,
     };
     if (admission === "queued") {
@@ -519,11 +543,14 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       const { ask } = body;
       // E6: an ask is accepted only after its reply route is retained.
       if (ask !== undefined && !(await retain(ask.replyTo))) return result("no-reply-route");
+      const formatted = formatDelivery(body);
       return result(
         await accept(target, {
-          messageId: body.messageId,
-          senderSessionId: body.from.sessionId,
-          content: formatDelivery(body),
+          content: formatted.content,
+          details:
+            ask === undefined
+              ? talkDetails("message", body, formatted.body, undefined)
+              : talkDetails("ask", body, formatted.body, body.messageId),
           triggerTurn: !body.noWake,
           onAccept:
             ask === undefined
@@ -542,11 +569,11 @@ export const makeDelivery = ({ host, clock, retain }: DeliveryOptions): TalkDeli
       });
       // A reply from a subagent's ask never enters a main session (E6).
       if (body.origin === "sub") return result("not-found");
+      const formatted = formatReply(body);
       return result(
         await accept(target, {
-          messageId: body.messageId,
-          senderSessionId: body.from.sessionId,
-          content: formatReply(body),
+          content: formatted.content,
+          details: talkDetails("reply", body, formatted.body, body.askId),
           triggerTurn: !body.noWake,
           onAccept: undefined,
         }),

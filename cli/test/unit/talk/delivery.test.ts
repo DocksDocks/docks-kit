@@ -5,6 +5,7 @@ import { Effect, Predicate, type Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { makeAskStore } from "../../../talk/tool/asks";
+import type { Attachment } from "../../../talk/tool/attachments";
 import {
   ANSWER_WAIT_MS,
   HOLD_MS,
@@ -24,6 +25,7 @@ import {
   TALK_MESSAGE_TYPE,
   type TalkHost,
   type TalkMessage,
+  decodeTalkMessage,
   systemClock,
   talkMessageId,
 } from "../../../talk/tool/host";
@@ -255,9 +257,17 @@ describe("confirmation and wake (E4)", () => {
     expect(fake.sent[0]?.options).toEqual({ triggerTurn: true });
     expect(fake.sent[0]?.message).toEqual({
       customType: TALK_MESSAGE_TYPE,
-      content: formatDelivery(body),
+      content: formatDelivery(body).content,
       display: true,
-      details: { messageId: body.messageId },
+      details: {
+        v: 1,
+        messageId: body.messageId,
+        kind: "message",
+        from: body.from,
+        sentAt: body.sentAt,
+        attachments: [],
+        body: formatDelivery(body).body,
+      },
     });
     expect(fake.state.entries.map(talkMessageId)).toEqual([body.messageId]);
     expect(cancelOf(delivery, body.messageId)).toBe("delivered");
@@ -734,7 +744,7 @@ describe("results, queue, and busy rules (E5)", () => {
       ),
     );
     expect(tooLarge._tag).toBe("TalkMessageTooLarge");
-    const contentBytes = Buffer.byteLength(formatDelivery(largest()), "utf8");
+    const contentBytes = Buffer.byteLength(formatDelivery(largest()).content, "utf8");
     const fit = Math.floor(MAX_QUEUED_BYTES / contentBytes);
     // The byte limit, not the count limit, refuses the next one.
     expect(fit).toBeLessThan(MAX_QUEUED_MESSAGES);
@@ -750,7 +760,7 @@ describe("results, queue, and busy rules (E5)", () => {
     expect(cancelOf(delivery, refused.messageId)).toBe("not-found");
     // A small message still fits in the rest.
     const small = sendBody();
-    expect(Buffer.byteLength(formatDelivery(small), "utf8")).toBeLessThanOrEqual(
+    expect(Buffer.byteLength(formatDelivery(small).content, "utf8")).toBeLessThanOrEqual(
       MAX_QUEUED_BYTES - fit * contentBytes,
     );
     expect((await delivery.deliver(REG_A, small)).outcome).toBe("queued");
@@ -775,16 +785,16 @@ describe("results, queue, and busy rules (E5)", () => {
     try {
       const immediate = sendBody({ text: "goes out at once" });
       expect((await delivery.deliver(REG_A, immediate)).outcome).toBe("delivered");
-      expect(sizedTexts()).not.toContain(formatDelivery(immediate));
+      expect(sizedTexts()).not.toContain(formatDelivery(immediate).content);
       fake.idle = false;
       const queued = sendBody({ text: "joins the queue" });
       expect((await delivery.deliver(REG_A, queued)).outcome).toBe("queued");
-      expect(sizedTexts()).toContain(formatDelivery(queued));
+      expect(sizedTexts()).toContain(formatDelivery(queued).content);
       for (let count = 1; count < MAX_QUEUED_MESSAGES; count += 1)
         expect((await delivery.deliver(REG_A, sendBody())).outcome).toBe("queued");
       const refused = sendBody({ text: "the queue is full" });
       expect((await delivery.deliver(REG_A, refused)).outcome).toBe("busy");
-      expect(sizedTexts()).not.toContain(formatDelivery(refused));
+      expect(sizedTexts()).not.toContain(formatDelivery(refused).content);
     } finally {
       sizes.mockRestore();
     }
@@ -802,7 +812,7 @@ describe("asks and replies at the receiver (E6)", () => {
     expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
     expect(retained).toEqual([{ pair: ASKER, sentBefore: 0 }]);
     expect(fake.sent).toHaveLength(1);
-    expect(fake.sent[0]?.message.content).toBe(formatDelivery(body));
+    expect(fake.sent[0]?.message.content).toBe(formatDelivery(body).content);
     expect(delivery.pending.list(REG_A).map((entry) => entry.askId)).toEqual([body.messageId]);
   });
 
@@ -848,7 +858,7 @@ describe("asks and replies at the receiver (E6)", () => {
       messageId: body.messageId,
       instanceId: REG_A.instanceId,
     });
-    expect(fake.sent[0]?.message.content).toBe(formatReply(body));
+    expect(fake.sent[0]?.message.content).toBe(formatReply(body).content);
   });
 
   it("follows the busy rules for a main reply without a waiter", async () => {
@@ -864,6 +874,78 @@ describe("asks and replies at the receiver (E6)", () => {
       "not-found",
     );
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe("message details (#251 G5)", () => {
+  /** The details of the one landed entry, decoded with its content. */
+  const landedDetails = (fake: FakeSession) => {
+    expect(fake.state.entries).toHaveLength(1);
+    const decoded = decodeTalkMessage(fake.state.entries[0]);
+    if (decoded === undefined) throw new Error("the landed entry does not decode");
+    return decoded;
+  };
+
+  const attachments: ReadonlyArray<Attachment> = [
+    { type: "file", name: "a.ts", content: "export {};" },
+    { type: "context", name: "notes", content: "**Attachment (file): `x`**" },
+  ];
+
+  it("writes versioned details for a send that decode, and the watch confirms it", async () => {
+    const { fake, delivery } = setup();
+    const body = sendBody({ text: "line 1\nline 2", attachments, sentAt: 1_700_000_000_000 });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(content).toBe(formatDelivery(body).content);
+    expect(details).toEqual({
+      v: 1,
+      messageId: body.messageId,
+      kind: "message",
+      from: body.from,
+      sentAt: body.sentAt,
+      attachments: [
+        { kind: "file", name: "a.ts" },
+        { kind: "context", name: "notes" },
+      ],
+      body: formatDelivery(body).body,
+    });
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+    expect(talkMessageId(fake.state.entries[0])).toBe(body.messageId);
+  });
+
+  it("writes the kind ask and the ask id for an ask", async () => {
+    const { fake, delivery } = setup();
+    const body = askBody({ text: "one\ntwo\nthree" });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("ask");
+    expect(details.askId).toBe(body.messageId);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+  });
+
+  it("writes the kind reply and the ask that it answers for a main reply", async () => {
+    const { fake, delivery } = setup();
+    const body = replyBody({ origin: "main" });
+    expect((await delivery.receiveReply(REG_A, body)).outcome).toBe("delivered");
+    const { content, details } = landedDetails(fake);
+    expect(details.kind).toBe("reply");
+    expect(details.askId).toBe(body.askId);
+    expect(details.messageId).toBe(body.messageId);
+    expect(content.slice(details.body.start, details.body.end)).toBe(body.text);
+  });
+
+  it("keeps the details of a queued message until it goes out, and the watch confirms it", async () => {
+    const { fake, delivery } = setup();
+    fake.idle = false;
+    const body = askBody({ attachments });
+    expect((await delivery.deliver(REG_A, body)).outcome).toBe("queued");
+    fake.idle = true;
+    await vi.advanceTimersByTimeAsync(QUEUE_RETRY_MS);
+    await flushMicrotasks();
+    const { details } = landedDetails(fake);
+    expect(details.kind).toBe("ask");
+    expect(details.attachments.map((attachment) => attachment.kind)).toEqual(["file", "context"]);
+    expect(cancelOf(delivery, body.messageId)).toBe("delivered");
   });
 });
 

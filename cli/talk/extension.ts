@@ -21,6 +21,7 @@ import { type TalkDelivery, makeDelivery, talkRequestHandlers } from "./tool/del
 import {
   type SendOptions,
   type SessionMode,
+  TALK_MESSAGE_TYPE,
   type TalkClock,
   type TalkHost,
   type TalkMessage,
@@ -44,6 +45,7 @@ import {
 import type { AdmissionCheck, RegistrationInput, RegistrationUpdate } from "./transport/listener";
 import type { RequestHandler, Target } from "./transport/request";
 import { TalkTransport, type TalkTransportOptions } from "./transport/transport";
+import { type TalkCardRenderer, makeTalkCardRenderer } from "./ui/card";
 import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
@@ -408,7 +410,7 @@ interface PiApi {
   /** `pi.getShortcutConflict(key)`: undefined, or the kind of the conflict (#251 G4). */
   readonly getShortcutConflict: (key: string) => unknown;
   /** `pi.registerMessageRenderer(customType, renderer)` of the message cards (#251 G5). */
-  readonly registerMessageRenderer: (customType: string, renderer: Method) => void;
+  readonly registerMessageRenderer: (customType: string, renderer: TalkCardRenderer) => void;
 }
 
 type ApiProbe =
@@ -709,6 +711,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     hidden: true,
     execute: async () => ({ content: [{ type: "text", text: MARKER_ANSWER }] }),
   });
+  // #251 G5: the card of each talk message in this session's transcript.
+  api.registerMessageRenderer(TALK_MESSAGE_TYPE, makeTalkCardRenderer(env.ui));
 
   let rawContext: unknown;
   let session: SessionContext | undefined;

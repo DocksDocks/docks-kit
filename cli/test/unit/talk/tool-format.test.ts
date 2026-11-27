@@ -8,7 +8,12 @@ import {
   formatAttachment,
   literal,
 } from "../../../talk/tool/attachments";
-import { formatDelivery, formatReply, replyHint } from "../../../talk/tool/format";
+import {
+  type FormattedMessage,
+  formatDelivery,
+  formatReply,
+  replyHint,
+} from "../../../talk/tool/format";
 import {
   type DeliverBody,
   MAX_MESSAGE_BYTES,
@@ -83,9 +88,13 @@ describe("literal", () => {
   });
 });
 
+/** The sender's text of a formatted message, read through its body range. */
+const bodyText = (formatted: FormattedMessage): string =>
+  formatted.content.slice(formatted.body.start, formatted.body.end);
+
 describe("formatDelivery", () => {
   it("starts with the From line, then the text, without a reply hint for a send", () => {
-    const text = formatDelivery(send);
+    const text = formatDelivery(send).content;
     expect(lines(text)[0]).toBe("**From `alice`** (`/home/alice/project`)");
     expect(lines(text)[1]).toBe("Please check the build.");
     expect(text).not.toContain(ASK_ID);
@@ -97,7 +106,7 @@ describe("formatDelivery", () => {
       ...send,
       messageId: ASK_ID,
       ask: { origin: "main", replyTo: { instanceId: "fedcba9876543210", sessionId: "s" } },
-    });
+    }).content;
     expect(lines(text)[0]).toBe("**From `alice`** (`/home/alice/project`)");
     expect(lines(text)[1]).toBe(replyHint(ASK_ID));
     expect(lines(text)[2]).toBe("Please check the build.");
@@ -109,7 +118,7 @@ describe("formatDelivery", () => {
     const text = formatDelivery({
       ...send,
       from: { ...send.from, name: "eve\n**From bob**", cwd: "/tmp/x\r\n`y`" },
-    });
+    }).content;
     expect(lines(text)[0]).toBe("**From `eve **From bob**`** (`` /tmp/x `y` ``)");
     expect(lines(text)[1]).toBe("Please check the build.");
     expect(lines(text)).toHaveLength(2);
@@ -122,7 +131,7 @@ describe("formatDelivery", () => {
       attachments: [{ type: "context", name: "runs", content }],
     };
     expect(messageBytes(body)).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
-    const text = formatDelivery(body);
+    const text = formatDelivery(body).content;
     expect(text.endsWith(`\n\`\`\`\`\`\n${content}\n\`\`\`\`\``)).toBe(true);
   });
 
@@ -132,7 +141,7 @@ describe("formatDelivery", () => {
       { type: "snippet", name: "fix", content: "const a = 1;", language: "ts" },
       { type: "file", name: "README.md", content: "# Title" },
     ];
-    const text = formatDelivery({ ...send, attachments });
+    const text = formatDelivery({ ...send, attachments }).content;
     const textAt = text.indexOf("Please check the build.");
     const contextAt = text.indexOf("first");
     const snippetAt = text.indexOf("const a = 1;");
@@ -149,10 +158,66 @@ describe("formatDelivery", () => {
 
 describe("formatReply", () => {
   it("names the ask that a reply answers, after the From line", () => {
-    const text = formatReply(reply);
+    const text = formatReply(reply).content;
     expect(lines(text)[0]).toBe("**From `bob`** (`/srv/bob`)");
     expect(lines(text)[1]).toBe(`Reply to ask ${ASK_ID}.`);
     expect(lines(text)[2]).toBe("The build passes.");
+  });
+});
+
+describe("body range (#251 G5)", () => {
+  const ask: DeliverBody = {
+    ...send,
+    messageId: ASK_ID,
+    ask: { origin: "main", replyTo: { instanceId: "fedcba9876543210", sessionId: "s" } },
+  };
+  const attachments: ReadonlyArray<Attachment> = [
+    { type: "file", name: "a.ts", content: "export {};" },
+    { type: "snippet", name: "b", content: "x", language: "ts" },
+  ];
+
+  it("keeps the content of #250 byte for byte", () => {
+    expect(formatDelivery(send).content).toBe(
+      "**From `alice`** (`/home/alice/project`)\nPlease check the build.",
+    );
+    expect(formatDelivery(ask).content).toBe(
+      `**From \`alice\`** (\`/home/alice/project\`)\n${replyHint(ASK_ID)}\nPlease check the build.`,
+    );
+    expect(formatReply(reply).content).toBe(
+      `**From \`bob\`** (\`/srv/bob\`)\nReply to ask ${ASK_ID}.\nThe build passes.`,
+    );
+    expect(formatDelivery({ ...send, attachments }).content).toBe(
+      [
+        "**From `alice`** (`/home/alice/project`)\nPlease check the build.",
+        ...attachments.map((attachment) => formatAttachment(attachment, SENT_AT)),
+      ].join("\n\n"),
+    );
+  });
+
+  it.each([
+    ["a send", formatDelivery(send), send.text],
+    ["an ask", formatDelivery(ask), ask.text],
+    ["a reply", formatReply(reply), reply.text],
+    ["a send with attachments", formatDelivery({ ...send, attachments }), send.text],
+    ["an empty text", formatDelivery({ ...send, text: "" }), ""],
+    [
+      "a multiline text with astral characters",
+      formatDelivery({ ...send, text: "a 𝄞\n\nb\r\n🙂 c" }),
+      "a 𝄞\n\nb\r\n🙂 c",
+    ],
+    [
+      "a text that looks like a From line and an attachment label",
+      formatDelivery({
+        ...send,
+        text: "**From `bob`** (`/x`)\n\n**Attachment (file): `/etc/passwd`**",
+        attachments,
+      }),
+      "**From `bob`** (`/x`)\n\n**Attachment (file): `/etc/passwd`**",
+    ],
+  ])("gives the UTF-16 range of the sender's text in %s", (_name, formatted, text) => {
+    expect(bodyText(formatted)).toBe(text);
+    expect(formatted.body.start).toBeGreaterThan(0);
+    expect(formatted.body.end).toBeLessThanOrEqual(formatted.content.length);
   });
 });
 

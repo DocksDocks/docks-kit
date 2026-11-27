@@ -3,9 +3,11 @@
  * it from omp's `pi` and `ctx` (Step 4); the tests fill it with a fake
  * session. Every method reads or acts on the session of one factory binding.
  */
-import { Predicate } from "effect";
+import { Option, Predicate, Schema } from "effect";
 
 import type { Target } from "../transport/request";
+import { ATTACHMENT_KINDS } from "./attachments";
+import { MessageId, MessageKind, Sender, SentAt } from "./protocol";
 
 /** The `customType` of every talk message in a transcript. */
 export const TALK_MESSAGE_TYPE = "talk";
@@ -16,18 +18,73 @@ export const TALK_MESSAGE_TYPE = "talk";
  */
 export type SessionMode = "tui" | "rpc" | "print" | "json";
 
-/** The `details` of a talk message: the message id that the confirmation looks for (E4). */
-export interface TalkMessageDetails {
-  readonly messageId: string;
-}
+/** The version of the `details` of a talk message (#251 G5). */
+export const TALK_DETAILS_VERSION = 1;
+
+/** Whether a message of each kind names an ask: an ask its own id, a reply the ask that it answers. */
+const NAMES_ASK: Record<MessageKind, boolean> = { message: false, ask: true, reply: true };
+
+const Offset = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+
+/** The UTF-16 start and end of the sender's text in `content`. */
+const BodyRange = Schema.Struct({ start: Offset, end: Offset }).check(
+  Schema.makeFilter((range) =>
+    range.start <= range.end ? undefined : "the body range ends before it starts",
+  ),
+);
+
+/**
+ * The `details` of a talk message (#251 G5): the message id that the
+ * confirmation looks for (#250 E4), and the parts that the message card
+ * shows. `askId` is the id of an ask, or the ask that a reply answers.
+ */
+export const TalkDetails = Schema.Struct({
+  v: Schema.Literal(TALK_DETAILS_VERSION),
+  messageId: MessageId,
+  kind: MessageKind,
+  from: Sender,
+  sentAt: SentAt,
+  askId: Schema.optionalKey(MessageId),
+  attachments: Schema.Array(
+    Schema.Struct({ kind: Schema.Literals(ATTACHMENT_KINDS), name: Schema.NonEmptyString }),
+  ),
+  body: BodyRange,
+}).check(
+  Schema.makeFilter((details) =>
+    NAMES_ASK[details.kind] === (details.askId !== undefined)
+      ? undefined
+      : `a ${details.kind} ${NAMES_ASK[details.kind] ? "needs" : "takes no"} askId`,
+  ),
+);
+export type TalkDetails = typeof TalkDetails.Type;
 
 /** A displayed custom message, as `pi.sendMessage` takes it. */
 export interface TalkMessage {
   readonly customType: typeof TALK_MESSAGE_TYPE;
   readonly content: string;
   readonly display: true;
-  readonly details: TalkMessageDetails;
+  readonly details: TalkDetails;
 }
+
+/** The text and the details of a talk message whose body range lies inside its text. */
+const TalkMessageView = Schema.Struct({ content: Schema.String, details: TalkDetails }).check(
+  Schema.makeFilter((message) =>
+    message.details.body.end <= message.content.length
+      ? undefined
+      : "the body range lies outside the content",
+  ),
+);
+export type TalkMessageView = typeof TalkMessageView.Type;
+
+const decodeView = Schema.decodeUnknownOption(TalkMessageView);
+
+/**
+ * The text and the details of a talk message, else undefined: a message of
+ * #250 has only `details.messageId`, and a body range outside the text is
+ * refused.
+ */
+export const decodeTalkMessage = (message: unknown): TalkMessageView | undefined =>
+  Option.getOrUndefined(decodeView(message));
 
 /** The options of `pi.sendMessage`: `triggerTurn` requests a turn (E4, E5). */
 export interface SendOptions {
