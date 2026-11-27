@@ -33,7 +33,6 @@ import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_STARTED,
   type SideTurn,
-  agentHandoverHeader,
   agentHandoverWaiting,
   requestDraft,
   reviewText,
@@ -82,11 +81,16 @@ export type TalkCommand =
   | { readonly _tag: "List" }
   | { readonly _tag: "Compose"; readonly target: string }
   | { readonly _tag: "Handover"; readonly target: string | undefined }
-  /** #260 H2: a handover to the one exact pair that the tool resolved, with the note of the agent. */
+  /**
+   * #260 H2: a handover to the one exact pair that the tool resolved, with
+   * the note of the agent. `isOwn` tells whether the pair is this binding's
+   * own registration now; the flow asks it right before the send (H3).
+   */
   | {
       readonly _tag: "AgentHandover";
       readonly destination: Destination;
       readonly note: string | undefined;
+      readonly isOwn: () => boolean;
     };
 
 const WHITESPACE = /\s+/u;
@@ -299,26 +303,43 @@ const resultOf = <R>(waited: Waited<R>): R | undefined => {
 const CANCELLED: FlowEnd = { _tag: "Cancelled" };
 const FAILED: FlowEnd = { _tag: "Failed" };
 
+/** #260 H3: the notice of a tool-started handover whose destination became this session's own registration. */
+export const HANDOVER_TARGET_IS_THIS_SESSION =
+  "talk: the destination of this handover is now this session, so talk sent nothing.";
+
+/**
+ * Who started a send (#260 H2, H3): the confirm view names the agent as the
+ * starter of a handover of the `talk` tool, and the flow asks `isOwn` right
+ * before the send.
+ */
+interface SendOrigin {
+  readonly byAgent: boolean;
+  readonly isOwn: () => boolean;
+}
+
+/** A send that the operator started from `/talk`, `alt+t`, or the list. */
+const OPERATOR: SendOrigin = { byAgent: false, isOwn: () => false };
+
 /**
  * How a handover starts (#260 H2): its start notice, the text of its
- * waiting view, the header row of its review, and the note of the agent
- * above the draft. omp shows a notice of a tool call only after the call
- * ends, so a handover of the `talk` tool shows no notice and names its
- * starter and its target in its own views.
+ * waiting view, the note of the agent above the draft, and who started it.
+ * omp shows a notice of a tool call only after the call ends, so a handover
+ * of the `talk` tool shows no notice and names its starter in its waiting
+ * view and in its confirm view.
  */
 interface HandoverStart {
   readonly notice: string | undefined;
   readonly waiting: string;
-  readonly header: string | undefined;
   readonly note: string | undefined;
+  readonly origin: SendOrigin;
 }
 
 /** A handover from `/talk`, from the handover-mode list, or from `h` in the list. */
 const OPERATOR_HANDOVER: HandoverStart = {
   notice: HANDOVER_STARTED,
   waiting: HANDOVER_WAITING,
-  header: undefined,
   note: undefined,
+  origin: OPERATOR,
 };
 
 /** The `_tag` of a view choice. */
@@ -552,6 +573,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
    * ended while the send ran posts no notice: the send stopped before its
    * request, or the request went out and the peer can hold the text. The
    * record of the send, not its promise, tells what went out (#260 H5).
+   * Right before the send, a destination that became this binding's own
+   * registration ends the flow with nothing sent (#260 H3).
    */
   const editConfirmSend = async (
     flow: Flow,
@@ -561,6 +584,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     first: string,
     edit: EditView,
     fullscreen: boolean,
+    origin: SendOrigin,
   ): Promise<FlowEnd> => {
     let text = first;
     for (;;) {
@@ -575,15 +599,20 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       text = edited.text;
       const code = nextCode(lastCode);
       lastCode = code;
+      const content = { kind, text, code, byAgent: origin.byAgent };
       const confirmed = await mount<ConfirmChoice>(
         flow,
         flowUi,
-        (viewUi, size, done) => confirmView(viewUi, size, destination, { kind, text, code }, done),
+        (viewUi, size, done) => confirmView(viewUi, size, destination, content, done),
         { _tag: "Close" },
         FULL_SCREEN,
       );
       if (confirmed._tag === "Back") continue;
       if (confirmed._tag !== "Send" || !live(flow)) return CANCELLED;
+      if (origin.isOwn()) {
+        flowUi.notify(HANDOVER_TARGET_IS_THIS_SESSION, "error");
+        return { _tag: "OwnTarget" };
+      }
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
       const record = newDispatchRecord();
       // A talk view holds the focus while the send runs; `escape` ends the flow and its signal.
@@ -606,9 +635,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
   /**
    * G6: a side turn writes the draft with the flow's signal; the review, the
    * confirm view, and the send follow. A flow that ended while the side turn
-   * ran mounts no review. A handover of the `talk` tool names its starter and
-   * its target in its waiting view and in the header row of its review, and
-   * puts the note of the agent above the draft (#260 H2).
+   * ran mounts no review. A handover of the `talk` tool names its starter in
+   * its waiting view and in its confirm view, and puts the note of the agent
+   * above the draft (#260 H2).
    */
   const handover = async (
     flow: Flow,
@@ -641,8 +670,9 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       destination,
       "handover",
       reviewText(start.note, draft.text),
-      (viewUi, size, text, done) => reviewView(viewUi, size, text, done, start.header),
+      (viewUi, size, text, done) => reviewView(viewUi, size, text, done),
       FULL_SCREEN,
+      start.origin,
     );
   };
 
@@ -655,6 +685,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       "",
       (viewUi, size, text, done) => composeView(viewUi, size, destination, text, done),
       DOCKED,
+      OPERATOR,
     );
 
   /** The rows of one listing answer, else the end of the flow: after an end, or after the error notice. */
@@ -742,8 +773,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         return handover(flow, flowUi, command.destination, {
           notice: undefined,
           waiting: agentHandoverWaiting(command.destination),
-          header: agentHandoverHeader(command.destination),
           note: command.note,
+          origin: { byAgent: true, isOwn: command.isOwn },
         });
     }
   };

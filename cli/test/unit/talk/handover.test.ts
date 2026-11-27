@@ -30,10 +30,14 @@ import {
   HANDOVER_STARTED,
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
-  agentHandoverHeader,
   agentHandoverWaiting,
 } from "../../../talk/ui/handover";
-import { HANDOVER_WAITING, sendingText } from "../../../talk/ui/command";
+import {
+  HANDOVER_TARGET_IS_THIS_SESSION,
+  HANDOVER_WAITING,
+  sendingText,
+} from "../../../talk/ui/command";
+import { CONFIRM_TOO_SMALL } from "../../../talk/ui/views";
 
 // The handover flows of plan #251 G6 against the fake TUI host of
 // `cli/test/lib/talkFlowHost.ts`: `/talk handover <target>`, the
@@ -575,10 +579,11 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     h: Harness,
     signal?: AbortSignal,
     note: { readonly text: string | undefined } = { text: NOTE },
+    isOwn: () => boolean = () => false,
   ): Promise<{ readonly flow: Promise<FlowEnd>; readonly ended: () => FlowEnd | undefined }> => {
     const state: { end: FlowEnd | undefined } = { end: undefined };
     const flow = h
-      .run({ _tag: "AgentHandover", destination: GAMMA, note: note.text }, signal)
+      .run({ _tag: "AgentHandover", destination: GAMMA, note: note.text, isOwn }, signal)
       .then((end) => {
         state.end = end;
         return end;
@@ -587,22 +592,28 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     return { flow, ended: () => state.end };
   };
 
-  /** The first row of the review of gamma and its line break: no part of the text. */
-  const LEAD = `${agentHandoverHeader(GAMMA)}\n`;
+  /** The first line of the confirm view of a handover to gamma that the `talk` tool started. */
+  const AGENT_LINE = new RegExp(
+    `^Send to ${ID_C} \\(a handover that the agent started\\): type ([a-z]{2})$`,
+    "u",
+  );
 
-  /** Replaces the text below the header of the review with `text`. */
-  const replaceBody = (node: FakeNode, text: string): void => {
-    const length = String(prop(node, "text")).length;
-    fire(node, "onEdit", {
-      from: LEAD.length,
-      to: length,
-      text,
-      cursor: LEAD.length + text.length,
-      len: length,
-    });
+  /** The code of a confirm view whose first line names gamma and the agent as the starter. */
+  const agentCode = (node: FakeNode): string => {
+    const match = AGENT_LINE.exec(linesOf(node)[0] ?? "");
+    if (match === null)
+      throw new Error(`no agent confirm line in ${JSON.stringify(linesOf(node))}`);
+    return match[1] ?? "";
   };
 
-  it("names the agent and the target in the waiting view and in the review header, shows no notice, and puts the cleaned note below the header", async () => {
+  /** `ctrl+s` in the review, then the code in the confirm view. */
+  const approve = async (h: Harness): Promise<void> => {
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    typeCode(h.tui.top.node, agentCode(h.tui.top.node));
+  };
+
+  it("names the agent and the target in the waiting view and in the first line of the confirm view, shows no notice, and starts the review with the cleaned note and the draft alone", async () => {
     const h = await harness();
     const reply = Promise.withResolvers<unknown>();
     h.services.reply = () => reply.promise;
@@ -617,80 +628,140 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     expect(prop(h.tui.top.node, "text")).toBe(waiting);
     reply.resolve({ replyText: DRAFT });
     await flush();
-    expect(agentHandoverHeader(GAMMA)).toBe(
-      `talk: the agent started a handover to ${literal("gamma")} (instance ${ID_C}) · ctrl+s confirms the destination · alt+enter adds a line · ⎋ cancels`,
-    );
     const review = reviewOf(h);
-    expect(prop(review, "text")).toBe(`${LEAD}${CLEAN_NOTE}\n\n${DRAFT}`);
-    expect(prop(review, "cursor")).toBe(LEAD.length);
+    // The editor holds only text that can be sent: no row of talk's own.
+    expect(prop(review, "text")).toBe(`${CLEAN_NOTE}\n\n${DRAFT}`);
+    expect(prop(review, "cursor")).toBe(0);
     // omp shows a notice only after the tool call ends, so the tool path shows none.
     expect(h.tui.notices).toEqual([]);
-    press(review, "escape");
+    press(review, "ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    expect(linesOf(confirm)[0]).toBe(
+      `Send to ${ID_C} (a handover that the agent started): type ${agentCode(confirm)}`,
+    );
+    press(confirm, "escape");
+    await flush();
+    press(reviewOf(h), "escape");
     expect(await flow).toEqual({ _tag: "Cancelled" });
     expect(h.services.sends).toEqual([]);
   });
 
-  it("cleans the name of the target in both texts as the views clean names", () => {
+  it("cleans the name of the target in the waiting view as the views clean names", () => {
     const evil = { ...GAMMA, name: "ga\u001b[31m\nmma`" };
-    for (const text of [agentHandoverWaiting(evil), agentHandoverHeader(evil)]) {
-      expect(text).toContain(literal("ga\u001b[31m\nmma`"));
-      expect(text).not.toContain("\u001b");
-      expect(text).not.toContain("\n");
-    }
+    const text = agentHandoverWaiting(evil);
+    expect(text).toContain(literal("ga\u001b[31m\nmma`"));
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\n");
   });
 
   it.each([
     ["no note", undefined],
     ["a note with only blanks and controls", " \u001b[2J \r\n\t"],
-  ])("starts the review with the header and the draft alone for %s", async (_name, note) => {
+  ])("starts the review with the draft alone for %s", async (_name, note) => {
     const h = await harness();
     const { flow } = await agentHandover(h, undefined, { text: note });
-    expect(prop(reviewOf(h), "text")).toBe(`${LEAD}${DRAFT}`);
+    expect(prop(reviewOf(h), "text")).toBe(DRAFT);
     press(reviewOf(h), "escape");
     await flow;
   });
 
-  it("keeps the header out of the text: an edit inside it does nothing, the caret stays below it, and only the text below it is sent", async () => {
+  it("sends exactly what the editor holds after select all and a paste", async () => {
     const h = await harness();
-    const { flow } = await agentHandover(h, undefined, { text: undefined });
+    const { flow } = await agentHandover(h);
     const review = reviewOf(h);
+    // omp's editor selects from offset 0, and a paste replaces the selection.
     const length = String(prop(review, "text")).length;
-    fire(review, "onEdit", { from: 0, to: 5, text: "x", cursor: 1, len: length });
-    // backspace at the start of the text would join it to the header.
-    fire(review, "onEdit", {
-      from: LEAD.length - 1,
-      to: LEAD.length,
-      text: "",
-      cursor: LEAD.length - 1,
-      len: length,
-    });
-    expect(prop(review, "text")).toBe(`${LEAD}${DRAFT}`);
-    // A caret move into the header stops below it.
-    fire(review, "onEdit", {
-      from: LEAD.length,
-      to: LEAD.length,
-      text: "",
-      cursor: 0,
-      len: length,
-    });
-    expect(prop(review, "cursor")).toBe(LEAD.length);
-    // A paste at the caret goes below the header.
-    h.tui.paste("Hi. ");
-    expect(prop(review, "text")).toBe(`${LEAD}Hi. ${DRAFT}`);
-    press(review, "ctrl+s");
-    await flush();
-    typeCode(h.tui.top.node, codeOf(h.tui.top.node).code);
+    fire(review, "onEdit", { from: 0, to: length, text: "Pasted.", cursor: 7, len: length });
+    expect(prop(review, "text")).toBe("Pasted.");
+    await approve(h);
     await flow;
-    expect(h.services.sends).toEqual([
-      { pair: GAMMA_PAIR, text: `Hi. ${DRAFT}`, kind: "handover" },
-    ]);
+    expect(h.services.sends).toEqual([{ pair: GAMMA_PAIR, text: "Pasted.", kind: "handover" }]);
   });
 
-  it("keeps the review open on ctrl+s while only the header has text", async () => {
+  it("sends exactly what the editor holds after a cut of the first line and a yank at the end", async () => {
     const h = await harness();
     const { flow } = await agentHandover(h, undefined, { text: undefined });
     const review = reviewOf(h);
-    replaceBody(review, " \n ");
+    const cut = "## Next task\n";
+    fire(review, "onEdit", { from: 0, to: cut.length, text: "", cursor: 0, len: DRAFT.length });
+    const rest = DRAFT.slice(cut.length);
+    expect(prop(review, "text")).toBe(rest);
+    // The yank inserts the cut text at the caret; the caret moved to the end first.
+    fire(review, "onEdit", {
+      from: rest.length,
+      to: rest.length,
+      text: `\n${cut}`,
+      cursor: rest.length + cut.length + 1,
+      len: rest.length,
+    });
+    const held = String(prop(review, "text"));
+    expect(held).toBe(`${rest}\n${cut}`);
+    await approve(h);
+    await flow;
+    expect(h.services.sends).toEqual([{ pair: GAMMA_PAIR, text: held, kind: "handover" }]);
+  });
+
+  it("names the agent in the confirm view of a one-row pane and sends exactly what the editor holds", async () => {
+    const h = await harness();
+    h.tui.size = { columns: 100, rows: 1 };
+    const { flow } = await agentHandover(h);
+    const review = reviewOf(h);
+    expect(prop(review, "maxLines")).toBe(1);
+    appendText(review, "\nDone.");
+    const held = String(prop(review, "text"));
+    expect(held).toBe(`${CLEAN_NOTE}\n\n${DRAFT}\nDone.`);
+    press(review, "ctrl+s");
+    await flush();
+    // The confirm view draws its first line in every height that it gets.
+    const confirm = h.tui.top.node;
+    typeCode(confirm, agentCode(confirm));
+    await flow;
+    expect(h.services.sends).toEqual([{ pair: GAMMA_PAIR, text: held, kind: "handover" }]);
+  });
+
+  it("takes no code while the pane is too narrow for the line that names the agent", async () => {
+    const h = await harness();
+    const { flow, ended } = await agentHandover(h);
+    // The line of a `/talk` handover fits these columns; the line that names the agent does not.
+    h.tui.size = { columns: 40, rows: 30 };
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    expect(linesOf(confirm)).toEqual([CONFIRM_TOO_SMALL]);
+    for (const letter of "abcdefghijklmnopqrstuvwxyz") {
+      press(confirm, letter);
+      press(confirm, letter);
+    }
+    await flush();
+    expect(ended()).toBeUndefined();
+    expect(h.services.sends).toEqual([]);
+    h.tui.size = { columns: 100, rows: 30 };
+    typeCode(confirm, agentCode(confirm));
+    await flow;
+    expect(h.services.sends).toHaveLength(1);
+  });
+
+  it("sends nothing and returns OwnTarget when the destination became this session's registration before the send (#260 H3)", async () => {
+    const h = await harness();
+    const own = { now: false };
+    const { flow } = await agentHandover(h, undefined, { text: undefined }, () => own.now);
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    own.now = true;
+    typeCode(confirm, agentCode(confirm));
+    expect(await flow).toEqual({ _tag: "OwnTarget" });
+    expect(h.services.sends).toEqual([]);
+    expect(h.tui.notices).toEqual([{ text: HANDOVER_TARGET_IS_THIS_SESSION, level: "error" }]);
+    expect(h.tui.views.every((view) => view.closed)).toBe(true);
+  });
+
+  it("keeps the review open on ctrl+s while the text is blank", async () => {
+    const h = await harness();
+    const { flow } = await agentHandover(h, undefined, { text: undefined });
+    const review = reviewOf(h);
+    replaceText(review, " \n ");
     expect(press(review, "ctrl+s")).toBe(true);
     await flush();
     expect(h.tui.top.node).toBe(review);
@@ -705,9 +776,9 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     press(reviewOf(h), "ctrl+s");
     await flush();
     const confirm = h.tui.top.node;
-    expect(codeOf(confirm).instanceId).toBe(ID_C);
+    expect(agentCode(confirm)).toMatch(/^[a-z]{2}$/u);
     expect(linesOf(confirm)).toContain("Kind: handover");
-    typeCode(confirm, codeOf(confirm).code);
+    typeCode(confirm, agentCode(confirm));
     const end = await flow;
     expect(h.services.sends).toEqual([
       { pair: GAMMA_PAIR, text: `${CLEAN_NOTE}\n\n${DRAFT}`, kind: "handover" },
@@ -721,13 +792,13 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
   it("returns to the review with the text kept on escape in the confirm view, while the flow and the tool call wait", async () => {
     const h = await harness();
     const { flow, ended } = await agentHandover(h, undefined, { text: undefined });
-    replaceBody(reviewOf(h), "edited");
+    replaceText(reviewOf(h), "edited");
     press(h.tui.top.node, "ctrl+s");
     await flush();
     expect(h.tui.top.node.kind).toBe("col");
     press(h.tui.top.node, "escape");
     await flush();
-    expect(prop(reviewOf(h), "text")).toBe(`${LEAD}edited`);
+    expect(prop(reviewOf(h), "text")).toBe("edited");
     expect(ended()).toBeUndefined();
     expect(h.slot.isOpen()).toBe(true);
     press(reviewOf(h), "escape");
@@ -788,7 +859,7 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     const { flow } = await agentHandover(h);
     press(reviewOf(h), "ctrl+s");
     await flush();
-    typeCode(h.tui.top.node, codeOf(h.tui.top.node).code);
+    typeCode(h.tui.top.node, agentCode(h.tui.top.node));
     await flush();
     expect(prop(h.tui.top.node, "text")).toBe(sendingText(GAMMA));
     press(h.tui.top.node, "escape");
@@ -797,7 +868,7 @@ describe("agent-started handover (#260 H2, H4, H5)", () => {
     gate.resolve();
   });
 
-  const HOST_ERROR = "provider \u001b[31mMARKER-7731\u001b[0m failed\nretry later";
+  const HOST_ERROR = "provider \u001b[31mMARKER-7731\u001b[0m\tfailed\nretry later";
   const CLEAN_FAILURE =
     "talk: the handover side turn failed. Nothing was sent. Host error: provider MARKER-7731 failed retry later";
 

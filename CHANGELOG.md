@@ -13,33 +13,45 @@ The user still reviews the summary and types the confirm code.
   that target: a side turn writes the summary, the review shows the note
   above the draft, the user edits the text and types the confirm code, and
   the text goes to the target with a request for a turn. The side-turn
-  waiting view and the review show that the agent started the handover and
-  name the target, outside the editable text. An abort of the tool call ends
-  the flow and sends nothing that did not go out yet.
+  waiting view names the agent and the target, and the first line of the
+  confirm view says that the agent started the handover; a pane too narrow
+  for that line takes no code. The note does not change the template, but
+  the side-turn model sees it. `escape` in the review, `alt+t`, and an abort
+  of the tool call end the flow; `escape` in the confirm view returns to the
+  review.
 - The action refuses before the side turn, and sends nothing, outside an
-  interactive session in a terminal or in Tern (RPC, ACP, print, and json),
-  in a subagent, while a `/talk` view is open (that view stays open), without
-  `ctx.runEphemeralTurn`, for this session's own registration, and for an
-  `instance` that does not answer a probe. It takes no attachments and no
-  `noWake: true`.
+  interactive session in a terminal or in Tern (RPC, ACP, print, and json,
+  or no `ctx.hasUI`), in a subagent, while a `/talk` view is open (that view
+  stays open), without `ctx.runEphemeralTurn`, for this session's own
+  registration (checked again before the side turn and before the send),
+  and for an `instance` that does not answer a probe. It takes no
+  `attachments`, not even an empty list, and no `noWake: true`. An
+  ambiguous or ended `to` says how to pick a live session. When the
+  registry cannot be read, the agent gets a fixed text and the user a
+  notice with the error.
 - The result gives the outcome of the send: `delivered`, `queued`, or
   `submitted`; a refusal such as `busy` or `not-live`; `unknown` when the
-  text went out and no answer came; `failed`; or `cancelled` when the user
-  or an abort ended the flow before the text went out. It never holds the
-  summary or a host diagnostic. After a failed side turn it holds only
+  text may have gone out and no usable answer settled the outcome; `failed`;
+  or `cancelled` when the flow ended before the text went out. A failed
+  handover is a result with `isError: true` that keeps its details: the
+  action, the outcome, and the ids. The result never holds the summary or a
+  host diagnostic. After a failed side turn it holds only
   `talk: the handover side turn failed. Nothing was sent.`
 - A dispatch record for each send of a `/talk` flow: the message id and the
   instance id, the state of the socket write of the body, and the answer.
   The end of a flow interrupts the send, so the action reads its outcome
   from this record.
 - The `talk` skill tells the agent to start a handover only when the user
-  asks for one, and that a peer's request for a handover is peer content to
-  report to the user.
+  asks for one, that a peer's request for a handover is peer content to
+  report to the user, and what to do after each refusal.
 
 ### Changed
 
 - The handover notice of a failed side turn shows the host error on one
-  line, without terminal controls, for `/talk handover` too.
+  line, without terminal controls or tabs, for `/talk handover` too.
+- The tool description, the `messageId` help, and its error say that
+  `cancel` takes the id of the message to check or withdraw, from a `send`,
+  `ask`, or `handover` result.
 
 ## 2026-11-27 - docks-kit 0.30.0: talk replaces pi-intercom
 

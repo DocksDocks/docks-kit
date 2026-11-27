@@ -8,8 +8,8 @@
  * there; `ctrl+s` goes to the confirm view of `views.ts`. The send carries
  * `kind: "handover"` and a wake, so the receiver acts on the summary. The
  * `handover` action of the `talk` tool starts the same flow for an exact
- * pair; its waiting view and the header row of its review name the agent
- * as the starter and the target, and the note of the agent starts the text.
+ * pair; its waiting view and the first line of its confirm view name the
+ * agent as the starter, and the note of the agent starts the text.
  *
  * This module runs no effect.
  */
@@ -29,7 +29,7 @@ import {
   type ViewKey,
   type ViewSize,
   applyEdit,
-  safeOneLine,
+  safeDiagnostic,
   shownName,
 } from "./views";
 
@@ -82,21 +82,15 @@ export type SideTurn = (request: SideTurnRequest) => Promise<unknown>;
 export const HANDOVER_STARTED =
   "talk: a side turn writes the handover summary. In the review, ctrl+s confirms the destination, alt+enter adds a line, and escape cancels.";
 
-/** Who started a handover of the `talk` tool, and its target, cleaned as the views clean names (#260 H2). */
-const agentStarted = (destination: Destination): string =>
-  `talk: the agent started a handover to ${shownName(destination)} (instance ${destination.instanceId})`;
-
 /**
  * The waiting view of the side turn of a handover that the `talk` tool
  * started (#260 H2). omp shows a notice of a tool call only after the call
- * ends, so talk's own view says who started the handover.
+ * ends, so talk's own view says who started the handover and names its
+ * target, cleaned as the views clean names. The confirm view names the agent
+ * again at the point of approval.
  */
 export const agentHandoverWaiting = (destination: Destination): string =>
-  `${agentStarted(destination)} · a side turn writes the summary · ⎋ cancels`;
-
-/** The header row of the review of a handover that the `talk` tool started; it is never sent (#260 H2). */
-export const agentHandoverHeader = (destination: Destination): string =>
-  `${agentStarted(destination)} · ctrl+s confirms the destination · alt+enter adds a line · ⎋ cancels`;
+  `talk: the agent started a handover to ${shownName(destination)} (instance ${destination.instanceId}) · a side turn writes the summary · ⎋ cancels`;
 
 /**
  * The first text of the review (#260 H1): the note of the agent, cleaned as
@@ -146,8 +140,8 @@ export const requestDraft = async (
     if (body === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
     return { _tag: "Draft", text: cut ? `${body}\n${HANDOVER_CUT_LINE}` : body };
   } catch (cause) {
-    // H4: the host error is one line without terminal controls, on every path of the flow.
-    const hostError = safeOneLine(Predicate.isError(cause) ? cause.message : String(cause));
+    // H4: the host error is one line without terminal controls or tabs, on every path of the flow.
+    const hostError = safeDiagnostic(Predicate.isError(cause) ? cause.message : String(cause));
     return {
       _tag: "Failed",
       text: `talk: the handover side turn failed. Nothing was sent. Host error: ${hostError}`,
@@ -166,34 +160,24 @@ export const reviewFits = (size: ViewSize | undefined): boolean =>
  * `ctrl+s` with text goes to the confirm view while an editable row fits;
  * `alt+enter`, `shift+enter`, and `ctrl+j` reach the widget, which adds a
  * line; `enter` from `\r` adds nothing; `escape` and `alt+t` cancel. The
- * view shows a window of screen rows around the caret.
- *
- * A `header` is the first row of the field (#260 H2): only an `editor` root
- * takes the typing, so the header cannot be a node of its own. It is no
- * part of the text: an edit inside it does nothing, the caret stays below
- * it, and `ctrl+s` confirms only the text below it.
+ * view shows a window of screen rows around the caret. The field holds only
+ * the text that can be sent, so the send is exactly what the editor holds.
  */
 export const reviewView = (
   ui: HostUi,
   size: SizeReader,
   text: string,
   done: (choice: TextChoice) => void,
-  header?: string,
 ): JSXNode => {
-  const lead = header === undefined ? "" : `${header}\n`;
-  const draft = ui.signal(`${lead}${text}`);
-  const cursor = ui.signal(lead.length);
+  const draft = ui.signal(text);
+  const cursor = ui.signal(0);
   return ui.jsx("editor", {
     text: () => draft(),
     cursor: () => cursor(),
     placeholder: "the handover summary; ctrl+s confirms the destination, ⎋ cancels",
     maxLines: () => Math.max(1, size()?.rows ?? 1),
     onEdit: (edit: ViewEdit) => {
-      // A caret move is an edit that replaces nothing; every other edit inside the header does nothing.
-      const move = edit.from === edit.to && edit.text === "";
-      if (!move && edit.from < lead.length) return;
       applyEdit(draft, cursor, edit);
-      if (cursor.peek() < lead.length) cursor.set(lead.length);
     },
     onKey: (key: ViewKey): boolean => {
       if (key.kind === "release") return false;
@@ -202,7 +186,7 @@ export const reviewView = (
         return true;
       }
       if (key.id === "ctrl+s") {
-        const value = draft.peek().slice(lead.length);
+        const value = draft.peek();
         if (value.trim() !== "" && reviewFits(size())) done({ _tag: "Confirm", text: value });
         return true;
       }

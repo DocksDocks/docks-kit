@@ -320,7 +320,9 @@ send nothing. Other keys go to the field.
 No text leaves through a view before the operator confirms the destination
 in the confirm view. The view is a full-screen overlay. Its rows are:
 
-1. `Send to <full instance id>: type <code>`
+1. `Send to <full instance id>: type <code>`. For a handover that the
+   `handover` action of the `talk` tool started:
+   `Send to <full instance id> (a handover that the agent started): type <code>`.
 2. The name and the folder of the destination.
 3. `Kind: message` or `Kind: handover`.
 4. `Text:` and the first line of the text.
@@ -328,7 +330,9 @@ in the confirm view. The view is a full-screen overlay. Its rows are:
 
 The view cuts each row after the first to the width. When the first row does
 not fit the width, the view shows only
-`talk: make the pane wider to confirm the destination.`, and no key sends.
+`talk: make the pane wider to confirm the destination.`, and no key sends:
+the code letters are not shown, and the view takes none. So the user cannot
+confirm a tool-started handover without the line that names the agent.
 
 ### Confirm code
 
@@ -479,7 +483,9 @@ cuts a reply above 4096 bytes of UTF-8, which it ends with the line
 each tool call of the side turn.
 
 While the side turn runs, a waiting view at the bottom of the screen holds
-the focus: `talk: a side turn writes the handover summary · ⎋ cancels`.
+the focus: `talk: a side turn writes the handover summary · ⎋ cancels`, or
+for a tool-started handover
+`talk: the agent started a handover to <name> (instance <instance id>) · a side turn writes the summary · ⎋ cancels`.
 `escape` and `alt+t` there end the flow; every other key does nothing, so no
 key reaches the composer of omp. When the flow ends during the side turn,
 the flow aborts it, shows no error, and mounts no review. When the reply
@@ -579,9 +585,10 @@ Each of these shows an error notice and sends nothing:
 | The reply is empty              | `talk: the side turn gave no handover text. Nothing was sent.`                                     |
 | The target does not resolve     | The resolver error; no side turn starts                                                            |
 
-The host error is the message of the rejection, cleaned with `safeOneLine`
-(`cli/talk/ui/views.ts`): each terminal control goes and the text is one
-line. The `/talk` flow and a tool-started flow show the same notice.
+The host error is the message of the rejection, cleaned with
+`safeDiagnostic` (`cli/talk/ui/views.ts`): each terminal control goes, each
+tab becomes a space, and the text is one line. The draft keeps its tabs. The
+`/talk` flow and a tool-started flow show the same notice.
 
 A cancel in the review or in the confirm view sends nothing and shows no
 notice.
@@ -595,32 +602,45 @@ code, and the send are the ones above, so the user still reviews the summary
 and types the code. The differences:
 
 - The flow shows no start notice, because omp shows a notice that a tool
-  call posts only after the call ends. Instead, the side-turn waiting view
-  and the review show this line, outside the editable text, so it never goes
-  out with the handover:
-
-  ```text
-  talk: the agent started a handover to <name> (instance <instance id>)
-  ```
-
-- The `message` of the call is a note above the draft. The flow cleans it
+  call posts only after the call ends. The waiting view of the side turn
+  names the agent and the target (see [Side turn](#side-turn)).
+- The review holds only the text that can be sent: the `message` of the call
+  as a note, then a blank line, then the draft. The flow cleans the note
   with `safeMultiline`, as it cleans the draft, then trims it, so no terminal
-  control of agent text reaches the view, and the user sees the text that can
-  go out. A blank line separates the note and the draft. The note does not
-  change the side turn.
-- An abort of the tool call ends the flow as `escape` does.
-- The action refuses before the side turn outside mode `tui`, in a subagent,
-  while a `/talk` flow is open (which stays open), without
-  `ctx.runEphemeralTurn`, and for the registration of this session.
+  control of agent text reaches the view. A blank note adds nothing. The
+  note does not change the template, but the side-turn model sees it,
+  because omp copies the pending tool call with its arguments into the
+  side-turn request. The user approves only what goes to the peer.
+- The first line of the confirm view names the agent:
+  `Send to <full instance id> (a handover that the agent started): type <code>`.
+  A pane too narrow for it shows
+  `talk: make the pane wider to confirm the destination.` and takes no code.
+- Right before the send, the flow checks that the pair is not this binding's
+  registration, now or at the start of the call. When it is, the flow shows
+  `talk: the destination of this handover is now this session, so talk sent nothing.`
+  and sends nothing.
+- `escape` in the waiting view or the review ends the flow, and the result
+  is `cancelled`. `escape` in the confirm view returns to the review with the
+  text kept, and the tool call still waits. `alt+t` ends the flow: the
+  result is `cancelled` while no body write started. An abort of the tool
+  call ends the flow as `escape` does: `cancelled` before the body write,
+  `unknown` after it started.
+- The action refuses before the side turn outside mode `tui`, without
+  `ctx.hasUI`, in a subagent, while a `/talk` flow is open (which stays
+  open), without `ctx.runEphemeralTurn`, and for the registration of this
+  session. When the registry cannot be read to check the target, the user
+  gets the notice
+  `talk: the agent asked for a handover, but talk could not check its target, so nothing was sent. Error: <host error>`,
+  cleaned with `safeDiagnostic`, and the agent gets a fixed text without it.
 
 The tool result gives the outcome of the send from its dispatch record:
 `delivered`, `queued`, or `submitted`; a refusal such as `busy` or `not-live`;
-`unknown` when the body went out and no answer came; `failed`; or
-`cancelled` when the flow ended before the body write. After a failed side
-turn, the result holds only `talk: the handover side turn failed. Nothing was
-sent.` The host error stays in the notice. The result never holds the
-summary. `cli/docs/talk-tool.md`, "Handover", lists the refusals and the
-outcomes.
+`unknown` when the text may have gone out and no usable answer settled the
+outcome; `failed`; or `cancelled` when the flow ended before the body write.
+After a failed side turn, the result holds only `talk: the handover side
+turn failed. Nothing was sent.` The host error stays in the notice. The
+result never holds the summary. `cli/docs/talk-tool.md`, "Handover", lists
+the refusals and the outcomes.
 
 ### Privacy
 

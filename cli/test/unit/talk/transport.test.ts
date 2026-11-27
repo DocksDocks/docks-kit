@@ -18,9 +18,10 @@ import { type Server, type Socket, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
 import { Effect, Exit, Fiber, Layer, Logger, Option, Predicate, type Scope } from "effect";
 import { TestClock } from "effect/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { type Client, DIAL_SLOTS, makeClient, processAlive } from "../../../talk/transport/client";
 import {
@@ -450,6 +451,66 @@ describe("bounded connection input", () => {
     } finally {
       client.destroy();
       server.close();
+    }
+  });
+});
+
+describe("frame writes (#260 H5)", () => {
+  /** The accepted end of a loopback connection, with a function that closes both ends. */
+  const acceptedSocket = async (): Promise<{
+    readonly socket: Socket;
+    readonly close: () => void;
+  }> => {
+    const server: Server = createServer();
+    const accepted = Promise.withResolvers<Socket>();
+    server.on("connection", (socket) => accepted.resolve(socket));
+    const listening = Promise.withResolvers<void>();
+    server.listen({ host: "127.0.0.1", port: 0 }, () => listening.resolve());
+    await listening.promise;
+    const address = server.address();
+    const port = address !== null && typeof address === "object" ? address.port : 0;
+    const client = connect({ host: "127.0.0.1", port });
+    client.resume();
+    const socket = await accepted.promise;
+    return {
+      socket,
+      close: () => {
+        client.destroy();
+        socket.destroy();
+        server.close();
+      },
+    };
+  };
+
+  it("writes an untracked frame without a completion callback", async () => {
+    const { socket, close } = await acceptedSocket();
+    try {
+      const write = vi.spyOn(socket, "write");
+      const connection = await Effect.runPromise(makeConnection(socket));
+      await Effect.runPromise(connection.write({ type: "ping" }));
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0]).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+
+  it("tracks a frame write as pending from the write call until its completion callback reports done", async () => {
+    const { socket, close } = await acceptedSocket();
+    try {
+      const connection = await Effect.runPromise(makeConnection(socket));
+      const states: Array<string> = [];
+      Effect.runSync(
+        connection.write({ type: "ping" }, (state) => {
+          states.push(state);
+        }),
+      );
+      // Node runs the completion callback in a later tick, never inside the write call.
+      expect(states).toEqual(["pending"]);
+      await waitFor(() => states.length === 2, SETTLE_MS, "the write completion");
+      expect(states).toEqual(["pending", "done"]);
+    } finally {
+      close();
     }
   });
 });
@@ -2468,6 +2529,97 @@ describe("talk transport between spawned Bun peers", () => {
         rmSync(entryPath, { force: true });
         rmSync(starting, { force: true });
         rmSync(named, { force: true });
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  /**
+   * A Bun client for the closed-socket case of #260 H5: it imports the built
+   * bundle, sends one traced request, and in the guard right before the body
+   * write prints `guard` and blocks until the test writes a line, so the
+   * test closes the peer's socket while the client's event loop waits.
+   */
+  const CLOSED_SOCKET_CLIENT = `
+import { readSync } from "node:fs";
+import { Effect, ManagedRuntime } from "effect";
+// The bundle path comes from the environment, so a static import cannot name it.
+const talk = await import(process.env.TALK_BUNDLE_URL);
+const runtime = ManagedRuntime.make(talk.TalkTransport.layer({}));
+const target = JSON.parse(process.env.TALK_TARGET);
+const trace = { write: "none", answer: undefined };
+const guard = () => {
+  process.stdout.write("guard\\n");
+  const buffer = Buffer.alloc(1);
+  for (;;) {
+    try {
+      if (readSync(0, buffer, 0, 1, null) === 1) return true;
+    } catch (error) {
+      if (error.code !== "EAGAIN") throw error;
+      Bun.sleepSync(5);
+    }
+  }
+};
+const outcome = await runtime.runPromise(
+  talk.TalkTransport.use((transport) =>
+    transport.request(target, "echo", null, undefined, guard, trace),
+  ).pipe(Effect.match({ onFailure: (error) => error.outcome, onSuccess: () => "ok" })),
+);
+process.stdout.write(JSON.stringify({ trace, outcome }) + "\\n");
+await runtime.dispose();
+process.exit(0);
+`;
+
+  it.skipIf(WINDOWS)(
+    "records the body write as failed under Bun when the peer closed its socket right before the write (#260 H5)",
+    async () => {
+      const secret = randomBytes(32);
+      const pair = { instanceId: hex(8), sessionId: "closed-peer" };
+      const path = join(folder, socketName(process.pid));
+      const listener = await startFakeListener(path, { mode: "answer", secret, pair });
+      const entryPath = await writeEntry({
+        version: PROTOCOL_VERSION,
+        ...pair,
+        name: "closed-peer",
+        cwd: base,
+        processId: process.pid,
+        endpoint: { kind: "unix", path },
+        startTime: 1_700_000_000_000,
+        secret: secret.toString("hex"),
+      });
+      const child = spawn(BUN_RUNTIME, ["-e", CLOSED_SOCKET_CLIENT], {
+        cwd: REPO_DIR,
+        env: {
+          ...env,
+          TALK_BUNDLE_URL: pathToFileURL(bundle).href,
+          TALK_TARGET: JSON.stringify(pair),
+        },
+        stdio: "pipe",
+      });
+      const errors: Array<string> = [];
+      child.stderr.on("data", (chunk: Buffer) => errors.push(chunk.toString("utf8")));
+      const result = Promise.withResolvers<unknown>();
+      child.once("exit", () => result.reject(new Error(`the client exited: ${errors.join("")}`)));
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        if (line === "guard") {
+          // The client waits in its guard: close the peer's end, then let the client write.
+          for (const socket of listener.sockets()) socket.destroy();
+          void waitFor(() => listener.sockets().length === 0, SETTLE_MS, "the closed peer").then(
+            () => child.stdin.write("go\n"),
+          );
+        } else if (line.startsWith("{")) result.resolve(JSON.parse(line));
+      });
+      try {
+        expect(await result.promise).toEqual({
+          trace: { write: "failed" },
+          outcome: "unreachable",
+        });
+        expect(listener.requests()).toBe(0);
+      } finally {
+        child.kill("SIGKILL");
+        closeFake(listener);
+        rmSync(entryPath, { force: true });
+        rmSync(path, { force: true });
       }
     },
     SPAWN_TIMEOUT_MS,

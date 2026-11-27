@@ -51,18 +51,14 @@ import {
   HANDOVER_SIDE_TURN_FAILED,
   HANDOVER_UNKNOWN,
   HANDOVER_WRITE_FAILED,
+  TALK_TOOL_DESCRIPTION,
 } from "../../../talk/tool/tool";
 import { DIAL_SLOTS } from "../../../talk/transport/client";
 import { socketFileName } from "../../../talk/transport/endpoint";
 import { entryFileName } from "../../../talk/transport/registry";
 import { PING_KIND, type RequestTrace, type Target } from "../../../talk/transport/request";
-import { VIEWS_NEED_TUI } from "../../../talk/ui/command";
-import {
-  HANDOVER_NO_SIDE_TURN,
-  HANDOVER_PROMPT,
-  agentHandoverHeader,
-  agentHandoverWaiting,
-} from "../../../talk/ui/handover";
+import { HANDOVER_TARGET_IS_THIS_SESSION, VIEWS_NEED_TUI } from "../../../talk/ui/command";
+import { HANDOVER_NO_SIDE_TURN, HANDOVER_PROMPT } from "../../../talk/ui/handover";
 import type { HostModuleLoader } from "../../../talk/ui/host";
 
 // The extension factory of #250 Step 4: capability probe (E11), process
@@ -181,26 +177,46 @@ class FakeNetwork {
   retainWorks = true;
   /** True makes every `list` fail, as an unreadable registry. */
   listFails = false;
+  /** The reason of each failed `list`. */
+  listReason = "the folder is unreadable";
   /** True runs each handler but loses its answer, as a lost acknowledgement. */
   loseAnswers = false;
   /** Set: each `register` waits for it before it creates the entry. */
   registerGate: Promise<void> | undefined;
+  /** Set: each `register` creates and publishes its entry, then waits for it before it answers. */
+  registeredGate: Promise<void> | undefined;
   /** The hooks of the process singleton, from its transport. */
   hooks: TransportHooks | undefined;
   /** The signal of each `list`, `probeAll`, `known`, and `request` call, in call order. */
   readonly signals: Array<AbortSignal | undefined> = [];
   /** Set: the next `list` reads the registry, then waits for it; a later call does not. */
   listGate: Promise<void> | undefined;
+  /** Set: the next `list` waits for it before it reads the registry. */
+  listReadGate: Promise<void> | undefined;
   /** Set: the next `known` waits for it; a later call does not. */
   knownGate: Promise<void> | undefined;
+  /** Set: the next `probeAll` waits for it before it probes; a later call does not. */
+  probeGate: Promise<void> | undefined;
+  /** Set: each `probeAll` rejects with it, as a defect of the transport runtime. */
+  probeError: Error | undefined;
   /** Set: the next `request` waits for it, as a peer handshake does, before its body goes out. */
   handshakeGate: Promise<void> | undefined;
   /** True fails each traced body write, as a socket write that the peer's close rejects (#260 H5). */
   writeFails = false;
+  /** Set: the next traced body write stays `pending` until it settles, as a socket write whose callback waits. */
+  writeGate: Promise<void> | undefined;
+  /** The traced body writes that wait at `writeGate` now. */
+  pendingWrites = 0;
   /** Set: the next traced request waits for it after its body went out and before its answer. */
   answerGate: Promise<void> | undefined;
   /** The traced requests that wait at `answerGate` now. */
   waitingAnswers = 0;
+  /** The body of each traced request that the client wrote or tried to write, with its target and kind. */
+  readonly bodies: Array<{
+    readonly target: Target;
+    readonly kind: string;
+    readonly body: Schema.Json;
+  }> = [];
 
   live(sessionId?: string): Array<NetEntry> {
     return [...this.entries.values()].filter(
@@ -260,8 +276,20 @@ class FakeNetwork {
         : { _tag: "Failed", outcome: entry.scripted, reason: "scripted" };
     if (!entry.live) return { _tag: "Failed", outcome: "not-live", reason: "ended" };
     if (trace !== undefined) {
-      trace.write = this.writeFails ? "failed" : "done";
-      if (this.writeFails) return { _tag: "Failed", outcome: "unreachable", reason: "EPIPE" };
+      this.bodies.push({ target, kind, body });
+      if (this.writeFails) {
+        trace.write = "failed";
+        return { _tag: "Failed", outcome: "unreachable", reason: "EPIPE" };
+      }
+      trace.write = "pending";
+      const write = this.writeGate;
+      this.writeGate = undefined;
+      if (write !== undefined) {
+        this.pendingWrites += 1;
+        await write;
+        this.pendingWrites -= 1;
+      }
+      trace.write = "done";
       const gate = this.answerGate;
       this.answerGate = undefined;
       if (gate !== undefined) {
@@ -302,6 +330,7 @@ class FakeNetwork {
         };
         this.entries.set(entry.instanceId, entry);
         this.log.push(`register ${entry.instanceId} ${input.sessionId}`);
+        if (this.registeredGate !== undefined) await this.registeredGate;
         return {
           _tag: "Registered",
           registration: { instanceId: entry.instanceId, sessionId: entry.sessionId },
@@ -332,7 +361,10 @@ class FakeNetwork {
       },
       list: async (signal): Promise<ListAnswer> => {
         this.signals.push(signal);
-        if (this.listFails) return { _tag: "ListFailed", reason: "the folder is unreadable" };
+        const read = this.listReadGate;
+        this.listReadGate = undefined;
+        if (read !== undefined) await read;
+        if (this.listFails) return { _tag: "ListFailed", reason: this.listReason };
         const peers: Array<ListedPeer> = [...this.entries.values()]
           .filter((entry) => entry.live)
           .map(({ instanceId, sessionId, name, cwd }) => ({ instanceId, sessionId, name, cwd }));
@@ -344,6 +376,10 @@ class FakeNetwork {
       },
       probeAll: async (targets, signal) => {
         this.signals.push(signal);
+        const gate = this.probeGate;
+        this.probeGate = undefined;
+        if (gate !== undefined) await gate;
+        if (this.probeError !== undefined) throw this.probeError;
         return Promise.all(
           targets.map(async (target) => {
             const answer = await this.dispatch(target, PING_KIND, null);
@@ -395,6 +431,7 @@ interface ToolDefinition {
   ) => Promise<{
     readonly content: ReadonlyArray<{ readonly text: string }>;
     readonly details?: unknown;
+    readonly isError?: boolean;
   }>;
 }
 
@@ -473,8 +510,10 @@ type MarkerMode = "own" | "missing" | "other-parameters" | "placeholder";
 interface ToolCall {
   readonly ok: boolean;
   readonly text: string;
-  /** The `details` of a result; a failed call throws, so it has none. */
+  /** The `details` of a result; a call that throws has none. */
   readonly details?: unknown;
+  /** A result that omp shows as an error, with its details (#260 H4); a call that throws has none. */
+  readonly isError?: true;
 }
 
 /** One `ctx.ui.custom` view of the fake TUI. */
@@ -702,11 +741,10 @@ class FakeSession {
     if (talk === undefined) throw new Error("no talk tool");
     try {
       const result = await talk.execute("call-1", params, signal, undefined, this.ctx);
-      return {
-        ok: true,
-        text: result.content.map((part) => part.text).join("\n"),
-        details: result.details,
-      };
+      const text = result.content.map((part) => part.text).join("\n");
+      return result.isError === true
+        ? { ok: false, text, details: result.details, isError: true }
+        : { ok: true, text, details: result.details };
     } catch (error) {
       return { ok: false, text: Predicate.isError(error) ? error.message : String(error) };
     }
@@ -2403,16 +2441,22 @@ const pickerItems = (
   });
 };
 
-/** The instance id and the code of the first line of a confirm view. */
-const confirmCode = (node: FakeNode): { readonly instanceId: string; readonly code: string } => {
+/**
+ * The instance id and the code of the first line of a confirm view, and
+ * whether that line names the agent as the starter of a handover (#260).
+ */
+const confirmCode = (
+  node: FakeNode,
+): { readonly instanceId: string; readonly code: string; readonly byAgent: boolean } => {
   const children = nodeProp(node, "children");
   const first: unknown = Array.isArray(children) ? children[0] : undefined;
   const line = isFakeNode(first) ? nodeProp(first, "text") : undefined;
-  const match = /^Send to ([0-9a-f]{16}): type ([a-z]{2})$/u.exec(
-    Predicate.isString(line) ? line : "",
-  );
+  const match =
+    /^Send to ([0-9a-f]{16})( \(a handover that the agent started\))?: type ([a-z]{2})$/u.exec(
+      Predicate.isString(line) ? line : "",
+    );
   if (match === null) throw new Error(`no confirm line: ${String(line)}`);
-  return { instanceId: match[1] ?? "", code: match[2] ?? "" };
+  return { instanceId: match[1] ?? "", code: match[3] ?? "", byAgent: match[2] !== undefined };
 };
 
 /** Lets microtasks and zero-delay timers run until `ready` holds. */
@@ -2923,12 +2967,17 @@ describe("handover action of the talk tool (#260)", () => {
     return { call, settled: () => state.settled };
   };
 
-  /** `ctrl+s` in the review, then the code in the confirm view. */
-  const approve = async (session: FakeSession): Promise<void> => {
+  /**
+   * `ctrl+s` in the review, then the code in the confirm view. The first line
+   * of that view names the agent as the starter exactly when `byAgent` holds.
+   */
+  const approve = async (session: FakeSession, byAgent = true): Promise<void> => {
     await until(() => openKind(session) === "editor");
     pressKey(session.top.node, "ctrl+s");
     await until(() => openKind(session) === "col");
-    typeCode(session.top.node, confirmCode(session.top.node).code);
+    const confirm = confirmCode(session.top.node);
+    expect(confirm.byAgent).toBe(byAgent);
+    typeCode(session.top.node, confirm.code);
   };
 
   /** Neither the text nor the details of a result hold the summary. */
@@ -2938,18 +2987,35 @@ describe("handover action of the talk tool (#260)", () => {
     expect(JSON.stringify(result.details ?? null)).not.toContain("SUMMARY-MARKER-4410");
   };
 
-  /** The ids of a result: the message id and the instance id that it names. */
-  const idsOf = (text: string): { readonly messageId: string; readonly instanceId: string } => ({
-    messageId: idFrom(text, "Message id"),
-    instanceId: idFrom(text, "Instance"),
+  /** The id lines of a result about beta: the message id and beta's instance id and name. */
+  const idLines = (messageId: string, betaId: string): string =>
+    `Message id: ${messageId}\nInstance: ${betaId} (${literal("beta")})`;
+
+  /** The message id of the one handover body that went out to beta, as the request carried it. */
+  const sentId = (betaId: string): string => {
+    const bodies = network.bodies.filter(
+      (sent) => sent.kind === "deliver" && sent.target.instanceId === betaId,
+    );
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0]?.body;
+    expect(Predicate.hasProperty(body, "kind") ? body.kind : undefined).toBe("handover");
+    if (!Predicate.hasProperty(body, "messageId") || !Predicate.isString(body.messageId))
+      throw new Error("a handover body without a message id");
+    return body.messageId;
+  };
+
+  /** A failed handover: omp shows it as an error, and its details hold the action, the outcome, and the ids (H4). */
+  const failed = (text: string, details: object = {}): ToolCall => ({
+    ok: false,
+    text,
+    details: { action: "handover", ...details },
+    isError: true,
   });
 
-  /** The header row of a review of beta and its line break: shown, never sent. */
-  const betaLead = (betaId: string): string =>
-    `${agentHandoverHeader({ instanceId: betaId, sessionId: "s-beta", name: "beta", cwd: "/x" })}\n`;
+  const CANCELLED = failed(HANDOVER_CANCELLED, { outcome: "cancelled" });
 
   it.each(["to", "instance"] as const)(
-    "hands over by %s: the side turn runs HANDOVER_PROMPT, the review shows the cleaned note above the draft, and ctrl+s and the code deliver kind handover with a wake",
+    "hands over by %s: the side turn runs HANDOVER_PROMPT, the review holds the cleaned note above the draft, and ctrl+s and the code deliver kind handover with a wake",
     async (field) => {
       const { alpha, beta, betaId, turns } = await sessions();
       const { call } = startHandover(alpha, {
@@ -2962,74 +3028,67 @@ describe("handover action of the talk tool (#260)", () => {
       expect(Predicate.hasProperty(turn, "promptText") ? turn.promptText : "").toBe(
         HANDOVER_PROMPT,
       );
-      expect(nodeProp(alpha.top.node, "text")).toBe(
-        `${betaLead(betaId)}${CLEAN_NOTE}\n\n${SUMMARY}`,
-      );
+      expect(nodeProp(alpha.top.node, "text")).toBe(`${CLEAN_NOTE}\n\n${SUMMARY}`);
       pressKey(alpha.top.node, "ctrl+s");
       await until(() => openKind(alpha) === "col");
-      expect(confirmCode(alpha.top.node).instanceId).toBe(betaId);
+      expect(confirmCode(alpha.top.node)).toMatchObject({ instanceId: betaId, byAgent: true });
       expect(beta.sent).toEqual([]);
       typeCode(alpha.top.node, confirmCode(alpha.top.node).code);
       const result = await call;
       await until(() => beta.talkTexts().length === 1);
       const [received] = beta.sent;
-      expect(received?.message.details).toMatchObject({ v: 1, kind: "handover" });
+      const messageId = sentId(betaId);
+      expect(received?.message.details).toMatchObject({ v: 1, kind: "handover", messageId });
       expect(received?.options).toEqual({ triggerTurn: true });
       expect(beta.talkTexts()[0]).toBe(
         `**Handover from ${literal("alpha")}** (${literal("/work/project")}): the sender asks this session to continue its work.\n` +
           `${TRUST}\n${CLEAN_NOTE}\n\n${SUMMARY}`,
       );
-      expect(result.ok).toBe(true);
-      expect(result.text).toContain("Delivered");
-      const ids = idsOf(result.text);
-      expect(ids.instanceId).toBe(betaId);
-      expect(result.details).toEqual({ action: "handover", ...ids, outcome: "delivered" });
+      expect(result).toEqual({
+        ok: true,
+        text: `Handover: Delivered: the message is in the session.\n${idLines(messageId, betaId)}`,
+        details: { action: "handover", messageId, instanceId: betaId, outcome: "delivered" },
+      });
       holdsNoSummary(result);
     },
   );
 
-  it("names the agent and the target in the waiting view and in the review header, and shows no notice while the call runs", async () => {
+  it("names the agent and the target in the waiting view, and shows no notice while the call runs", async () => {
     const { alpha, betaId } = await sessions();
     const reply = Promise.withResolvers<unknown>();
     alpha.sideTurn = async () => reply.promise;
     const { call } = startHandover(alpha, { to: "beta" });
     await until(() => openKind(alpha) === "text");
-    const destination = { instanceId: betaId, sessionId: "s-beta", name: "beta", cwd: "/x" };
-    expect(nodeProp(alpha.top.node, "text")).toBe(agentHandoverWaiting(destination));
-    expect(agentHandoverWaiting(destination)).toContain(
-      `the agent started a handover to ${literal("beta")} (instance ${betaId})`,
+    expect(nodeProp(alpha.top.node, "text")).toBe(
+      `talk: the agent started a handover to ${literal("beta")} (instance ${betaId}) · a side turn writes the summary · ⎋ cancels`,
     );
     reply.resolve({ replyText: SUMMARY });
     await until(() => openKind(alpha) === "editor");
-    expect(nodeProp(alpha.top.node, "text")).toBe(`${betaLead(betaId)}${SUMMARY}`);
-    expect(agentHandoverHeader(destination)).toContain(
-      `the agent started a handover to ${literal("beta")} (instance ${betaId})`,
-    );
+    expect(nodeProp(alpha.top.node, "text")).toBe(SUMMARY);
     expect(alpha.notices).toEqual([]);
     pressKey(alpha.top.node, "escape");
-    expect((await call).text).toBe(HANDOVER_CANCELLED);
+    expect(await call).toEqual(CANCELLED);
     expect(alpha.notices).toEqual([]);
   });
 
   it("returns from the confirm view to the review on escape with the text kept, while the tool call waits", async () => {
-    const { alpha, beta, betaId } = await sessions();
+    const { alpha, beta } = await sessions();
     const { call, settled } = startHandover(alpha, { to: "beta" });
     await until(() => openKind(alpha) === "editor");
-    const lead = betaLead(betaId);
     const draft = nodeProp(alpha.top.node, "text");
     const length = Predicate.isString(draft) ? draft.length : 0;
     fireNode(alpha.top.node, "onEdit", {
-      from: lead.length,
+      from: 0,
       to: length,
       text: "edited",
-      cursor: lead.length + 6,
+      cursor: 6,
       len: length,
     });
     pressKey(alpha.top.node, "ctrl+s");
     await until(() => openKind(alpha) === "col");
     pressKey(alpha.top.node, "escape");
     await until(() => openKind(alpha) === "editor");
-    expect(nodeProp(alpha.top.node, "text")).toBe(`${lead}edited`);
+    expect(nodeProp(alpha.top.node, "text")).toBe("edited");
     expect(settled()).toBe(false);
     await approve(alpha);
     expect((await call).ok).toBe(true);
@@ -3037,25 +3096,37 @@ describe("handover action of the talk tool (#260)", () => {
     expect(beta.talkTexts()[0]).toMatch(/\nedited$/u);
   });
 
-  it("reports queued with the ids for a busy tui target", async () => {
-    const { alpha, betaId } = await sessions((fake) => {
+  it("reports queued with the ids of the request, and cancel with those ids withdraws the handover", async () => {
+    const { alpha, beta, betaId } = await sessions((fake) => {
       fake.idle = false;
     });
     const { call } = startHandover(alpha, { to: "beta" });
     await approve(alpha);
     const result = await call;
-    expect(result.ok).toBe(true);
-    expect(result.text).toContain("Queued");
-    expect(result.details).toEqual({
-      action: "handover",
-      ...idsOf(result.text),
-      outcome: "queued",
+    const messageId = sentId(betaId);
+    expect(result).toEqual({
+      ok: true,
+      text: `Handover: Queued: the session is busy or changes its session, so talk holds the message and sends it when it can. cancel can withdraw it.\n${idLines(messageId, betaId)}`,
+      details: { action: "handover", messageId, instanceId: betaId, outcome: "queued" },
     });
-    expect(idsOf(result.text).instanceId).toBe(betaId);
     holdsNoSummary(result);
+    const cancel = await alpha.tool({
+      action: "cancel",
+      instance: idFrom(result.text, "Instance"),
+      messageId: idFrom(result.text, "Message id"),
+    });
+    expect(cancel).toEqual({
+      ok: true,
+      text: `Cancelled: the message was still queued, and talk removed it.\n${idLines(messageId, betaId)}`,
+      details: { action: "cancel", messageId, instanceId: betaId, outcome: "cancelled" },
+    });
+    beta.idle = true;
+    await vi.advanceTimersByTimeAsync(QUEUE_RETRY_MS * 3);
+    expect(beta.sent).toEqual([]);
+    expect(beta.talkTexts()).toEqual([]);
   });
 
-  it("reports a busy answer with the ids for a busy print target, and nothing is delivered", async () => {
+  it("reports a busy answer with the ids of the request for a busy print target, and nothing is delivered", async () => {
     const { alpha, beta, betaId } = await sessions((fake) => {
       fake.mode = "print";
       fake.idle = false;
@@ -3063,10 +3134,13 @@ describe("handover action of the talk tool (#260)", () => {
     const { call } = startHandover(alpha, { instance: betaId });
     await approve(alpha);
     const result = await call;
-    expect(result.ok).toBe(false);
-    expect(result.text).toContain("Busy");
-    expect(idsOf(result.text).instanceId).toBe(betaId);
-    holdsNoSummary(result);
+    const messageId = sentId(betaId);
+    expect(result).toEqual(
+      failed(
+        `talk: Handover: Busy: the session takes no message now: it runs one task and exits, or the queue that talk holds for it is full. Nothing was delivered.\n${idLines(messageId, betaId)}`,
+        { messageId, instanceId: betaId, outcome: "busy" },
+      ),
+    );
     await settle();
     expect(beta.talkTexts()).toEqual([]);
   });
@@ -3083,8 +3157,7 @@ describe("handover action of the talk tool (#260)", () => {
     }
     await until(() => openKind(alpha) === kind);
     pressKey(alpha.top.node, key);
-    const result = await call;
-    expect(result).toEqual({ ok: false, text: HANDOVER_CANCELLED });
+    expect(await call).toEqual(CANCELLED);
     await settle();
     expect(beta.sent).toEqual([]);
   });
@@ -3108,7 +3181,7 @@ describe("handover action of the talk tool (#260)", () => {
         await until(() => openKind(alpha) === "col");
       }
       controller.abort();
-      expect((await call).text).toBe(HANDOVER_CANCELLED);
+      expect(await call).toEqual(CANCELLED);
       const [signal] = signals;
       expect(signal instanceof AbortSignal && signal.aborted).toBe(true);
       expect(openKind(alpha)).toBeUndefined();
@@ -3122,8 +3195,8 @@ describe("handover action of the talk tool (#260)", () => {
   it.each([
     ["an empty reply", () => Promise.resolve({ replyText: "  " })],
     [
-      "a host error with a marker",
-      () => Promise.reject(new Error("upstream \u001b[2JHOST-MARKER-5521\u0007 down\nretry")),
+      "a host error with a marker and a tab",
+      () => Promise.reject(new Error("upstream \u001b[2JHOST-MARKER-5521\u0007\tdown\nretry")),
     ],
   ])(
     "reports the fixed side-turn failure for %s, and only the notice shows the cleaned host error",
@@ -3131,9 +3204,8 @@ describe("handover action of the talk tool (#260)", () => {
       const { alpha, beta } = await sessions();
       alpha.sideTurn = reply;
       const result = await startHandover(alpha, { to: "beta" }).call;
-      expect(result).toEqual({ ok: false, text: HANDOVER_SIDE_TURN_FAILED });
-      expect(result.text).not.toContain("HOST-MARKER-5521");
-      if (name === "a host error with a marker") {
+      expect(result).toEqual(failed(HANDOVER_SIDE_TURN_FAILED, { outcome: "failed" }));
+      if (name === "a host error with a marker and a tab") {
         const notice = alpha.notices.at(-1) ?? "";
         expect(notice).toBe(
           "talk: the handover side turn failed. Nothing was sent. Host error: upstream HOST-MARKER-5521 down retry",
@@ -3143,41 +3215,82 @@ describe("handover action of the talk tool (#260)", () => {
     },
   );
 
-  it("reports failed with the ids when the socket write of the body fails", async () => {
+  it("reports failed with the ids of the request when the socket write of the body fails", async () => {
     const { alpha, beta, betaId } = await sessions();
     network.writeFails = true;
     const { call } = startHandover(alpha, { to: "beta" });
     await approve(alpha);
     const result = await call;
-    expect(result.ok).toBe(false);
-    expect(result.text.startsWith(HANDOVER_WRITE_FAILED)).toBe(true);
-    expect(idsOf(result.text).instanceId).toBe(betaId);
-    holdsNoSummary(result);
+    const messageId = sentId(betaId);
+    expect(result).toEqual(
+      failed(`${HANDOVER_WRITE_FAILED}\n${idLines(messageId, betaId)}`, {
+        messageId,
+        instanceId: betaId,
+        outcome: "failed",
+      }),
+    );
     await settle();
     expect(beta.sent).toEqual([]);
   });
 
-  it.each(["the user stops the sending view", "the tool call is aborted", "the reply is lost"])(
-    "reports unknown with the ids when %s after the body went out and before the answer",
-    async (name) => {
-      const { alpha, betaId } = await sessions();
+  it("says that the text may have gone out when the outcome is unknown", () => {
+    expect(HANDOVER_UNKNOWN).toBe(
+      "talk: the outcome of the handover is unknown: the text may have gone out, and no usable answer settled the outcome (unknown). The session can hold it; cancel with these ids withdraws it while it is queued.",
+    );
+  });
+
+  it.each([
+    ["the user stops the sending view after the body went out", "answer", "escape"],
+    ["the tool call is aborted after the body went out", "answer", "abort"],
+    ["the user stops the sending view while the write callback is pending", "write", "escape"],
+    ["the tool call is aborted while the write callback is pending", "write", "abort"],
+    ["the reply is lost", "lost", "none"],
+  ] as const)("reports unknown with the ids of the request when %s", async (_name, stage, stop) => {
+    const { alpha, betaId } = await sessions();
+    const gate = Promise.withResolvers<void>();
+    if (stage === "lost") network.loseAnswers = true;
+    if (stage === "answer") network.answerGate = gate.promise;
+    if (stage === "write") network.writeGate = gate.promise;
+    const controller = new AbortController();
+    const { call } = startHandover(alpha, { to: "beta" }, controller.signal);
+    await approve(alpha);
+    if (stage === "answer") await until(() => network.waitingAnswers === 1);
+    if (stage === "write") await until(() => network.pendingWrites === 1);
+    if (stop === "abort") controller.abort();
+    if (stop === "escape") pressKey(alpha.top.node, "escape");
+    const result = await call;
+    gate.resolve();
+    const messageId = sentId(betaId);
+    expect(result).toEqual(
+      failed(`${HANDOVER_UNKNOWN}\n${idLines(messageId, betaId)}`, {
+        messageId,
+        instanceId: betaId,
+        outcome: "unknown",
+      }),
+    );
+    holdsNoSummary(result);
+  });
+
+  it.each(["escape", "abort"] as const)(
+    "reports cancelled for a stop by %s after the approval while the handshake holds the body back",
+    async (stop) => {
+      const { alpha, beta } = await sessions();
       const gate = Promise.withResolvers<void>();
-      if (name === "the reply is lost") network.loseAnswers = true;
-      else network.answerGate = gate.promise;
+      network.handshakeGate = gate.promise;
       const controller = new AbortController();
-      const { call } = startHandover(alpha, { to: "beta" }, controller.signal);
+      const { call, settled } = startHandover(alpha, { to: "beta" }, controller.signal);
       await approve(alpha);
-      if (name !== "the reply is lost") {
-        await until(() => network.waitingAnswers === 1);
-        if (name === "the tool call is aborted") controller.abort();
-        else pressKey(alpha.top.node, "escape");
-      }
-      const result = await call;
+      // The sending view waits while the request waits in its handshake.
+      await until(() => openKind(alpha) === "text");
+      await settle();
+      expect(settled()).toBe(false);
+      if (stop === "abort") controller.abort();
+      else pressKey(alpha.top.node, "escape");
+      expect(await call).toEqual(CANCELLED);
       gate.resolve();
-      expect(result.ok).toBe(false);
-      expect(result.text.startsWith(HANDOVER_UNKNOWN)).toBe(true);
-      expect(idsOf(result.text).instanceId).toBe(betaId);
-      holdsNoSummary(result);
+      await settle();
+      expect(network.bodies).toEqual([]);
+      expect(beta.sent).toEqual([]);
     },
   );
 
@@ -3191,27 +3304,42 @@ describe("handover action of the talk tool (#260)", () => {
     beta.suspended = true;
     typeCode(alpha.top.node, confirmCode(alpha.top.node).code);
     const result = await call;
-    expect(result.ok).toBe(false);
-    expect(result.text).toContain("Not live");
-    expect(result.text.startsWith(HANDOVER_UNKNOWN)).toBe(false);
-    expect(idsOf(result.text).instanceId).toBe(betaId);
+    const messageId = sentId(betaId);
+    expect(result).toEqual(
+      failed(
+        `talk: Handover: Not live: the session ended or moved. Nothing was delivered.\n${idLines(messageId, betaId)}`,
+        { messageId, instanceId: betaId, outcome: "not-live" },
+      ),
+    );
     expect(network.log).toContain(`refused ${betaId}`);
   });
 
+  it("describes messageId as the id of the message to check or withdraw, from a send, ask, or handover result", async () => {
+    expect(TALK_TOOL_DESCRIPTION).toContain(
+      "cancel needs to or instance, and messageId: the id of the message to check or withdraw, from a send, ask, or handover result.",
+    );
+    const { alpha } = await sessions();
+    expect(JSON.stringify(alpha.tools.get("talk")?.parameters)).toContain(
+      "cancel: the id of the message to check or withdraw, from a send, ask, or handover result",
+    );
+    expect(await alpha.tool({ action: "cancel", to: "beta", messageId: "nope" })).toEqual({
+      ok: false,
+      text: "talk: messageId takes the id (16 lowercase hex digits) of the message to check or withdraw, from a send, ask, or handover result.",
+    });
+  });
+
   describe("refusals before the side turn (H3)", () => {
-    /** The call refuses with `text`; no side turn ran, no view opened, and beta got nothing. */
+    /** The call refuses with `text` and `details`; no side turn ran, no view opened, and beta got nothing. */
     const refuses = async (
       { alpha, beta, turns }: Sessions,
       params: object,
-      text: string | RegExp,
+      text: string,
+      details: object = {},
     ): Promise<void> => {
       const views = alpha.views.length;
-      const result = await startHandover(alpha, params).call;
-      expect(result.ok).toBe(false);
-      // A refusal text that is not defined would match any text.
+      // A refusal text that is not defined would match nothing useful.
       expect(text).toBeTruthy();
-      if (typeof text === "string") expect(result.text).toBe(text);
-      else expect(result.text).toMatch(text);
+      expect(await startHandover(alpha, params).call).toEqual(failed(text, details));
       expect(turns).toEqual([]);
       expect(alpha.views).toHaveLength(views);
       await settle();
@@ -3228,6 +3356,26 @@ describe("handover action of the talk tool (#260)", () => {
       const handover = await sessions();
       handover.alpha.ctx["ui"] = { notify: () => undefined };
       await refuses(handover, { to: "beta" }, HANDOVER_NEEDS_TUI);
+    });
+
+    it("refuses omp's no-op UI: hasUI false, with a custom that never calls the factory", async () => {
+      const { alpha, beta, turns } = await sessions();
+      alpha.hasUI = false;
+      const factories: Array<unknown> = [];
+      alpha.ctx["ui"] = {
+        notify: () => undefined,
+        custom: async (build: unknown) => {
+          factories.push(build);
+          return undefined;
+        },
+      };
+      const { call, settled } = startHandover(alpha, { to: "beta" });
+      await until(settled);
+      expect(await call).toEqual(failed(HANDOVER_NEEDS_TUI));
+      expect(factories).toEqual([]);
+      expect(turns).toEqual([]);
+      await settle();
+      expect(beta.sent).toEqual([]);
     });
 
     it("refuses in a subagent session", async () => {
@@ -3257,8 +3405,7 @@ describe("handover action of the talk tool (#260)", () => {
       const flow = alpha.command("");
       await until(() => openKind(alpha) === "picker");
       gate.resolve();
-      const result = await call;
-      expect(result).toEqual({ ok: false, text: HANDOVER_FLOW_OPEN });
+      expect(await call).toEqual(failed(HANDOVER_FLOW_OPEN));
       expect(turns).toEqual([]);
       expect(openKind(alpha)).toBe("picker");
       pressKey(alpha.top.node, "escape");
@@ -3277,9 +3424,54 @@ describe("handover action of the talk tool (#260)", () => {
       async (field) => {
         const handover = await sessions();
         const own = network.only("s-alpha").instanceId;
-        await refuses(handover, { [field]: field === "to" ? "alpha" : own }, HANDOVER_OWN_TARGET);
+        await refuses(handover, { [field]: field === "to" ? "alpha" : own }, HANDOVER_OWN_TARGET, {
+          instanceId: own,
+        });
       },
     );
+
+    it("refuses a to that resolves to the registration that this binding published while the call ran", async () => {
+      const { alpha, beta, turns } = await sessions();
+      const old = network.only("s-alpha");
+      const gate = Promise.withResolvers<void>();
+      network.listReadGate = gate.promise;
+      const { call } = startHandover(alpha, { to: "alpha" });
+      await settle();
+      // The session id changes without an event: the repair timer withdraws the old pair and registers a new one.
+      alpha.reset("s-alpha-2");
+      await vi.advanceTimersByTimeAsync(REPAIR_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(old.live).toBe(false);
+      expect(network.only("s-alpha-2").instanceId).not.toBe(old.instanceId);
+      gate.resolve();
+      expect(await call).toEqual(failed(HANDOVER_OWN_TARGET));
+      expect(turns).toEqual([]);
+      expect(openKind(alpha)).toBeUndefined();
+      await settle();
+      expect(beta.sent).toEqual([]);
+      expect(network.bodies).toEqual([]);
+    });
+
+    it("sends nothing when this binding takes the target as its registration after the side turn started", async () => {
+      const { alpha, turns } = await sessions();
+      const registered = Promise.withResolvers<void>();
+      network.registeredGate = registered.promise;
+      alpha.reset("s-alpha-2");
+      await vi.advanceTimersByTimeAsync(REPAIR_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(1);
+      // The new pair is in the registry, and this binding has not taken it yet.
+      const fresh = network.only("s-alpha-2");
+      const { call } = startHandover(alpha, { instance: fresh.instanceId });
+      await until(() => openKind(alpha) === "editor");
+      expect(turns).toHaveLength(1);
+      registered.resolve();
+      await settle();
+      await approve(alpha);
+      expect(await call).toEqual(failed(HANDOVER_OWN_TARGET, { outcome: "cancelled" }));
+      expect(alpha.notices).toContain(HANDOVER_TARGET_IS_THIS_SESSION);
+      expect(network.bodies).toEqual([]);
+      expect(alpha.sent).toEqual([]);
+    });
 
     it("refuses a retained instance that does not answer its probe", async () => {
       const handover = await sessions();
@@ -3290,33 +3482,170 @@ describe("handover action of the talk tool (#260)", () => {
       await refuses(
         handover,
         { instance: ghost.instanceId },
-        new RegExp(
-          `^talk: the instance ${ghost.instanceId} did not answer a probe \\(unreachable\\)`,
-          "u",
-        ),
+        `talk: the instance ${ghost.instanceId} did not answer a probe (unreachable). Nothing was sent. Run the action list.`,
+        { instanceId: ghost.instanceId, outcome: "unreachable" },
       );
     });
 
     it("refuses a to that resolves to no session", async () => {
-      await refuses(await sessions(), { to: "nobody" }, /not-found/u);
+      await refuses(
+        await sessions(),
+        { to: "nobody" },
+        `talk: no listed session matches ${literal("nobody")} (not-found). Run the action list.`,
+        { outcome: "not-found" },
+      );
+    });
+
+    const AMBIGUOUS_HINT =
+      "Name one session with instance, using its full instance id from list, or ask the user which session takes the handover.";
+
+    it("tells the agent how to choose one session for a to that starts more than one session id", async () => {
+      const handover = await sessions();
+      const one = network.addForeign("g-one", "s-gx-1", "ok");
+      const two = network.addForeign("g-two", "s-gx-2", "ok");
+      await refuses(
+        handover,
+        { to: "s-gx-" },
+        `talk: ${literal("s-gx-")} starts more than one session id. Nothing was sent. Candidates:\n` +
+          `- ${literal("g-one")} (session ${literal("s-gx-1")}): instance ${one.instanceId}\n` +
+          `- ${literal("g-two")} (session ${literal("s-gx-2")}): instance ${two.instanceId}\n` +
+          AMBIGUOUS_HINT,
+      );
+    });
+
+    it("tells the agent how to choose one session for a to that names two live sessions", async () => {
+      const handover = await sessions();
+      const one = network.addForeign("twin", "s-twin-1", "ok");
+      const two = network.addForeign("twin", "s-twin-2", "ok");
+      await refuses(
+        handover,
+        { to: "twin" },
+        `talk: ${literal("twin")} does not name exactly one live session. Nothing was sent. Use instance with one full instance id:\n` +
+          `- ${literal("twin")} (session ${literal("s-twin-1")}): instance ${one.instanceId}, answered\n` +
+          `- ${literal("twin")} (session ${literal("s-twin-2")}): instance ${two.instanceId}, answered\n` +
+          AMBIGUOUS_HINT,
+      );
+    });
+
+    it("tells the agent to run list and name a live session for a to whose sessions ended", async () => {
+      const handover = await sessions();
+      const gone = network.addForeign("gone", "s-gone", "not-live");
+      await refuses(
+        handover,
+        { to: "gone" },
+        `talk: ${literal("gone")} is not live (not-live). Candidates:\n` +
+          `- ${literal("gone")} (session ${literal("s-gone")}): instance ${gone.instanceId}, not live\n` +
+          "Run the action list and name a live session.",
+        { outcome: "not-live" },
+      );
     });
 
     it.each([
-      [
-        "attachments",
-        { attachments: [{ type: "snippet", name: "a", content: "b" }] },
-        /attachments/u,
-      ],
-      ["noWake: true", { noWake: true }, /noWake/u],
-    ] as const)("refuses %s as an argument error", async (_name, extra, text) => {
-      await refuses(await sessions(), { to: "beta", ...extra }, text);
+      ["attachments", { attachments: [{ type: "snippet", name: "a", content: "b" }] }],
+      ["an empty attachments array", { attachments: [] }],
+    ] as const)("refuses %s as an argument error", async (_name, extra) => {
+      await refuses(
+        await sessions(),
+        { to: "beta", ...extra },
+        "talk: the action handover takes no attachments. Nothing was sent.",
+      );
+    });
+
+    it("refuses noWake: true as an argument error", async () => {
+      await refuses(
+        await sessions(),
+        { to: "beta", noWake: true },
+        "talk: the action handover always asks the target for a turn, so it takes no noWake: true. Nothing was sent.",
+      );
     });
   });
 
-  it("keeps /talk handover <target> as it was: no tool result, the usual start notice", async () => {
+  describe("an abort during the checks before the side turn (H5)", () => {
+    it.each([
+      ["the listing of to", "list", "to"],
+      ["the probe of to", "probe", "to"],
+      ["the lookup of an instance that this process never saw", "known", "unseen"],
+      ["the probe of instance", "probe", "instance"],
+    ] as const)(
+      "passes the call's signal to %s and reports cancelled without the flow",
+      async (_name, step, selector) => {
+        const { alpha, beta, betaId, turns } = await sessions();
+        const gate = Promise.withResolvers<void>();
+        if (step === "list") network.listReadGate = gate.promise;
+        if (step === "known") network.knownGate = gate.promise;
+        if (step === "probe") {
+          network.probeGate = gate.promise;
+          // The transport rejects a probe whose signal aborted.
+          network.probeError = new Error("This operation was aborted");
+        }
+        const controller = new AbortController();
+        const before = network.signals.length;
+        const params =
+          selector === "to"
+            ? { to: "beta" }
+            : { instance: selector === "instance" ? betaId : "0123456789abcdef" };
+        const { call } = startHandover(alpha, params, controller.signal);
+        await settle();
+        controller.abort();
+        gate.resolve();
+        expect(await call).toEqual(CANCELLED);
+        const signals = network.signals.slice(before);
+        expect(signals.length).toBeGreaterThan(0);
+        expect(signals.every((signal) => signal === controller.signal)).toBe(true);
+        expect(turns).toEqual([]);
+        expect(alpha.views).toEqual([]);
+        await settle();
+        expect(beta.sent).toEqual([]);
+      },
+    );
+  });
+
+  describe("registry failures before the side turn (H4)", () => {
+    const REGISTRY_FAILED =
+      "talk: the handover did not start: talk could not read the session registry to check the target. Nothing was sent. The talk notice in this session shows the error to the user. Ask the user to check it before a new handover.";
+    const NOTICE =
+      "talk: the agent asked for a handover, but talk could not check its target, so nothing was sent. Error: ";
+    const PATH_REASON =
+      "the folder /home/user/.local/state/talk-7731\u001b[31m\tis not private (mode 0755)";
+    const CLEAN_REASON = "the folder /home/user/.local/state/talk-7731 is not private (mode 0755)";
+
+    it.each([
+      ["the listing of to", "list", "to", `the registry could not be listed: ${CLEAN_REASON}`],
+      [
+        "the listing for an instance that this process never saw",
+        "list",
+        "unseen",
+        `the registry could not be listed: ${CLEAN_REASON}`,
+      ],
+      ["the probe of to", "probe", "to", `the probes failed: ${CLEAN_REASON}`],
+      ["the probe of instance", "probe", "instance", `the probe failed: ${CLEAN_REASON}`],
+    ] as const)(
+      "gives the model a fixed text and shows the cleaned diagnostic in a notice for a failure of %s",
+      async (_name, step, selector, shown) => {
+        const { alpha, beta, betaId, turns } = await sessions();
+        if (step === "list") {
+          network.listFails = true;
+          network.listReason = PATH_REASON;
+        } else network.probeError = new Error(PATH_REASON);
+        const params =
+          selector === "to"
+            ? { to: "beta" }
+            : { instance: selector === "instance" ? betaId : "0123456789abcdef" };
+        const result = await startHandover(alpha, params).call;
+        expect(result).toEqual(failed(REGISTRY_FAILED, { outcome: "failed" }));
+        expect(result.text).not.toContain("/home/user");
+        expect(alpha.notices).toEqual([`${NOTICE}${shown}`]);
+        expect(turns).toEqual([]);
+        await settle();
+        expect(beta.sent).toEqual([]);
+      },
+    );
+  });
+
+  it("keeps /talk handover <target> as it was: no tool result, the usual start notice, the usual confirm line", async () => {
     const { alpha, beta } = await sessions();
     const flow = alpha.command("handover beta");
-    await approve(alpha);
+    await approve(alpha, false);
     await flow;
     await until(() => beta.talkTexts().length === 1);
     expect(alpha.notices[0]).not.toContain("the agent started");

@@ -98,10 +98,15 @@ export const makeConnection = Effect.fnUntraced(function* (socket: Socket) {
       track?.("failed");
       return yield* new TalkConnectionClosed({ reason: "the connection is closed" });
     }
-    track?.("pending");
+    // An untracked frame, such as a handshake frame or a ping, needs no completion callback.
+    if (track === undefined) {
+      socket.write(frame);
+      return;
+    }
+    track("pending");
     // Bun can return false and report EPIPE later, so only the completion tells whether the socket took the bytes.
     socket.write(frame, (error) => {
-      track?.(error === undefined || error === null ? "done" : "failed");
+      track(error === undefined || error === null ? "done" : "failed");
     });
   });
 

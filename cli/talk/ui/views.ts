@@ -464,6 +464,12 @@ export const applyEdit = (
  */
 export const safeOneLine = (text: string): string => safeMultiline(text).replaceAll("\n", " ");
 
+/**
+ * A host error for a notice (#260 H4): one line without terminal controls,
+ * and each tab a space, so the notice shows it as plain text.
+ */
+export const safeDiagnostic = (text: string): string => safeOneLine(text).replaceAll("\t", " ");
+
 /** The cells of an empty compose row that the placeholder cannot use: the caret bar and the free cell before the placeholder. */
 export const COMPOSE_PLACEHOLDER_CHROME = 2;
 
@@ -552,9 +558,15 @@ export const drawCode = (
   }
 };
 
-/** The first line of the confirm view (G3). */
-export const confirmLine = (instanceId: string, code: string): string =>
-  `Send to ${instanceId}: type ${code}`;
+/**
+ * The first line of the confirm view (G3). A handover that the `talk` tool
+ * started names the agent as its starter on this line, so the user sees who
+ * started it at the point of approval (#260 H2).
+ */
+export const confirmLine = (instanceId: string, code: string, byAgent: boolean): string =>
+  byAgent
+    ? `Send to ${instanceId} (a handover that the agent started): type ${code}`
+    : `Send to ${instanceId}: type ${code}`;
 
 export const CONFIRM_TOO_SMALL = "talk: make the pane wider to confirm the destination.";
 
@@ -569,6 +581,8 @@ export interface ConfirmContent {
   readonly kind: string;
   readonly text: string;
   readonly code: string;
+  /** The `talk` tool started the handover (#260 H2). */
+  readonly byAgent: boolean;
 }
 
 const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/u;
@@ -576,12 +590,13 @@ const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/u;
 /**
  * The confirm view: a `col` root whose first line names the full instance
  * id and the code, then the name and folder, the kind, and the first line of
- * the text, each cut to one row (G3). Only the two code letters, typed as two
- * separate presses, send. A repeat event, a paste, a key after a paste, or
- * any other key clears the typed letters; `enter` sends nothing. While the
- * first line does not fit the width, the view shows only a request for a
- * wider pane, and no key sends. `escape` returns to the compose view;
- * `alt+t` closes the flow.
+ * the text, each cut to one row (G3). The first line of a handover that the
+ * `talk` tool started also says that the agent started it (#260 H2). Only
+ * the two code letters, typed as two separate presses, send. A repeat event,
+ * a paste, a key after a paste, or any other key clears the typed letters;
+ * `enter` sends nothing. While the first line does not fit the width, the
+ * view shows only a request for a wider pane, and no key sends. `escape`
+ * returns to the compose view; `alt+t` closes the flow.
  */
 export const confirmView = (
   ui: HostUi,
@@ -591,7 +606,7 @@ export const confirmView = (
   done: (choice: ConfirmChoice) => void,
 ): JSXNode => {
   const typed = ui.signal("");
-  const first = confirmLine(destination.instanceId, content.code);
+  const first = confirmLine(destination.instanceId, content.code, content.byAgent);
   /** The current size while the first line fits its width; undefined otherwise. */
   const space = (): ViewSize | undefined => {
     const current = size();

@@ -30,6 +30,7 @@ import {
 } from "./tool/host";
 import { type ProbeResult, sessionName } from "./tool/targets";
 import {
+  HANDOVER_OWN_TARGET,
   type HandoverFlow,
   type ListAnswer,
   type ListingSnapshot,
@@ -70,7 +71,7 @@ import {
   talkErrorText,
 } from "./ui/command";
 import { type HostModuleLoader, type HostUi, hostModuleLoader, probeHost } from "./ui/host";
-import { TALK_SHORTCUT } from "./ui/views";
+import { TALK_SHORTCUT, safeDiagnostic } from "./ui/views";
 
 /** The version of the singleton facade and of the request bodies. A change needs a new number. */
 export const TALK_PROTOCOL_VERSION = 1;
@@ -591,6 +592,9 @@ export const HANDOVER_IN_SUBAGENT =
 export const HANDOVER_FLOW_OPEN =
   "talk: a /talk view is open in this session, and the handover action does not close it. Nothing was sent. The user can finish or close that view, then ask for the handover again.";
 export const HANDOVER_NEEDS_SIDE_TURN = `talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover. Nothing was sent. The user can update omp to ${OMP_VERSION_NEEDED} or later.`;
+/** #260 H4: the start of the local notice of a failed listing, lookup, or probe of the `handover` action; the cleaned host error follows. */
+export const HANDOVER_HOST_ERROR =
+  "talk: the agent asked for a handover, but talk could not check its target, so nothing was sent. Error: ";
 
 /** #251 G4: the warning of a key that already holds `alt+t`. */
 const conflictNotice = (conflict: unknown): string => {
@@ -1181,13 +1185,17 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             clock: env.clock,
             signal: signal instanceof AbortSignal ? signal : undefined,
             snapshot,
-            handover: handoverFlow(ctx, context),
+            handover: handoverFlow(ctx, context, self.registration),
           },
           params,
         ),
       );
-      if (!outcome.ok) throw new Error(outcome.text);
-      return { content: [{ type: "text", text: outcome.text }], details: outcome.details };
+      const content = [{ type: "text", text: outcome.text }];
+      if (outcome.ok) return { content, details: outcome.details };
+      // #260 H4: a failed handover keeps its details; omp shows a result with `isError` as an error.
+      if (outcome.details.action === "handover")
+        return { content, details: outcome.details, isError: true };
+      throw new Error(outcome.text);
     },
   });
 
@@ -1273,16 +1281,28 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
    * The `handover` action of the tool, bound to the context of its call
    * (#260 H2, H3): the refusals before the side turn, then the `/talk`
    * handover flow for the one exact pair, with the signal of the call.
+   * `startRegistration` is this binding's registration when the call
+   * started; the pair must differ from it and from the current one right
+   * before the side turn and again right before the send.
    */
-  const handoverFlow = (ctx: unknown, context: SessionContext): HandoverFlow => {
+  const handoverFlow = (
+    ctx: unknown,
+    context: SessionContext,
+    startRegistration: Target | undefined,
+  ): HandoverFlow => {
     const refusal = (): string | undefined => {
-      if (readContext(ctx, ["mode"]).mode() !== "tui" || flowUi(ctx) === undefined)
+      // omp's no-op UI has both methods, but `custom` never calls the factory, so `hasUI` must hold too.
+      const hasUi = Predicate.hasProperty(ctx, "hasUI") && ctx.hasUI === true;
+      if (readContext(ctx, ["mode"]).mode() !== "tui" || !hasUi || flowUi(ctx) === undefined)
         return HANDOVER_NEEDS_TUI;
       if (context.agent().kind !== "main") return HANDOVER_IN_SUBAGENT;
       if (flows.isOpen()) return HANDOVER_FLOW_OPEN;
       if (method(ctx, "runEphemeralTurn") === undefined) return HANDOVER_NEEDS_SIDE_TURN;
       return undefined;
     };
+    /** The exact pair is this binding's registration now or at the start of the call; a session id alone proves nothing. */
+    const isOwnPair = (pair: Target): boolean =>
+      sameTarget(startRegistration, pair) || sameTarget(delivery.registration, pair);
     return {
       refusal,
       start: async (target, note, signal) => {
@@ -1292,13 +1312,18 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
         const ui = flowUi(ctx);
         if (refused !== undefined || ui === undefined)
           return { _tag: "Refused", text: refused ?? HANDOVER_NEEDS_TUI };
-        const destination = { ...target.target, name: target.name, cwd: target.cwd };
+        const pair = target.target;
+        if (isOwnPair(pair)) return { _tag: "Refused", text: HANDOVER_OWN_TARGET };
+        const destination = { ...pair, name: target.name, cwd: target.cwd };
         return flows.run(
           ui,
           flowServices(ctx, context),
-          { _tag: "AgentHandover", destination, note },
+          { _tag: "AgentHandover", destination, note, isOwn: () => isOwnPair(pair) },
           signal,
         );
+      },
+      hostError: (diagnostic) => {
+        notifyUser(ctx, `${HANDOVER_HOST_ERROR}${safeDiagnostic(diagnostic)}`, env.writeError);
       },
     };
   };

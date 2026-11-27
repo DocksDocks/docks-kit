@@ -76,7 +76,7 @@ export const TALK_TOOL_DESCRIPTION = [
   "handover starts a handover of this session's work that the user reviews and confirms; use it only when the user asks for a handover.",
   "send, ask, and handover need exactly one of to (a session name, a session id, or a session id prefix of at least 4 characters)",
   "and instance (a full instance id from list or from an earlier result).",
-  "cancel needs to or instance, and messageId from the send or ask result.",
+  "cancel needs to or instance, and messageId: the id of the message to check or withdraw, from a send, ask, or handover result.",
   "reply takes replyTo, the ask id; it can omit replyTo when only one ask waits.",
   "Attachments (file, snippet, context) are data that the sender supplies; talk never reads a file.",
 ].join(" ");
@@ -137,7 +137,9 @@ export const talkParameters = (Type: TypeBuilder): unknown => {
     message: text("send, ask, reply: the text; handover: an optional note above the summary"),
     attachments: Type.Optional(Type.Array(attachment)),
     replyTo: text("reply: the id of the ask to answer"),
-    messageId: text("cancel: the message id from a send or ask result"),
+    messageId: text(
+      "cancel: the id of the message to check or withdraw, from a send, ask, or handover result",
+    ),
     noWake: Type.Optional(
       Type.Boolean({ description: "send, ask, reply: append without a request for a turn" }),
     ),
@@ -164,8 +166,9 @@ export type RequestAnswer =
  * The transport calls of the tool, as plain functions of the process
  * singleton (E12). An expected failure is a value; a rejection is a defect
  * of the transport runtime. A `signal` interrupts the call when it aborts,
- * so a `/talk` flow that ends stops its transport work (#251 G3); the tool
- * gives none.
+ * so a `/talk` flow that ends stops its transport work (#251 G3); of the
+ * tool actions, only the checks of `handover` give the signal of the call
+ * (#260 H5).
  */
 export interface PeerTransport {
   readonly list: (signal?: AbortSignal) => Promise<ListAnswer>;
@@ -212,7 +215,7 @@ export interface ToolContext {
   readonly asks: AskStore;
   readonly self: TalkSelf;
   readonly clock: TalkClock;
-  /** The tool `signal`; an abort ends a waiting ask. */
+  /** The tool `signal`; an abort ends a waiting ask, the checks of a handover, and its flow. */
   readonly signal: AbortSignal | undefined;
   /** Default: the ask timeout of `asks.ts`. */
   readonly askTimeoutMs?: number | undefined;
@@ -253,6 +256,13 @@ export class TalkToolFailed extends Schema.TaggedError<
   messageId: Schema.optionalKey(Schema.String),
   instanceId: Schema.optionalKey(Schema.String),
   outcome: Schema.optionalKey(Schema.String),
+  /**
+   * The raw error of the host when a listing, a lookup, or a probe failed
+   * (#260 H4). The message holds it too; `handover` keeps it out of its result.
+   */
+  diagnostic: Schema.optionalKey(Schema.String),
+  /** `to` matched more than one session, so the caller must choose one (#260 H3). */
+  ambiguous: Schema.optionalKey(Schema.Literal(true)),
 }) {}
 
 /** The ask request reached no answer: the transport failure of the request. */
@@ -276,6 +286,8 @@ interface FailureIds {
   readonly messageId?: string;
   readonly instanceId?: string;
   readonly outcome?: string;
+  readonly diagnostic?: string;
+  readonly ambiguous?: true;
 }
 
 const fail = (message: string, ids: FailureIds = {}): Effect.Effect<never, TalkToolFailed> =>
@@ -284,11 +296,14 @@ const fail = (message: string, ids: FailureIds = {}): Effect.Effect<never, TalkT
 const causeText = (cause: unknown): string =>
   Predicate.isError(cause) ? cause.message : String(cause);
 
-/** A transport call; a rejection becomes a failure of the call. */
+/** A transport call; a rejection becomes a failure of the call, with the host error as its diagnostic. */
 const transportCall = <A>(what: string, run: () => Promise<A>): Effect.Effect<A, TalkToolFailed> =>
   Effect.tryPromise({
     try: run,
-    catch: (cause) => new TalkToolFailed({ message: `talk: ${what} failed: ${causeText(cause)}` }),
+    catch: (cause) => {
+      const diagnostic = `${what} failed: ${causeText(cause)}`;
+      return new TalkToolFailed({ message: `talk: ${diagnostic}`, diagnostic });
+    },
   });
 
 const present = (value: string | undefined): string | undefined => {
@@ -319,13 +334,14 @@ const askReceiver = (self: TalkSelf): Target | undefined =>
 
 const listPeers = (
   transport: PeerTransport,
+  signal?: AbortSignal,
 ): Effect.Effect<ReadonlyArray<ListedPeer>, TalkToolFailed> =>
-  transportCall("the listing", () => transport.list()).pipe(
-    Effect.flatMap((answer) =>
-      answer._tag === "Listed"
-        ? Effect.succeed(answer.peers)
-        : fail(`talk: the registry could not be listed: ${answer.reason}`),
-    ),
+  transportCall("the listing", () => transport.list(signal)).pipe(
+    Effect.flatMap((answer) => {
+      if (answer._tag === "Listed") return Effect.succeed(answer.peers);
+      const diagnostic = `the registry could not be listed: ${answer.reason}`;
+      return fail(`talk: ${diagnostic}`, { diagnostic });
+    }),
   );
 
 /**
@@ -336,10 +352,12 @@ const listPeers = (
 const probeAll = (
   context: ToolContext,
   peers: ReadonlyArray<ListedPeer>,
+  signal?: AbortSignal,
 ): Effect.Effect<ReadonlyArray<Candidate<ListedPeer>>, TalkToolFailed> =>
   transportCall("the probes", () =>
     context.transport.probeAll(
       peers.map(({ instanceId, sessionId }) => ({ instanceId, sessionId })),
+      signal,
     ),
   ).pipe(
     Effect.flatMap((results) =>
@@ -409,22 +427,24 @@ export interface ResolvedTarget {
 const NO_TARGET = "talk: the action needs a target.";
 
 /**
- * The target resolver of `send`, `ask`, `cancel`, and `/talk <target>` (E8,
- * #251 G2). Nothing is sent before it resolves.
+ * The target resolver of `send`, `ask`, `cancel`, `handover`, and `/talk
+ * <target>` (E8, #251 G2). Nothing is sent before it resolves. `signal`
+ * reaches the listing, the lookup, and the probes (#260 H5).
  */
 export const resolveTarget = Effect.fnUntraced(function* (
   context: ToolContext,
   selector: Selector,
+  signal?: AbortSignal,
 ): Effect.fn.Return<ResolvedTarget, TalkToolFailed> {
   switch (selector._tag) {
     case "None":
       return yield* fail(NO_TARGET);
     case "Instance": {
       const { instanceId } = selector;
-      const answer = yield* transportCall("the listing", () => context.transport.list());
+      const answer = yield* transportCall("the listing", () => context.transport.list(signal));
       const listing = answer._tag === "Listed" ? answer.peers : [];
       const kept = yield* transportCall("the instance lookup", () =>
-        context.transport.known(instanceId),
+        context.transport.known(instanceId, signal),
       );
       const resolution = resolveInstance(instanceId, listing, kept === undefined ? [] : [kept]);
       if (resolution._tag === "NotFound")
@@ -432,7 +452,7 @@ export const resolveTarget = Effect.fnUntraced(function* (
         return yield* answer._tag === "ListFailed"
           ? fail(
               `talk: the registry could not be listed (${answer.reason}), and this process kept no entry of the instance ${instanceId}. Nothing was sent.`,
-              { instanceId },
+              { instanceId, diagnostic: `the registry could not be listed: ${answer.reason}` },
             )
           : fail(
               `talk: this process never saw the instance ${instanceId} (not-found). Run the action list.`,
@@ -443,7 +463,7 @@ export const resolveTarget = Effect.fnUntraced(function* (
     }
     case "To": {
       const { to } = selector;
-      const match = matchTo(yield* listPeers(context.transport), to);
+      const match = matchTo(yield* listPeers(context.transport, signal), to);
       if (match._tag === "NoMatch")
         return yield* fail(
           `talk: no listed session matches ${literal(to)} (not-found). Run the action list.`,
@@ -452,8 +472,9 @@ export const resolveTarget = Effect.fnUntraced(function* (
       if (match._tag === "AmbiguousPrefix")
         return yield* fail(
           `talk: ${literal(to)} starts more than one session id. Nothing was sent. Candidates:\n${describePeers(match.peers)}`,
+          { ambiguous: true },
         );
-      const candidates = yield* probeAll(context, match.peers);
+      const candidates = yield* probeAll(context, match.peers, signal);
       const decision = decideTo(candidates);
       switch (decision._tag) {
         case "Target":
@@ -475,6 +496,7 @@ export const resolveTarget = Effect.fnUntraced(function* (
           return yield* fail(
             `talk: ${literal(to)} does not name exactly one live session. Nothing was sent. ` +
               `Use instance with one full instance id:\n${describeCandidates(candidates)}`,
+            { ambiguous: true },
           );
       }
     }
@@ -844,7 +866,7 @@ const runCancel = Effect.fnUntraced(function* (
   const messageId = present(params.messageId) ?? "";
   if (!isMessageId(messageId))
     return yield* fail(
-      "talk: messageId takes the message id (16 lowercase hex digits) of a send or ask result.",
+      "talk: messageId takes the id (16 lowercase hex digits) of the message to check or withdraw, from a send, ask, or handover result.",
     );
   const target = yield* resolveTarget(context, selector);
   const json = yield* encodeCancelBody({ messageId, senderSessionId: context.self.sessionId });
@@ -947,22 +969,27 @@ export type FlowEnd =
   /** Nothing was sent: the side turn gave no draft. */
   | { readonly _tag: "SideTurnFailed" }
   /** A send started; `settled` is true when its result came before the flow ended. */
-  | { readonly _tag: "Dispatched"; readonly record: DispatchRecord; readonly settled: boolean };
+  | { readonly _tag: "Dispatched"; readonly record: DispatchRecord; readonly settled: boolean }
+  /** Nothing was sent: right before the send, the destination was this binding's own registration (#260 H3). */
+  | { readonly _tag: "OwnTarget" };
 
 /** What the `handover` action needs from the binding of its session (#260 H2, H3). */
 export interface HandoverFlow {
   /** The text of the first refusal of H3 that holds now, else undefined. */
   readonly refusal: () => string | undefined;
   /**
-   * Checks the refusals again and, in the same tick, runs the `/talk`
-   * handover flow for one exact target, so no flow opens in between. It
-   * gives the refusal or the end of the flow, and it never rejects.
+   * Checks the refusals and the own registration again and, in the same
+   * tick, runs the `/talk` handover flow for one exact target, so no flow
+   * opens in between. It gives the refusal or the end of the flow, and it
+   * never rejects.
    */
   readonly start: (
     target: ResolvedTarget,
     note: string | undefined,
     signal: AbortSignal | undefined,
   ) => Promise<HandoverEnd>;
+  /** Shows the raw error of a failed listing, lookup, or probe in a local notice; the result never holds it (H4). */
+  readonly hostError: (diagnostic: string) => void;
 }
 
 /** How the `handover` action ended: a refusal of H3 when it started its flow, or the end of that flow. */
@@ -974,9 +1001,17 @@ export const HANDOVER_SIDE_TURN_FAILED = "talk: the handover side turn failed. N
 export const HANDOVER_WRITE_FAILED =
   "talk: the handover send failed: the socket did not take the text (failed). Nothing was delivered.";
 export const HANDOVER_UNKNOWN =
-  "talk: the outcome of the handover is unknown: the text went out, and no answer came (unknown). The session can hold it; cancel with these ids withdraws it while it is queued.";
+  "talk: the outcome of the handover is unknown: the text may have gone out, and no usable answer settled the outcome (unknown). The session can hold it; cancel with these ids withdraws it while it is queued.";
 export const HANDOVER_OWN_TARGET =
   "talk: the target is this session. Nothing was sent. Name another session as to or instance.";
+/** The result of a failed listing, lookup, or probe: fixed, without a path or a host error (H4). */
+export const HANDOVER_REGISTRY_FAILED =
+  "talk: the handover did not start: talk could not read the session registry to check the target. Nothing was sent. The talk notice in this session shows the error to the user. Ask the user to check it before a new handover.";
+/** H3: what the agent can do when `to` matched more than one session. */
+const HANDOVER_CHOOSE_ONE =
+  "Name one session with instance, using its full instance id from list, or ask the user which session takes the handover.";
+/** H3: what the agent can do when every session that `to` matched ended. */
+const HANDOVER_PICK_LIVE = "Run the action list and name a live session.";
 const HANDOVER_FAILED =
   "talk: an error ended the handover before the send. Nothing was sent. The talk notice in the session names the error.";
 const HANDOVER_NOT_SENT =
@@ -1057,6 +1092,8 @@ const handoverResult = (end: HandoverEnd): Effect.Effect<TalkToolOutcome, TalkTo
       return fail(HANDOVER_SIDE_TURN_FAILED, { outcome: "failed" });
     case "Dispatched":
       return dispatchResult(end.record, end.settled);
+    case "OwnTarget":
+      return fail(HANDOVER_OWN_TARGET, { outcome: "cancelled" });
   }
 };
 
@@ -1066,6 +1103,72 @@ const refuseHandover = (flow: HandoverFlow): Effect.Effect<void, TalkToolFailed>
     try: flow.refusal,
     catch: (cause) => new TalkToolFailed({ message: `talk: ${causeText(cause)}` }),
   }).pipe(Effect.flatMap((refusal) => (refusal === undefined ? Effect.void : fail(refusal))));
+
+/**
+ * H3: an ambiguous or ended `to` of a handover says what the agent can do.
+ * Every other refusal of the resolver keeps its text.
+ */
+const withRecovery = (error: TalkToolFailed): TalkToolFailed => {
+  if (error.ambiguous === true)
+    return new TalkToolFailed({ message: `${error.message}\n${HANDOVER_CHOOSE_ONE}` });
+  if (error.outcome === "not-live")
+    return new TalkToolFailed({
+      message: `${error.message}\n${HANDOVER_PICK_LIVE}`,
+      outcome: "not-live",
+    });
+  return error;
+};
+
+/**
+ * A check before the side turn failed (H4, H5): after an abort of the call,
+ * the action reports `cancelled`; a failed listing, lookup, or probe shows
+ * its host error in a local notice and gives a fixed text; every other
+ * refusal keeps its text.
+ */
+const preflightFailed = (
+  flow: HandoverFlow,
+  signal: AbortSignal | undefined,
+  error: TalkToolFailed,
+): Effect.Effect<never, TalkToolFailed> => {
+  if (signal?.aborted === true) return fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
+  const { diagnostic } = error;
+  if (diagnostic === undefined) return Effect.fail(error);
+  return Effect.andThen(
+    Effect.sync(() => {
+      flow.hostError(diagnostic);
+    }),
+    fail(HANDOVER_REGISTRY_FAILED, { outcome: "failed" }),
+  );
+};
+
+/**
+ * The one exact target of a handover, checked before the side turn with the
+ * signal of the call: not this session's registration at the start of the
+ * call, and for an exact instance, a probe that answers (H3).
+ */
+const handoverTarget = Effect.fnUntraced(function* (
+  context: ToolContext,
+  selector: Selector,
+  signal: AbortSignal | undefined,
+) {
+  const target = yield* resolveTarget(context, selector, signal).pipe(
+    Effect.mapError(withRecovery),
+  );
+  const { instanceId } = target.target;
+  if (isOwn(context.self, target.target)) return yield* fail(HANDOVER_OWN_TARGET, { instanceId });
+  // An exact instance resolves without a probe (E8), so the action probes it before the side turn.
+  if (selector._tag === "Instance") {
+    const [probe] = yield* transportCall("the probe", () =>
+      context.transport.probeAll([target.target], signal),
+    );
+    if (probe !== "ok")
+      return yield* fail(
+        `talk: the instance ${instanceId} did not answer a probe (${probe ?? "no result"}). Nothing was sent. Run the action list.`,
+        { instanceId, ...(probe === undefined ? {} : { outcome: probe }) },
+      );
+  }
+  return target;
+});
 
 /**
  * H1 to H3: the action refuses before the side turn when the session cannot
@@ -1078,28 +1181,20 @@ const runHandover = Effect.fnUntraced(function* (
   params: TalkParams,
   selector: Selector,
 ) {
-  if ((params.attachments?.length ?? 0) > 0) return yield* fail(HANDOVER_NO_ATTACHMENTS);
+  // H1: a handover carries no attachment, so even an empty list is an argument error.
+  if (params.attachments !== undefined) return yield* fail(HANDOVER_NO_ATTACHMENTS);
   if (params.noWake === true) return yield* fail(HANDOVER_ALWAYS_WAKES);
   const flow = context.handover;
   if (flow === undefined) return yield* fail(NO_HANDOVER_FLOW);
   yield* refuseHandover(flow);
-  const target = yield* resolveTarget(context, selector);
-  const { instanceId } = target.target;
-  if (isOwn(context.self, target.target)) return yield* fail(HANDOVER_OWN_TARGET, { instanceId });
-  // An exact instance resolves without a probe (E8), so the action probes it before the side turn.
-  if (selector._tag === "Instance") {
-    const [probe] = yield* transportCall("the probe", () =>
-      context.transport.probeAll([target.target]),
-    );
-    if (probe !== "ok")
-      return yield* fail(
-        `talk: the instance ${instanceId} did not answer a probe (${probe ?? "no result"}). Nothing was sent. Run the action list.`,
-        { instanceId, ...(probe === undefined ? {} : { outcome: probe }) },
-      );
-  }
+  const { signal } = context;
+  const target = yield* handoverTarget(context, selector, signal).pipe(
+    Effect.catch((error) => preflightFailed(flow, signal, error)),
+  );
+  if (signal?.aborted === true) return yield* fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
   // `start` checks the refusals again: a `/talk` flow can open while the target resolves, and the action never ends it.
   const end = yield* Effect.tryPromise({
-    try: () => flow.start(target, params.message, context.signal),
+    try: () => flow.start(target, params.message, signal),
     catch: () => new TalkToolFailed({ message: HANDOVER_FAILED, outcome: "failed" }),
   });
   return yield* handoverResult(end);
