@@ -1,8 +1,8 @@
 /**
- * The `talk` tool (#250 E10): its parameters, its seven actions, and the text
- * of each result. Each action is an Effect that `cli/talk/extension.ts` runs;
- * this module runs no effect. The transport reaches it as plain functions
- * that return promises (E12).
+ * The `talk` tool (#250 E10, #260): its parameters, its eight actions, and
+ * the text of each result. Each action is an Effect that
+ * `cli/talk/extension.ts` runs; this module runs no effect. The transport
+ * reaches it as plain functions that return promises (E12).
  */
 import { randomBytes } from "node:crypto";
 
@@ -44,7 +44,13 @@ import {
   resolveInstance,
   selectorFor,
 } from "./targets";
-import type { RequestOutcome, Target } from "../transport/request";
+import {
+  type RequestOutcome,
+  type RequestTrace,
+  type ResponseResult,
+  type Target,
+  newRequestTrace,
+} from "../transport/request";
 
 /** The name of the tool that the model calls. */
 export const TALK_TOOL_NAME = "talk";
@@ -59,6 +65,7 @@ export const TALK_ACTIONS = [
   "pending",
   "status",
   "cancel",
+  "handover",
 ] as const satisfies ReadonlyArray<TalkAction>;
 
 export const TALK_TOOL_DESCRIPTION = [
@@ -66,7 +73,8 @@ export const TALK_TOOL_DESCRIPTION = [
   "Actions: list shows the live sessions; send gives a session a message; ask sends a message and waits for the reply;",
   "reply answers an ask that waits for this session; pending shows those asks; status shows this session;",
   "cancel withdraws a queued message.",
-  "send and ask need exactly one of to (a session name, a session id, or a session id prefix of at least 4 characters)",
+  "handover starts a handover of this session's work that the user reviews and confirms; use it only when the user asks for a handover.",
+  "send, ask, and handover need exactly one of to (a session name, a session id, or a session id prefix of at least 4 characters)",
   "and instance (a full instance id from list or from an earlier result).",
   "cancel needs to or instance, and messageId from the send or ask result.",
   "reply takes replyTo, the ask id; it can omit replyTo when only one ask waits.",
@@ -122,9 +130,11 @@ export const talkParameters = (Type: TypeBuilder): unknown => {
       TALK_ACTIONS.map((action) => Type.Literal(action)),
       { description: "What to do" },
     ),
-    to: text("send, ask, cancel: a session name, a session id, or a unique session id prefix"),
-    instance: text("send, ask, cancel: a full instance id (16 hex digits)"),
-    message: text("send, ask, reply: the text"),
+    to: text(
+      "send, ask, cancel, handover: a session name, a session id, or a unique session id prefix",
+    ),
+    instance: text("send, ask, cancel, handover: a full instance id (16 hex digits)"),
+    message: text("send, ask, reply: the text; handover: an optional note above the summary"),
     attachments: Type.Optional(Type.Array(attachment)),
     replyTo: text("reply: the id of the ask to answer"),
     messageId: text("cancel: the message id from a send or ask result"),
@@ -170,6 +180,7 @@ export interface PeerTransport {
   /**
    * `beforeBody` runs right before the body goes out, after the mutual proof;
    * false keeps the body back, and the call rejects as an interrupted call.
+   * `trace` gets the body write and the answer as they happen (#260 H5).
    */
   readonly request: (
     target: Target,
@@ -177,6 +188,7 @@ export interface PeerTransport {
     body: Schema.Json,
     signal?: AbortSignal,
     beforeBody?: () => boolean,
+    trace?: RequestTrace,
   ) => Promise<RequestAnswer>;
   /** The pair of an entry that this process kept, by its full instance id. */
   readonly known: (instanceId: string, signal?: AbortSignal) => Promise<Target | undefined>;
@@ -206,6 +218,8 @@ export interface ToolContext {
   readonly askTimeoutMs?: number | undefined;
   /** Gets the rows of each `listSessions` call, such as the `/talk` completion snapshot (#251 G2). */
   readonly snapshot?: ListingSnapshot | undefined;
+  /** The flow of the `handover` action; undefined where the session gives none (#260 H2). */
+  readonly handover?: HandoverFlow | undefined;
 }
 
 /**
@@ -215,7 +229,7 @@ export interface ToolContext {
  */
 export type ListingSnapshot = () => (rows: ReadonlyArray<SessionRow>) => void;
 
-/** What `send`, `ask`, `reply`, and `cancel` report besides the text. */
+/** What `send`, `ask`, `reply`, `cancel`, and `handover` report besides the text. */
 export interface TalkToolDetails {
   readonly action: TalkAction | undefined;
   readonly messageId?: string | undefined;
@@ -557,6 +571,8 @@ export interface SendInput {
   readonly noWake: boolean;
   /** `handover` only from the `/talk` handover flow (#251 G6); the tool sends `message`. */
   readonly kind: DeliverKind;
+  /** Set: the send fixes its ids there before the request, and the transport records the body write and the answer (#260 H5). */
+  readonly record?: DispatchRecord | undefined;
 }
 
 /**
@@ -579,9 +595,18 @@ export const sendTo = Effect.fnUntraced(function* (
     noWake: input.noWake,
     ...(input.kind === "message" ? {} : { kind: input.kind }),
   });
+  if (input.record !== undefined) input.record.sent = { messageId, target };
   const { outcome } = yield* dispatched(
     "the send",
-    () => context.transport.request(target.target, DELIVER_KIND, json),
+    () =>
+      context.transport.request(
+        target.target,
+        DELIVER_KIND,
+        json,
+        undefined,
+        undefined,
+        input.record?.trace,
+      ),
     decodeDeliverResult,
     messageId,
     target,
@@ -895,6 +920,191 @@ const runStatus = Effect.fnUntraced(function* (context: ToolContext) {
   } satisfies TalkToolOutcome;
 });
 
+// ── handover (#260 H1 to H5) ──
+
+/**
+ * One send of a `/talk` flow, outside the promise of the send (#260 H5).
+ * The end of a flow interrupts that promise and its sending view drops the
+ * result, so the flow returns this record instead.
+ */
+export interface DispatchRecord {
+  /** The message id and the target, fixed before the request goes out. */
+  sent: { readonly messageId: string; readonly target: ResolvedTarget } | undefined;
+  readonly trace: RequestTrace;
+}
+
+export const newDispatchRecord = (): DispatchRecord => ({
+  sent: undefined,
+  trace: newRequestTrace(),
+});
+
+/** How a `/talk` flow ended (#260 H2, H4). */
+export type FlowEnd =
+  /** Nothing was sent: a view was cancelled, or the flow ended before a send. */
+  | { readonly _tag: "Cancelled" }
+  /** Nothing was sent: an error ended the flow, and its notice names the error. */
+  | { readonly _tag: "Failed" }
+  /** Nothing was sent: the side turn gave no draft. */
+  | { readonly _tag: "SideTurnFailed" }
+  /** A send started; `settled` is true when its result came before the flow ended. */
+  | { readonly _tag: "Dispatched"; readonly record: DispatchRecord; readonly settled: boolean };
+
+/** What the `handover` action needs from the binding of its session (#260 H2, H3). */
+export interface HandoverFlow {
+  /** The text of the first refusal of H3 that holds now, else undefined. */
+  readonly refusal: () => string | undefined;
+  /**
+   * Checks the refusals again and, in the same tick, runs the `/talk`
+   * handover flow for one exact target, so no flow opens in between. It
+   * gives the refusal or the end of the flow, and it never rejects.
+   */
+  readonly start: (
+    target: ResolvedTarget,
+    note: string | undefined,
+    signal: AbortSignal | undefined,
+  ) => Promise<HandoverEnd>;
+}
+
+/** How the `handover` action ended: a refusal of H3 when it started its flow, or the end of that flow. */
+export type HandoverEnd = FlowEnd | { readonly _tag: "Refused"; readonly text: string };
+
+export const HANDOVER_CANCELLED = "talk: the handover was cancelled. Nothing was sent.";
+/** The side-turn failure of the tool result: the host error goes only to the notice of the flow (H4). */
+export const HANDOVER_SIDE_TURN_FAILED = "talk: the handover side turn failed. Nothing was sent.";
+export const HANDOVER_WRITE_FAILED =
+  "talk: the handover send failed: the socket did not take the text (failed). Nothing was delivered.";
+export const HANDOVER_UNKNOWN =
+  "talk: the outcome of the handover is unknown: the text went out, and no answer came (unknown). The session can hold it; cancel with these ids withdraws it while it is queued.";
+export const HANDOVER_OWN_TARGET =
+  "talk: the target is this session. Nothing was sent. Name another session as to or instance.";
+const HANDOVER_FAILED =
+  "talk: an error ended the handover before the send. Nothing was sent. The talk notice in the session names the error.";
+const HANDOVER_NOT_SENT =
+  "talk: the handover send failed before the text went out (failed). Nothing was sent. The talk notice in the session names the reason.";
+const NO_HANDOVER_FLOW = "talk: this session cannot start a handover. Nothing was sent.";
+const HANDOVER_NO_ATTACHMENTS = "talk: the action handover takes no attachments. Nothing was sent.";
+const HANDOVER_ALWAYS_WAKES =
+  "talk: the action handover always asks the target for a turn, so it takes no noWake: true. Nothing was sent.";
+const UNKNOWN_KIND_TEXT =
+  "Unknown kind: the session has no handler for this message. Nothing was delivered.";
+
+/** The outcome of the response frame of a handover; undefined for an `ok` body that is no deliver result. */
+const answerOutcome = (
+  answer: ResponseResult,
+): DeliverResult["outcome"] | "unknown-kind" | undefined => {
+  switch (answer.status) {
+    case "ok": {
+      const decoded = decodeDeliverResultNow(answer.body);
+      return Result.isSuccess(decoded) ? decoded.success.outcome : undefined;
+    }
+    case "not-live":
+      return "not-live";
+    case "unknown-kind":
+      return "unknown-kind";
+  }
+};
+
+/**
+ * H4: the result follows the dispatch state of the body, not what ended the
+ * flow. An answer gives its outcome; a body that may have gone out without
+ * an answer gives `unknown`; a failed write gives `failed`; no write gives
+ * `failed` after a result of the send, else `cancelled`.
+ */
+const dispatchResult = (
+  { sent, trace }: DispatchRecord,
+  settled: boolean,
+): Effect.Effect<TalkToolOutcome, TalkToolFailed> => {
+  const ids =
+    sent === undefined
+      ? {}
+      : { messageId: sent.messageId, instanceId: sent.target.target.instanceId };
+  const lines = sent === undefined ? "" : `\n${idLines(sent.messageId, sent.target)}`;
+  const answered = trace.answer === undefined ? undefined : answerOutcome(trace.answer);
+  if (answered === "unknown-kind")
+    return fail(`talk: Handover: ${UNKNOWN_KIND_TEXT}${lines}`, { ...ids, outcome: answered });
+  if (answered !== undefined) {
+    const report = `Handover: ${OUTCOME_TEXT[answered]}${lines}`;
+    return acceptsDelivery(answered)
+      ? Effect.succeed({
+          ok: true,
+          text: report,
+          details: { action: "handover", ...ids, outcome: answered },
+        })
+      : fail(`talk: ${report}`, { ...ids, outcome: answered });
+  }
+  switch (trace.write) {
+    case "pending":
+    case "done":
+      return fail(`${HANDOVER_UNKNOWN}${lines}`, { ...ids, outcome: "unknown" });
+    case "failed":
+      return fail(`${HANDOVER_WRITE_FAILED}${lines}`, { ...ids, outcome: "failed" });
+    case "none":
+      return settled
+        ? fail(HANDOVER_NOT_SENT, { outcome: "failed" })
+        : fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
+  }
+};
+
+const handoverResult = (end: HandoverEnd): Effect.Effect<TalkToolOutcome, TalkToolFailed> => {
+  switch (end._tag) {
+    case "Refused":
+      return fail(end.text);
+    case "Cancelled":
+      return fail(HANDOVER_CANCELLED, { outcome: "cancelled" });
+    case "Failed":
+      return fail(HANDOVER_FAILED, { outcome: "failed" });
+    case "SideTurnFailed":
+      return fail(HANDOVER_SIDE_TURN_FAILED, { outcome: "failed" });
+    case "Dispatched":
+      return dispatchResult(end.record, end.settled);
+  }
+};
+
+/** Fails with the refusal of H3 that holds now; a check that throws fails with its error. */
+const refuseHandover = (flow: HandoverFlow): Effect.Effect<void, TalkToolFailed> =>
+  Effect.try({
+    try: flow.refusal,
+    catch: (cause) => new TalkToolFailed({ message: `talk: ${causeText(cause)}` }),
+  }).pipe(Effect.flatMap((refusal) => (refusal === undefined ? Effect.void : fail(refusal))));
+
+/**
+ * H1 to H3: the action refuses before the side turn when the session cannot
+ * run the review, then starts the `/talk` handover flow for the one exact
+ * target and reports how its send went (H4). The summary never reaches the
+ * result.
+ */
+const runHandover = Effect.fnUntraced(function* (
+  context: ToolContext,
+  params: TalkParams,
+  selector: Selector,
+) {
+  if ((params.attachments?.length ?? 0) > 0) return yield* fail(HANDOVER_NO_ATTACHMENTS);
+  if (params.noWake === true) return yield* fail(HANDOVER_ALWAYS_WAKES);
+  const flow = context.handover;
+  if (flow === undefined) return yield* fail(NO_HANDOVER_FLOW);
+  yield* refuseHandover(flow);
+  const target = yield* resolveTarget(context, selector);
+  const { instanceId } = target.target;
+  if (isOwn(context.self, target.target)) return yield* fail(HANDOVER_OWN_TARGET, { instanceId });
+  // An exact instance resolves without a probe (E8), so the action probes it before the side turn.
+  if (selector._tag === "Instance") {
+    const [probe] = yield* transportCall("the probe", () =>
+      context.transport.probeAll([target.target]),
+    );
+    if (probe !== "ok")
+      return yield* fail(
+        `talk: the instance ${instanceId} did not answer a probe (${probe ?? "no result"}). Nothing was sent. Run the action list.`,
+        { instanceId, ...(probe === undefined ? {} : { outcome: probe }) },
+      );
+  }
+  // `start` checks the refusals again: a `/talk` flow can open while the target resolves, and the action never ends it.
+  const end = yield* Effect.tryPromise({
+    try: () => flow.start(target, params.message, context.signal),
+    catch: () => new TalkToolFailed({ message: HANDOVER_FAILED, outcome: "failed" }),
+  });
+  return yield* handoverResult(end);
+});
+
 const decodeParams = Schema.decodeUnknownEffect(TalkParams);
 
 const runAction = (
@@ -918,6 +1128,8 @@ const runAction = (
           return runStatus(context);
         case "cancel":
           return runCancel(context, params, selector);
+        case "handover":
+          return runHandover(context, params, selector);
       }
     }),
   );

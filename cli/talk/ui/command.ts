@@ -5,7 +5,9 @@
  * for the one pair that the target resolves to; `/talk handover <target>`
  * starts handover to that pair, and `/talk handover` opens the list in
  * handover mode (G2). `h` in the normal list starts handover to the selected
- * row. The `alt+t` shortcut opens the list (G4).
+ * row. The `alt+t` shortcut opens the list (G4). The `handover` action of
+ * the `talk` tool starts the handover flow for one exact pair, and each flow
+ * gives how it ended, with the record of its send (#260 H2, H5).
  *
  * Each binding runs at most one flow at a time, tied to the session id of
  * the context that started it. A flow ends when another flow starts, when
@@ -25,12 +27,15 @@ import type { JSXNode } from "@oh-my-pi/pi-tui";
 
 import { oneLine } from "../tool/attachments";
 import type { DeliverKind } from "../tool/protocol";
+import { type DispatchRecord, type FlowEnd, newDispatchRecord } from "../tool/tool";
 import type { Target } from "../transport/request";
 import {
   HANDOVER_NO_SIDE_TURN,
   HANDOVER_STARTED,
   type SideTurn,
+  agentHandoverNotice,
   requestDraft,
+  reviewText,
   reviewView,
 } from "./handover";
 import type { HostUi } from "./host";
@@ -71,11 +76,17 @@ export const VIEWS_NEED_TUI =
 
 // ── Arguments (G2) ──
 
-/** What `/talk` asks for, decoded from the argument text. */
+/** What `/talk` asks for, decoded from the argument text, or what the `handover` action of the `talk` tool asks for. */
 export type TalkCommand =
   | { readonly _tag: "List" }
   | { readonly _tag: "Compose"; readonly target: string }
-  | { readonly _tag: "Handover"; readonly target: string | undefined };
+  | { readonly _tag: "Handover"; readonly target: string | undefined }
+  /** #260 H2: a handover to the one exact pair that the tool resolved, with the note of the agent. */
+  | {
+      readonly _tag: "AgentHandover";
+      readonly destination: Destination;
+      readonly note: string | undefined;
+    };
 
 const WHITESPACE = /\s+/u;
 
@@ -197,12 +208,17 @@ export interface FlowServices {
   readonly list: (life: FlowLife) => Promise<ListingAnswer>;
   /** The E8 resolver of a `/talk <target>` text. */
   readonly resolve: (target: string, life: FlowLife) => Promise<TargetAnswer>;
-  /** The send to one exact pair through the `instance` path (G3), as a message or a handover (G6). */
+  /**
+   * The send to one exact pair through the `instance` path (G3), as a message
+   * or a handover (G6). The send fixes its ids in `record` before the request,
+   * and the transport records the body write and the answer there (#260 H5).
+   */
   readonly send: (
     pair: Target,
     text: string,
     kind: DeliverKind,
     life: FlowLife,
+    record: DispatchRecord,
   ) => Promise<SendAnswer>;
   /** `ctx.runEphemeralTurn` of the flow's context; undefined when the host has none (F7). */
   readonly sideTurn: SideTurn | undefined;
@@ -211,8 +227,20 @@ export interface FlowServices {
 // ── Flow slot (G3) ──
 
 export interface FlowSlot {
-  /** Runs one flow; a running flow ends first. It reports its errors with `notify` and never rejects. */
-  readonly run: (ui: FlowUi, services: FlowServices, command: TalkCommand) => Promise<void>;
+  /**
+   * Runs one flow; a running flow ends first. It reports its errors with
+   * `notify`, never rejects, and gives how the flow ended (#260 H2). An abort
+   * of `signal`, the signal of the tool call that started the flow, ends the
+   * flow as `end` does (#260 H5).
+   */
+  readonly run: (
+    ui: FlowUi,
+    services: FlowServices,
+    command: TalkCommand,
+    signal?: AbortSignal,
+  ) => Promise<FlowEnd>;
+  /** True while a flow runs. */
+  readonly isOpen: () => boolean;
   /** Ends the running flow. */
   readonly end: () => void;
   /**
@@ -265,6 +293,19 @@ const resultOf = <R>(waited: Waited<R>): R | undefined => {
   if (waited._tag === "Failed") throw waited.cause;
   return waited._tag === "Ready" ? waited.result : undefined;
 };
+
+/** Flow ends that carry no send (#260 H2). */
+const CANCELLED: FlowEnd = { _tag: "Cancelled" };
+const FAILED: FlowEnd = { _tag: "Failed" };
+
+/** How a handover starts: its start notice, and the note of the agent above the draft (#260 H2). */
+interface HandoverStart {
+  readonly notice: string;
+  readonly note: string | undefined;
+}
+
+/** A handover from `/talk`, from the handover-mode list, or from `h` in the list. */
+const OPERATOR_HANDOVER: HandoverStart = { notice: HANDOVER_STARTED, note: undefined };
 
 /** The `_tag` of a view choice. */
 const tagOf = (value: unknown): unknown =>
@@ -495,7 +536,8 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
    * Edit, confirm, and send to one destination (G3, G6). `escape` in the
    * confirm view returns to the edit view with the text kept. A flow that
    * ended while the send ran posts no notice: the send stopped before its
-   * request, or the request went out and the peer can hold the text.
+   * request, or the request went out and the peer can hold the text. The
+   * record of the send, not its promise, tells what went out (#260 H5).
    */
   const editConfirmSend = async (
     flow: Flow,
@@ -505,7 +547,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
     first: string,
     edit: EditView,
     fullscreen: boolean,
-  ): Promise<void> => {
+  ): Promise<FlowEnd> => {
     let text = first;
     for (;;) {
       const edited = await mount<TextChoice>(
@@ -515,7 +557,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         { _tag: "Cancel" },
         fullscreen,
       );
-      if (edited._tag !== "Confirm") return;
+      if (edited._tag !== "Confirm") return CANCELLED;
       text = edited.text;
       const code = nextCode(lastCode);
       lastCode = code;
@@ -527,58 +569,69 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         FULL_SCREEN,
       );
       if (confirmed._tag === "Back") continue;
-      if (confirmed._tag !== "Send" || !live(flow)) return;
+      if (confirmed._tag !== "Send" || !live(flow)) return CANCELLED;
       const pair: Target = { instanceId: destination.instanceId, sessionId: destination.sessionId };
+      const record = newDispatchRecord();
       // A talk view holds the focus while the send runs; `escape` ends the flow and its signal.
-      const sent = resultOf(
-        await waitFor(flow, flowUi, sendingText(destination), () =>
-          flow.services.send(pair, text, kind, flow.life),
-        ),
+      const waited = await waitFor(flow, flowUi, sendingText(destination), () =>
+        flow.services.send(pair, text, kind, flow.life, record),
       );
-      if (sent === undefined || !live(flow)) return;
+      if (waited._tag === "Failed") {
+        if (live(flow)) flowUi.notify(talkErrorText(waited.cause), "error");
+        return { _tag: "Dispatched", record, settled: true };
+      }
+      const sent = waited._tag === "Ready" ? waited.result : undefined;
+      const end: FlowEnd = { _tag: "Dispatched", record, settled: sent !== undefined };
+      if (sent === undefined || !live(flow)) return end;
       if (sent.ok) flowUi.notify(sent.text, "info");
       else flowUi.notify(talkErrorText(sent.text), "error");
-      return;
+      return end;
     }
   };
 
   /**
    * G6: a side turn writes the draft with the flow's signal; the review, the
    * confirm view, and the send follow. A flow that ended while the side turn
-   * ran mounts no review.
+   * ran mounts no review. A handover of the `talk` tool shows its own start
+   * notice and puts the note of the agent above the draft (#260 H2).
    */
-  const handover = async (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> => {
+  const handover = async (
+    flow: Flow,
+    flowUi: FlowUi,
+    destination: Destination,
+    start: HandoverStart,
+  ): Promise<FlowEnd> => {
     // A flow that ended at the key that chose the handover shows nothing more.
-    if (!live(flow)) return;
+    if (!live(flow)) return CANCELLED;
     const { sideTurn } = flow.services;
     if (sideTurn === undefined) {
       flowUi.notify(HANDOVER_NO_SIDE_TURN, "error");
-      return;
+      return FAILED;
     }
-    flowUi.notify(HANDOVER_STARTED, "info");
+    flowUi.notify(start.notice, "info");
     // A talk view holds the focus while the side turn runs; `escape` ends the flow and aborts it.
     const draft = resultOf(
       await waitFor(flow, flowUi, HANDOVER_WAITING, () =>
         requestDraft(sideTurn, flow.controller.signal),
       ),
     );
-    if (draft === undefined || !live(flow)) return;
+    if (draft === undefined || !live(flow)) return CANCELLED;
     if (draft._tag === "Failed") {
       flowUi.notify(draft.text, "error");
-      return;
+      return { _tag: "SideTurnFailed" };
     }
-    await editConfirmSend(
+    return editConfirmSend(
       flow,
       flowUi,
       destination,
       "handover",
-      draft.text,
+      reviewText(start.note, draft.text),
       (viewUi, size, text, done) => reviewView(viewUi, size, text, done),
       FULL_SCREEN,
     );
   };
 
-  const compose = (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<void> =>
+  const compose = (flow: Flow, flowUi: FlowUi, destination: Destination): Promise<FlowEnd> =>
     editConfirmSend(
       flow,
       flowUi,
@@ -589,26 +642,26 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       DOCKED,
     );
 
-  /** The rows of one listing answer; undefined after an end or after the error notice. */
+  /** The rows of one listing answer, else the end of the flow: after an end, or after the error notice. */
   const rowsOf = (
     flow: Flow,
     flowUi: FlowUi,
     answer: ListingAnswer | undefined,
-  ): ReadonlyArray<ListRow> | undefined => {
-    if (answer === undefined || !live(flow)) return undefined;
+  ): ReadonlyArray<ListRow> | FlowEnd => {
+    if (answer === undefined || !live(flow)) return CANCELLED;
     if (answer._tag === "Listed") return answer.rows;
     flowUi.notify(talkErrorText(answer.text), "error");
-    return undefined;
+    return FAILED;
   };
 
-  const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<void> => {
+  const listFlow = async (flow: Flow, flowUi: FlowUi, mode: ListMode): Promise<FlowEnd> => {
     let rows = rowsOf(flow, flowUi, await untilEnded(flow, flow.services.list(flow.life)));
     let preferred: Target | undefined;
     // G3: while the list does not fit, the resize view stands in for it. When the list fits
     // again, the resize view lists again and stays open until the rows are ready, so a talk
     // view keeps the focus; the rows leave out ended registrations, and the list selects
     // the pair that it selected before, while that pair is listed.
-    while (rows !== undefined) {
+    while (!("_tag" in rows)) {
       const shown = rows;
       const choice = await mount<ListChoice>(
         flow,
@@ -619,7 +672,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
       );
       switch (choice._tag) {
         case "Close":
-          return;
+          return CANCELLED;
         case "TooSmall": {
           const resized = await mount<Waited<ListingAnswer>>(
             flow,
@@ -634,52 +687,54 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
           continue;
         }
         case "Handover":
-          await handover(flow, flowUi, choice.row);
-          return;
+          return handover(flow, flowUi, choice.row, OPERATOR_HANDOVER);
         case "Compose":
-          await compose(flow, flowUi, choice.row);
-          return;
+          return compose(flow, flowUi, choice.row);
       }
     }
+    return rows;
   };
 
-  /** The one pair of a `/talk` target, resolved before any view opens (G2); undefined after a notice or an end. */
+  /** The one pair of a `/talk` target, resolved before any view opens (G2); else the end of the flow after a notice or an end. */
   const resolveTarget = async (
     flow: Flow,
     flowUi: FlowUi,
     target: string,
-  ): Promise<Destination | undefined> => {
+  ): Promise<Destination | FlowEnd> => {
     const answer = await untilEnded(flow, flow.services.resolve(target, flow.life));
-    if (answer === undefined || !live(flow)) return undefined;
+    if (answer === undefined || !live(flow)) return CANCELLED;
     if (answer._tag === "Resolved") return answer.destination;
     flowUi.notify(talkErrorText(answer.text), "error");
-    return undefined;
+    return FAILED;
   };
 
-  const steps = async (flow: Flow, flowUi: FlowUi, command: TalkCommand): Promise<void> => {
+  const steps = async (flow: Flow, flowUi: FlowUi, command: TalkCommand): Promise<FlowEnd> => {
     switch (command._tag) {
       case "List":
-        await listFlow(flow, flowUi, "message");
-        return;
+        return listFlow(flow, flowUi, "message");
       case "Handover": {
-        if (command.target === undefined) {
-          await listFlow(flow, flowUi, "handover");
-          return;
-        }
+        if (command.target === undefined) return listFlow(flow, flowUi, "handover");
         const destination = await resolveTarget(flow, flowUi, command.target);
-        if (destination !== undefined) await handover(flow, flowUi, destination);
-        return;
+        return "_tag" in destination
+          ? destination
+          : handover(flow, flowUi, destination, OPERATOR_HANDOVER);
       }
       case "Compose": {
         const destination = await resolveTarget(flow, flowUi, command.target);
-        if (destination !== undefined) await compose(flow, flowUi, destination);
-        return;
+        return "_tag" in destination ? destination : compose(flow, flowUi, destination);
       }
+      case "AgentHandover":
+        return handover(flow, flowUi, command.destination, {
+          notice: agentHandoverNotice(command.destination),
+          note: command.note,
+        });
     }
   };
 
   return {
-    run: async (flowUi, services, command) => {
+    run: async (flowUi, services, command, signal) => {
+      // An aborted tool call starts nothing and ends no open flow (#260 H5).
+      if (signal?.aborted === true) return CANCELLED;
       current?.controller.abort();
       const controller = new AbortController();
       let sessionId: string;
@@ -687,7 +742,7 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         sessionId = services.sessionId();
       } catch (error) {
         flowUi.notify(talkErrorText(error), "error");
-        return;
+        return FAILED;
       }
       const flow: Flow = {
         controller,
@@ -698,16 +753,25 @@ export const makeFlowSlot = (ui: HostUi, options: FlowSlotOptions = {}): FlowSlo
         held: undefined,
       };
       current = flow;
+      // The tool call's signal ends the flow, as the end of a flow does (#260 H5).
+      const onAbort = (): void => {
+        controller.abort();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        await steps(flow, flowUi, command);
+        return await steps(flow, flowUi, command);
       } catch (error) {
-        if (live(flow)) flowUi.notify(talkErrorText(error), "error");
+        if (!live(flow)) return CANCELLED;
+        flowUi.notify(talkErrorText(error), "error");
+        return FAILED;
       } finally {
+        signal?.removeEventListener("abort", onAbort);
         flow.controller.abort();
         release(flow);
         if (current === flow) current = undefined;
       }
     },
+    isOpen: () => current !== undefined,
     end: () => {
       current?.controller.abort();
     },

@@ -21,8 +21,16 @@ export const sessionName = (name: string | undefined, sessionId: string): string
   return trimmed === "" ? `session-${sessionId.slice(0, FALLBACK_ID_LENGTH)}` : trimmed;
 };
 
-/** The actions of the `talk` tool (E10). */
-export type TalkAction = "list" | "send" | "ask" | "reply" | "pending" | "status" | "cancel";
+/** The actions of the `talk` tool (E10, #260 H1). */
+export type TalkAction =
+  | "list"
+  | "send"
+  | "ask"
+  | "reply"
+  | "pending"
+  | "status"
+  | "cancel"
+  | "handover";
 
 /** The target fields of one tool call. A missing or blank field counts as unset. */
 export interface TargetFields {
@@ -75,9 +83,9 @@ const present = (value: string | undefined): string | undefined => {
 };
 
 /**
- * Checks the target fields against the action: `send` and `ask` need exactly
- * one of `to` and `instance`, `cancel` needs one beside `messageId`, and
- * `reply`, `list`, `pending`, and `status` take neither.
+ * Checks the target fields against the action: `send`, `ask`, and
+ * `handover` need exactly one of `to` and `instance`, `cancel` needs one
+ * beside `messageId`, and `reply`, `list`, `pending`, and `status` take neither.
  */
 export const selectorFor = (
   action: TalkAction,
@@ -99,6 +107,7 @@ export const selectorFor = (
       break;
     case "send":
     case "ask":
+    case "handover":
       break;
   }
   if (to !== undefined && instance !== undefined) return fail("both-targets");

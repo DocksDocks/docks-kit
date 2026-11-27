@@ -113,7 +113,8 @@ const SHORT_SESSION_LENGTH = 8;
 /** The length of a full instance id: 16 hex digits. */
 export const INSTANCE_ID_LENGTH = 16;
 
-const shownName = (destination: Destination): string =>
+/** The name of a destination as a literal, for the views and the start notice of a handover (#260 H2). */
+export const shownName = (destination: Destination): string =>
   destination.name === undefined ? "(no name)" : literal(destination.name);
 const shownFolder = (destination: Destination): string =>
   destination.cwd === undefined ? "(no folder)" : literal(destination.cwd);

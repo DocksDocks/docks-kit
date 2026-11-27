@@ -290,15 +290,18 @@ describe("selectorFor", () => {
     return result.failure;
   };
 
-  it.each(["send", "ask"] as const)("%s takes exactly one of to and instance", (action) => {
-    expect(selectorFor(action, { to: "bob" })).toEqual(Result.succeed({ _tag: "To", to: "bob" }));
-    expect(selectorFor(action, { instance: BOB.instanceId })).toEqual(
-      Result.succeed({ _tag: "Instance", instanceId: BOB.instanceId }),
-    );
-    expect(failed(selectorFor(action, {}))).toMatchObject({ action, reason: "missing-target" });
-  });
+  it.each(["send", "ask", "handover"] as const)(
+    "%s takes exactly one of to and instance",
+    (action) => {
+      expect(selectorFor(action, { to: "bob" })).toEqual(Result.succeed({ _tag: "To", to: "bob" }));
+      expect(selectorFor(action, { instance: BOB.instanceId })).toEqual(
+        Result.succeed({ _tag: "Instance", instanceId: BOB.instanceId }),
+      );
+      expect(failed(selectorFor(action, {}))).toMatchObject({ action, reason: "missing-target" });
+    },
+  );
 
-  it.each(["send", "ask", "cancel"] as const)(
+  it.each(["send", "ask", "cancel", "handover"] as const)(
     "%s fails when to and instance are both set",
     (action) => {
       expect(

@@ -30,6 +30,7 @@ import {
 } from "./tool/host";
 import { type ProbeResult, sessionName } from "./tool/targets";
 import {
+  type HandoverFlow,
   type ListAnswer,
   type ListingSnapshot,
   type PeerTransport,
@@ -241,10 +242,10 @@ export const makeTalkTransport = (
         ),
         signal,
       ),
-    request: (target, kind, body, signal, beforeBody) =>
+    request: (target, kind, body, signal, beforeBody, trace) =>
       run(
         TalkTransport.use((transport) =>
-          transport.request(target, kind, body, undefined, beforeBody),
+          transport.request(target, kind, body, undefined, beforeBody, trace),
         ).pipe(
           Effect.map((answer): RequestAnswer => ({ _tag: "Answered", body: answer })),
           Effect.catch((error) =>
@@ -581,6 +582,15 @@ const flowUi = (ctx: unknown): FlowUi | undefined => {
 };
 
 const NO_FLOW_UI = `talk: this omp gives no ctx.ui.custom or ctx.ui.notify, so /talk has no views. talk needs omp ${OMP_VERSION_NEEDED} or later.`;
+
+// #260 H3: the refusals of the `handover` action before its side turn; each says what the user can do.
+export const HANDOVER_NEEDS_TUI =
+  "talk: the handover action needs an interactive omp session in a terminal or in Tern, because the user reviews and confirms the summary in a talk view there. Nothing was sent. The user can start the handover with /talk handover <session> in such a session.";
+export const HANDOVER_IN_SUBAGENT =
+  "talk: a subagent session cannot start a handover. Nothing was sent. The user can start it in the main session with /talk handover <session>.";
+export const HANDOVER_FLOW_OPEN =
+  "talk: a /talk view is open in this session, and the handover action does not close it. Nothing was sent. The user can finish or close that view, then ask for the handover again.";
+export const HANDOVER_NEEDS_SIDE_TURN = `talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover. Nothing was sent. The user can update omp to ${OMP_VERSION_NEEDED} or later.`;
 
 /** #251 G4: the warning of a key that already holds `alt+t`. */
 const conflictNotice = (conflict: unknown): string => {
@@ -1171,6 +1181,7 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             clock: env.clock,
             signal: signal instanceof AbortSignal ? signal : undefined,
             snapshot,
+            handover: handoverFlow(ctx, context),
           },
           params,
         ),
@@ -1194,8 +1205,8 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
       probeAll: (targets) => whileLive(() => talk.transport.probeAll(targets, life.signal)),
       // The client asks `live` again after the handshake, right before the body
       // goes out: a session id that changed with no event stops the body (R1, R11).
-      request: (target, kind, body) =>
-        whileLive(() => talk.transport.request(target, kind, body, life.signal, life.live)),
+      request: (target, kind, body, _signal, _beforeBody, trace) =>
+        whileLive(() => talk.transport.request(target, kind, body, life.signal, life.live, trace)),
       known: (instanceId) => whileLive(() => talk.transport.known(instanceId, life.signal)),
     };
   };
@@ -1237,13 +1248,14 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
             }),
           ),
         ),
-      send: (pair, text, kind, life) =>
+      send: (pair, text, kind, life, record) =>
         Effect.runPromise(
           sendToPair(toolContext(life), pair, {
             text,
             attachments: [],
             noWake: false,
             kind,
+            record,
           }).pipe(
             Effect.match({
               onFailure: (error): SendAnswer => ({ ok: false, text: error.message }),
@@ -1257,22 +1269,56 @@ const bindSession = (api: PiApi, talk: TalkProcess, env: BindingEnv): void => {
     };
   };
 
+  /**
+   * The `handover` action of the tool, bound to the context of its call
+   * (#260 H2, H3): the refusals before the side turn, then the `/talk`
+   * handover flow for the one exact pair, with the signal of the call.
+   */
+  const handoverFlow = (ctx: unknown, context: SessionContext): HandoverFlow => {
+    const refusal = (): string | undefined => {
+      if (readContext(ctx, ["mode"]).mode() !== "tui" || flowUi(ctx) === undefined)
+        return HANDOVER_NEEDS_TUI;
+      if (context.agent().kind !== "main") return HANDOVER_IN_SUBAGENT;
+      if (flows.isOpen()) return HANDOVER_FLOW_OPEN;
+      if (method(ctx, "runEphemeralTurn") === undefined) return HANDOVER_NEEDS_SIDE_TURN;
+      return undefined;
+    };
+    return {
+      refusal,
+      start: async (target, note, signal) => {
+        // The checks and the start of the flow run in one tick, so a `/talk` flow that
+        // opened while the target resolved refuses the action and stays open.
+        const refused = refusal();
+        const ui = flowUi(ctx);
+        if (refused !== undefined || ui === undefined)
+          return { _tag: "Refused", text: refused ?? HANDOVER_NEEDS_TUI };
+        const destination = { ...target.target, name: target.name, cwd: target.cwd };
+        return flows.run(
+          ui,
+          flowServices(ctx, context),
+          { _tag: "AgentHandover", destination, note },
+          signal,
+        );
+      },
+    };
+  };
+
   /** G1: a flow in a TUI session; in `rpc`, `print`, and `json`, the one notice. */
-  const startFlow = (ctx: unknown, command: TalkCommand): Promise<void> => {
+  const startFlow = async (ctx: unknown, command: TalkCommand): Promise<void> => {
     try {
       if (readContext(ctx, ["mode"]).mode() !== "tui") {
         notifyUser(ctx, VIEWS_NEED_TUI, env.writeError);
-        return Promise.resolve();
+        return;
       }
       const ui = flowUi(ctx);
       if (ui === undefined) {
         notifyUser(ctx, NO_FLOW_UI, env.writeError);
-        return Promise.resolve();
+        return;
       }
-      return flows.run(ui, flowServices(ctx, readContext(ctx, TOOL_NEEDS)), command);
+      // `/talk` and `alt+t` show the end of their flow in its notices, so they drop it.
+      await flows.run(ui, flowServices(ctx, readContext(ctx, TOOL_NEEDS)), command);
     } catch (error) {
       notifyUser(ctx, talkErrorText(error), env.writeError);
-      return Promise.resolve();
     }
   };
 

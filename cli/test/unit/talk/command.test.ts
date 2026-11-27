@@ -26,6 +26,7 @@ import {
   typeCode,
 } from "../../lib/talkFlowHost";
 import { literal } from "../../../talk/tool/attachments";
+import type { FlowEnd } from "../../../talk/tool/tool";
 import { type ListingAnswer, parseTalkArgs, talkCompletions } from "../../../talk/ui/command";
 import {
   CONFIRM_TOO_SMALL,
@@ -1034,7 +1035,7 @@ describe("a buffered escape right after a view-changing key (round 8)", () => {
 
   /** One transition: the flow, the outgoing view, and the input that leads to the next talk view. */
   interface Transition {
-    readonly flow: Promise<void>;
+    readonly flow: Promise<FlowEnd>;
     readonly view: FakeNode;
     readonly trigger: () => void;
   }

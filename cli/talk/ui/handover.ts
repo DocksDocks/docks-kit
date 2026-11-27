@@ -1,12 +1,15 @@
 /**
- * Handover (plan #251 G6): the template of the side turn, the reading of its
- * reply, and the review view.
+ * Handover (plan #251 G6, #260 H2): the template of the side turn, the
+ * reading of its reply, and the review view.
  *
  * The flow in `command.ts` resolves the destination to one registration
  * pair, asks `ctx.runEphemeralTurn` for a summary with `HANDOVER_PROMPT`,
  * and opens the review view with the reply. The operator edits the draft
  * there; `ctrl+s` goes to the confirm view of `views.ts`. The send carries
- * `kind: "handover"` and a wake, so the receiver acts on the summary.
+ * `kind: "handover"` and a wake, so the receiver acts on the summary. The
+ * `handover` action of the `talk` tool starts the same flow for an exact
+ * pair, with a start notice of its own and the note of the agent above the
+ * draft.
  *
  * This module runs no effect.
  */
@@ -18,6 +21,7 @@ import { safeMultiline } from "../tool/attachments";
 import type { HostUi } from "./host";
 import {
   CLOSE_KEY,
+  type Destination,
   type SizeReader,
   TALK_SHORTCUT,
   type TextChoice,
@@ -25,6 +29,8 @@ import {
   type ViewKey,
   type ViewSize,
   applyEdit,
+  safeOneLine,
+  shownName,
 } from "./views";
 
 /** omp caps the reply of a side turn at 4 KiB (F7); the template stays inside it too. */
@@ -76,6 +82,19 @@ export type SideTurn = (request: SideTurnRequest) => Promise<unknown>;
 export const HANDOVER_STARTED =
   "talk: a side turn writes the handover summary. In the review, ctrl+s confirms the destination, alt+enter adds a line, and escape cancels.";
 
+/** The start notice of a handover that the `handover` action of the `talk` tool started (#260 H2). */
+export const agentHandoverNotice = (destination: Destination): string =>
+  `talk: the agent started a handover to ${shownName(destination)} (instance ${destination.instanceId}). A side turn writes the summary. In the review, ctrl+s confirms the destination, alt+enter adds a line, and escape cancels.`;
+
+/**
+ * The first text of the review (#260 H1): the note of the agent, cleaned as
+ * the draft is, above the draft. A note without text adds nothing.
+ */
+export const reviewText = (note: string | undefined, draft: string): string => {
+  const lead = note === undefined ? "" : safeMultiline(note).trim();
+  return lead === "" ? draft : `${lead}\n\n${draft}`;
+};
+
 export const HANDOVER_NO_SIDE_TURN =
   "talk: this omp gives no ctx.runEphemeralTurn, so talk cannot write a handover. Nothing was sent.";
 
@@ -115,7 +134,8 @@ export const requestDraft = async (
     if (body === "") return { _tag: "Failed", text: HANDOVER_EMPTY };
     return { _tag: "Draft", text: cut ? `${body}\n${HANDOVER_CUT_LINE}` : body };
   } catch (cause) {
-    const hostError = Predicate.isError(cause) ? cause.message : String(cause);
+    // H4: the host error is one line without terminal controls, on every path of the flow.
+    const hostError = safeOneLine(Predicate.isError(cause) ? cause.message : String(cause));
     return {
       _tag: "Failed",
       text: `talk: the handover side turn failed. Nothing was sent. Host error: ${hostError}`,

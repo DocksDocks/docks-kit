@@ -31,10 +31,21 @@ export class TalkConnectionClosed extends Schema.TaggedError<
   reason: Schema.String,
 }) {}
 
+/** The state of one tracked frame write (#260 H5). */
+export type WriteState = "pending" | "done" | "failed";
+
 export interface Connection {
   /** The next frame value. */
   readonly read: Effect.Effect<unknown, TalkConnectionClosed | FrameError>;
-  readonly write: (value: Schema.Json) => Effect.Effect<void, TalkConnectionClosed | FrameError>;
+  /**
+   * Writes one frame. `track` gets `pending` when the socket write starts,
+   * then `done` or `failed` from the completion of that write; a closed
+   * connection gives `failed` at once.
+   */
+  readonly write: (
+    value: Schema.Json,
+    track?: (state: WriteState) => void,
+  ) => Effect.Effect<void, TalkConnectionClosed | FrameError>;
   /** Ends the connection after the written frames, then destroys it. */
   readonly finish: Effect.Effect<void>;
   /** Destroys the connection at once. */
@@ -78,12 +89,20 @@ export const makeConnection = Effect.fnUntraced(function* (socket: Socket) {
     return ready.shift();
   });
 
-  const write = Effect.fnUntraced(function* (value: Schema.Json) {
+  const write = Effect.fnUntraced(function* (
+    value: Schema.Json,
+    track?: (state: WriteState) => void,
+  ) {
     const frame = yield* encodeFrame(value);
     if (socket.destroyed || !socket.writable) {
+      track?.("failed");
       return yield* new TalkConnectionClosed({ reason: "the connection is closed" });
     }
-    socket.write(frame);
+    track?.("pending");
+    // Bun can return false and report EPIPE later, so only the completion tells whether the socket took the bytes.
+    socket.write(frame, (error) => {
+      track?.(error === undefined || error === null ? "done" : "failed");
+    });
   });
 
   const connection: Connection = {

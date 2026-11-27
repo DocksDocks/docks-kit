@@ -44,7 +44,7 @@ import {
   encodeEntry,
   entryFileName,
 } from "../../../talk/transport/registry";
-import type { Target } from "../../../talk/transport/request";
+import { type Target, newRequestTrace } from "../../../talk/transport/request";
 import { TalkDpapi, sealEntries } from "../../../talk/transport/sealWindows";
 import { TRANSPORT_DEFAULTS, TalkTransport } from "../../../talk/transport/transport";
 import { TalkFileError, TalkPosixSystem } from "../../../talk/transport/trustPosix";
@@ -178,6 +178,10 @@ interface FakeOptions {
   readonly gate?: Promise<void>;
   /** Holds back each response until it settles. */
   readonly respond?: Promise<void>;
+  /** The `result` of each response. Default: `ok` with the label as the body. */
+  readonly result?: Readonly<Record<string, unknown>>;
+  /** Destroys the connection when a request arrives, so the reply is lost after the body went out. */
+  readonly dropRequest?: boolean;
   readonly gauge?: Gauge;
   /** Receives the label of each hello, in order. */
   readonly hellos?: Array<string>;
@@ -191,6 +195,8 @@ interface FakeListener {
   readonly requests: () => number;
   /** Destroys every open connection. */
   readonly release: () => void;
+  /** The open accepted connections. */
+  readonly sockets: () => ReadonlyArray<Socket>;
 }
 
 async function startFakeListener(path: string, options: FakeOptions): Promise<FakeListener> {
@@ -245,12 +251,16 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
           socket.write(frame({ type: options.mode === "ended" ? "ended" : "ready" }));
         } else if (received["type"] === "request") {
           requests += 1;
+          if (options.dropRequest === true) {
+            socket.destroy();
+            return;
+          }
           void (options.respond ?? Promise.resolve()).then(() =>
             socket.write(
               frame({
                 type: "response",
                 id: received["id"],
-                result: { status: "ok", body: options.label ?? null },
+                result: options.result ?? { status: "ok", body: options.label ?? null },
               }),
             ),
           );
@@ -270,6 +280,7 @@ async function startFakeListener(path: string, options: FakeOptions): Promise<Fa
     release: () => {
       for (const socket of open) socket.destroy();
     },
+    sockets: () => [...open],
   };
 }
 
@@ -1070,6 +1081,116 @@ describe.skipIf(!POSIX)("listener lifetime under a test clock (in-process)", () 
       expect(listener.accepted()).toBe(2);
     } finally {
       for (const fake of listeners) closeFake(fake);
+      cleanUp();
+    }
+  });
+});
+
+describe.skipIf(!POSIX)("dispatch record of a request (#260 H5)", () => {
+  let base = "";
+  let folder = "";
+  const opened: Array<FakeListener> = [];
+  const secret = randomBytes(32);
+  const target = { instanceId: hex(8), sessionId: "traced" };
+
+  /** A registry folder whose one entry names a fake listener of `options`. */
+  const fresh = async (options: FakeOptions): Promise<FakeListener> => {
+    base = mkdtempSync(join(tmpdir(), "tl-"));
+    folder = join(base, "reg");
+    mkdirSync(folder, { mode: 0o700 });
+    chmodSync(folder, 0o700);
+    const path = join(folder, socketName(process.pid));
+    const listener = await startFakeListener(path, { secret, pair: target, ...options });
+    opened.push(listener);
+    writePosixEntry(folder, {
+      version: PROTOCOL_VERSION,
+      ...target,
+      name: "traced",
+      cwd: base,
+      processId: process.pid,
+      endpoint: { kind: "unix", path },
+      startTime: 1_700_000_000_000,
+      secret: secret.toString("hex"),
+    });
+    return listener;
+  };
+
+  const cleanUp = (): void => {
+    for (const listener of opened.splice(0)) closeFake(listener);
+    rmSync(base, { recursive: true, force: true });
+  };
+
+  /** One request with a fresh record; gives the record, the exit, and the failure outcome. */
+  const traced = (beforeBody?: () => boolean) =>
+    withClient(folder, (client) =>
+      Effect.gen(function* () {
+        const trace = newRequestTrace();
+        const exit = yield* Effect.exit(
+          client.request(target, "echo", null, undefined, beforeBody, trace),
+        );
+        const outcome = Option.getOrUndefined(Exit.findErrorOption(exit))?.outcome;
+        return { trace, exit, outcome };
+      }),
+    );
+
+  it("records the body write as done and the answer that the listener gave", async () => {
+    try {
+      await fresh({ mode: "answer", label: "echoed" });
+      const { trace, exit } = await traced();
+      expect(trace).toEqual({ write: "done", answer: { status: "ok", body: "echoed" } });
+      expect(Exit.isSuccess(exit)).toBe(true);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records a not-live answer after the body write as an answer, not as a lost reply", async () => {
+    try {
+      await fresh({ mode: "answer", result: { status: "not-live" } });
+      const { trace, outcome } = await traced();
+      expect(trace).toEqual({ write: "done", answer: { status: "not-live" } });
+      expect(outcome).toBe("not-live");
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records the body write as done and no answer when the reply is lost after the body went out", async () => {
+    try {
+      const listener = await fresh({ mode: "answer", dropRequest: true });
+      const { trace, outcome } = await traced();
+      expect(listener.requests()).toBe(1);
+      expect(trace).toEqual({ write: "done", answer: undefined });
+      expect(outcome).toBe("unreachable");
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("records the body write as failed when the peer closed its Unix socket right before the write", async () => {
+    try {
+      const listener = await fresh({ mode: "answer" });
+      // The guard runs in the tick of the body write, so the peer is gone before the write call.
+      const { trace, outcome } = await traced(() => {
+        for (const socket of listener.sockets()) socket.destroy();
+        return true;
+      });
+      expect(trace).toEqual({ write: "failed", answer: undefined });
+      expect(outcome).toBe("unreachable");
+      expect(listener.requests()).toBe(0);
+    } finally {
+      cleanUp();
+    }
+  });
+
+  it("leaves the body write at none when the guard keeps the body back", async () => {
+    try {
+      const listener = await fresh({ mode: "answer" });
+      const { trace, exit } = await traced(() => false);
+      expect(trace).toEqual({ write: "none", answer: undefined });
+      expect(Exit.hasInterrupts(exit)).toBe(true);
+      expect(listener.requests()).toBe(0);
+    } finally {
       cleanUp();
     }
   });

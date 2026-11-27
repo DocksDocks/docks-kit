@@ -21,6 +21,7 @@ import {
   typeCode,
 } from "../../lib/talkFlowHost";
 import { literal } from "../../../talk/tool/attachments";
+import type { FlowEnd } from "../../../talk/tool/tool";
 import {
   HANDOVER_CUT_LINE,
   HANDOVER_EMPTY,
@@ -29,8 +30,9 @@ import {
   HANDOVER_STARTED,
   MAX_HANDOVER_BYTES,
   OMP_CUT_MARK,
+  agentHandoverNotice,
 } from "../../../talk/ui/handover";
-import { HANDOVER_WAITING } from "../../../talk/ui/command";
+import { HANDOVER_WAITING, sendingText } from "../../../talk/ui/command";
 
 // The handover flows of plan #251 G6 against the fake TUI host of
 // `cli/test/lib/talkFlowHost.ts`: `/talk handover <target>`, the
@@ -45,7 +47,7 @@ const GAMMA_PAIR = { instanceId: ID_C, sessionId: "session-gamma" };
  * lets the flow run up to its first wait. The flow promise is in an object,
  * so the caller does not wait for the end of the flow.
  */
-const handoverToGamma = async (h: Harness): Promise<{ readonly flow: Promise<void> }> => {
+const handoverToGamma = async (h: Harness): Promise<{ readonly flow: Promise<FlowEnd> }> => {
   h.services.target = { _tag: "Resolved", destination: GAMMA };
   const flow = h.run({ _tag: "Handover", target: "gamma" });
   await flush();
@@ -461,7 +463,7 @@ describe("handover flow end during the side turn (G3, G6)", () => {
   const pending = async (
     h: Harness,
   ): Promise<{
-    readonly flow: Promise<void>;
+    readonly flow: Promise<FlowEnd>;
     readonly reply: {
       readonly resolve: (value: unknown) => void;
       readonly reject: (reason: unknown) => void;
@@ -482,7 +484,7 @@ describe("handover flow end during the side turn (G3, G6)", () => {
   it.each([
     [
       "a second flow",
-      (h: Harness): Promise<void> => {
+      (h: Harness): Promise<unknown> => {
         const second = h.run();
         return flush().then(() => {
           press(h.tui.top.node, "escape");
@@ -492,14 +494,14 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     ],
     [
       "the end of the flow (session_clear, a transition, or shutdown)",
-      (h: Harness): Promise<void> => {
+      (h: Harness): Promise<unknown> => {
         h.slot.end();
         return Promise.resolve();
       },
     ],
     [
       "a session switch that check sees",
-      (h: Harness): Promise<void> => {
+      (h: Harness): Promise<unknown> => {
         h.services.session = "s-2";
         h.slot.check();
         return Promise.resolve();
@@ -555,5 +557,185 @@ describe("handover flow end during the side turn (G3, G6)", () => {
     await flush();
     expect(h.tui.views.map((view) => view.node.kind)).toEqual(["text"]);
     expect(h.services.sends).toEqual([]);
+  });
+});
+
+describe("agent-started handover (#260 H2, H4, H5)", () => {
+  /** The note of the agent: a line break as CRLF, an escape sequence, and a bell. */
+  const NOTE = "Please \u001b[31mtake\u001b[0m over.\r\nThanks\u0007";
+  const CLEAN_NOTE = "Please take over.\nThanks";
+
+  /**
+   * Starts the handover of the `talk` tool to gamma and lets it run up to
+   * its first wait. `note.text` is the note of the agent; an undefined text
+   * gives no note. `ended` gives the end of the flow once it came.
+   */
+  const agentHandover = async (
+    h: Harness,
+    signal?: AbortSignal,
+    note: { readonly text: string | undefined } = { text: NOTE },
+  ): Promise<{ readonly flow: Promise<FlowEnd>; readonly ended: () => FlowEnd | undefined }> => {
+    const state: { end: FlowEnd | undefined } = { end: undefined };
+    const flow = h
+      .run({ _tag: "AgentHandover", destination: GAMMA, note: note.text }, signal)
+      .then((end) => {
+        state.end = end;
+        return end;
+      });
+    await flush();
+    return { flow, ended: () => state.end };
+  };
+
+  it("names the agent and the target in its start notice, runs the side turn, and shows the cleaned note above the draft", async () => {
+    const h = await harness();
+    const { flow } = await agentHandover(h);
+    // The destination is exact: the flow resolves nothing.
+    expect(h.services.targets).toEqual([]);
+    expect(h.services.turns.map((turn) => turn.promptText)).toEqual([HANDOVER_PROMPT]);
+    const notice = agentHandoverNotice(GAMMA);
+    expect(notice).toContain("the agent started a handover");
+    expect(notice).toContain(literal("gamma"));
+    expect(notice).toContain(ID_C);
+    expect(h.tui.notices).toEqual([{ text: notice, level: "info" }]);
+    const review = reviewOf(h);
+    expect(prop(review, "text")).toBe(`${CLEAN_NOTE}\n\n${DRAFT}`);
+    press(review, "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.services.sends).toEqual([]);
+  });
+
+  it.each([
+    ["no note", undefined],
+    ["a note with only blanks and controls", " \u001b[2J \r\n\t"],
+  ])("starts the review with the draft alone for %s", async (_name, note) => {
+    const h = await harness();
+    const { flow } = await agentHandover(h, undefined, { text: note });
+    expect(prop(reviewOf(h), "text")).toBe(DRAFT);
+    press(reviewOf(h), "escape");
+    await flow;
+  });
+
+  it("sends the reviewed text with the note after ctrl+s and the code, and returns the dispatch record of that send", async () => {
+    const h = await harness();
+    const { flow } = await agentHandover(h);
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    const confirm = h.tui.top.node;
+    expect(codeOf(confirm).instanceId).toBe(ID_C);
+    expect(linesOf(confirm)).toContain("Kind: handover");
+    typeCode(confirm, codeOf(confirm).code);
+    const end = await flow;
+    expect(h.services.sends).toEqual([
+      { pair: GAMMA_PAIR, text: `${CLEAN_NOTE}\n\n${DRAFT}`, kind: "handover" },
+    ]);
+    const [record] = h.services.records;
+    expect(record).toBeDefined();
+    expect(end).toEqual({ _tag: "Dispatched", record, settled: true });
+    expect(end._tag === "Dispatched" ? end.record : undefined).toBe(record);
+  });
+
+  it("returns to the review with the text kept on escape in the confirm view, while the flow and the tool call wait", async () => {
+    const h = await harness();
+    const { flow, ended } = await agentHandover(h, undefined, { text: undefined });
+    replaceText(reviewOf(h), "edited");
+    press(h.tui.top.node, "ctrl+s");
+    await flush();
+    expect(h.tui.top.node.kind).toBe("col");
+    press(h.tui.top.node, "escape");
+    await flush();
+    expect(prop(reviewOf(h), "text")).toBe("edited");
+    expect(ended()).toBeUndefined();
+    expect(h.slot.isOpen()).toBe(true);
+    press(reviewOf(h), "escape");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.slot.isOpen()).toBe(false);
+    expect(h.services.sends).toEqual([]);
+  });
+
+  it("returns Cancelled on alt+t in the confirm view and sends nothing", async () => {
+    const h = await harness();
+    const { flow } = await agentHandover(h);
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    press(h.tui.top.node, "alt+t");
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.services.sends).toEqual([]);
+  });
+
+  it.each(["side turn", "review", "confirm view"] as const)(
+    "ends on an abort of the tool call's signal during the %s, returns Cancelled, closes its view, and sends nothing",
+    async (stage) => {
+      const h = await harness();
+      const reply = Promise.withResolvers<unknown>();
+      if (stage === "side turn") h.services.reply = () => reply.promise;
+      const controller = new AbortController();
+      const { flow } = await agentHandover(h, controller.signal);
+      if (stage === "side turn") expect(prop(h.tui.top.node, "text")).toBe(HANDOVER_WAITING);
+      if (stage === "review") expect(reviewOf(h).kind).toBe("editor");
+      if (stage === "confirm view") {
+        press(reviewOf(h), "ctrl+s");
+        await flush();
+        expect(h.tui.top.node.kind).toBe("col");
+      }
+      controller.abort();
+      expect(await flow).toEqual({ _tag: "Cancelled" });
+      expect(h.services.turns[0]?.signal.aborted).toBe(true);
+      expect(h.tui.views.every((view) => view.closed)).toBe(true);
+      reply.resolve({ replyText: DRAFT });
+      await flush();
+      expect(h.tui.views.every((view) => view.closed)).toBe(true);
+      expect(h.services.sends).toEqual([]);
+    },
+  );
+
+  it("returns Cancelled and shows nothing for a signal that aborted before the start", async () => {
+    const h = await harness();
+    const { flow } = await agentHandover(h, AbortSignal.abort());
+    expect(await flow).toEqual({ _tag: "Cancelled" });
+    expect(h.services.turns).toEqual([]);
+    expect(h.tui.calls).toEqual([]);
+  });
+
+  it("returns the record unsettled when the user stops the sending view while the send runs", async () => {
+    const h = await harness();
+    const gate = Promise.withResolvers<void>();
+    h.services.sendGate = gate.promise;
+    const { flow } = await agentHandover(h);
+    press(reviewOf(h), "ctrl+s");
+    await flush();
+    typeCode(h.tui.top.node, codeOf(h.tui.top.node).code);
+    await flush();
+    expect(prop(h.tui.top.node, "text")).toBe(sendingText(GAMMA));
+    press(h.tui.top.node, "escape");
+    const [record] = h.services.records;
+    expect(await flow).toEqual({ _tag: "Dispatched", record, settled: false });
+    gate.resolve();
+  });
+
+  const HOST_ERROR = "provider \u001b[31mMARKER-7731\u001b[0m failed\nretry later";
+  const CLEAN_FAILURE =
+    "talk: the handover side turn failed. Nothing was sent. Host error: provider MARKER-7731 failed retry later";
+
+  it.each([
+    ["the agent path", (h: Harness) => agentHandover(h)],
+    ["the /talk path", (h: Harness) => handoverToGamma(h)],
+  ])(
+    "shows the host error of a failed side turn on one line without terminal controls on %s, and returns SideTurnFailed",
+    async (_name, start) => {
+      const h = await harness();
+      h.services.reply = () => Promise.reject(new Error(HOST_ERROR));
+      const { flow } = await start(h);
+      expect(await flow).toEqual({ _tag: "SideTurnFailed" });
+      expect(h.tui.notices.at(-1)).toEqual({ text: CLEAN_FAILURE, level: "error" });
+      expect(h.services.sends).toEqual([]);
+    },
+  );
+
+  it("returns SideTurnFailed for an empty reply", async () => {
+    const h = await harness();
+    h.services.reply = () => Promise.resolve({ replyText: " " });
+    const { flow } = await agentHandover(h);
+    expect(await flow).toEqual({ _tag: "SideTurnFailed" });
+    expect(h.tui.notices.at(-1)).toEqual({ text: HANDOVER_EMPTY, level: "error" });
   });
 });

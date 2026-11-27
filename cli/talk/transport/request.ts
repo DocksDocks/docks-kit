@@ -5,6 +5,7 @@
  */
 import { Effect, Schema } from "effect";
 
+import type { WriteState } from "./connection";
 import { MessageError } from "./handshake";
 
 /** The kind that answers liveness; every listener serves it. */
@@ -55,6 +56,20 @@ export class TalkRequestFailed extends Schema.TaggedError<
   outcome: RequestOutcome,
   reason: Schema.String,
 }) {}
+
+/**
+ * What one request did, outside its promise (#260 H5): the end of a flow
+ * interrupts the promise, so the caller reads this record instead. The
+ * client sets `write` from the socket write of the body: `none` before the
+ * write call, then the states of `WriteState`. It sets `answer` when it
+ * reads the response frame, a refusal such as `not-live` included.
+ */
+export interface RequestTrace {
+  write: "none" | WriteState;
+  answer: ResponseResult | undefined;
+}
+
+export const newRequestTrace = (): RequestTrace => ({ write: "none", answer: undefined });
 
 /** One registration: the target of a request. */
 export interface Target {

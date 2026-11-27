@@ -34,6 +34,7 @@ import {
 import {
   PING_KIND,
   type RequestOutcome,
+  type RequestTrace,
   type ResponseResult,
   type Target,
   TalkRequestFailed,
@@ -110,12 +111,19 @@ interface Outgoing {
   readonly body: Schema.Json;
   /** False keeps the body back: the connection closes and the request ends as interrupted. */
   readonly beforeBody: () => boolean;
+  /** Set: the route that sends the body records its write and its answer there (#260 H5). */
+  readonly trace: RequestTrace | undefined;
 }
 
 const ALWAYS_SEND = (): boolean => true;
 
 /** The one immutable request of every probe: the target varies, the ping does not (L7). */
-const PING: Outgoing = Object.freeze({ kind: PING_KIND, body: null, beforeBody: ALWAYS_SEND });
+const PING: Outgoing = Object.freeze({
+  kind: PING_KIND,
+  body: null,
+  beforeBody: ALWAYS_SEND,
+  trace: undefined,
+});
 
 /** POSIX: the paths of the talk sockets in the folder, by the process id that each name carries. */
 type SocketIndex = ReadonlyMap<number, ReadonlyArray<string>>;
@@ -194,6 +202,8 @@ export interface Client {
    * `beforeBody` runs after the mutual proof, right before the body goes out.
    * When it returns false, no body goes out, the connection closes, and the
    * request ends as interrupted, as an abort of its caller does (#251 G3).
+   * `trace` gets the state of the body write and the answer of the response
+   * frame as they happen, so it holds them also after an interrupt (#260 H5).
    */
   readonly request: (
     target: Target,
@@ -201,6 +211,7 @@ export interface Client {
     body: Schema.Json,
     timeoutMs?: number,
     beforeBody?: () => boolean,
+    trace?: RequestTrace,
   ) => Effect.Effect<Schema.Json, TalkRequestFailed>;
   /**
    * A `ping` to each target with the probe timeout, all at the same time; the
@@ -318,14 +329,21 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     if (!outgoing.beforeBody()) return CANCELLED;
     const id = nextRequestId;
     nextRequestId += 1;
-    yield* connection.write({ type: "request", id, kind: outgoing.kind, body: outgoing.body });
+    const { trace } = outgoing;
+    yield* connection.write(
+      { type: "request", id, kind: outgoing.kind, body: outgoing.body },
+      trace === undefined
+        ? undefined
+        : (state) => {
+            trace.write = state;
+          },
+    );
     for (;;) {
       const response = yield* Effect.flatMap(connection.read, decodeResponse);
       if (response.id !== id) continue;
-      const answered: Attempt = {
-        _tag: "Result",
-        result: yield* decodeResponseResult(response.result),
-      };
+      const result = yield* decodeResponseResult(response.result);
+      if (trace !== undefined) trace.answer = result;
+      const answered: Attempt = { _tag: "Result", result };
       return answered;
     }
   });
@@ -548,8 +566,9 @@ export const makeClient = Effect.fnUntraced(function* (options: ClientOptions) {
     body: Schema.Json,
     timeoutMs: number = options.requestTimeoutMs,
     beforeBody: () => boolean = ALWAYS_SEND,
+    trace?: RequestTrace,
   ) {
-    return yield* deliverWithin(target, { kind, body, beforeBody }, timeoutMs, readSockets);
+    return yield* deliverWithin(target, { kind, body, beforeBody, trace }, timeoutMs, readSockets);
   });
 
   // A probe batch reads the socket names once, when its first route needs them.
